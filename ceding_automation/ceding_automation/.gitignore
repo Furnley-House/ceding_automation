@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+build/
+
+# Environment files - NEVER commit these
+.env
+.env.local
+.env.*.local
+
+# Prisma
+backend/prisma/migrations/*.sql
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# TypeScript
+*.tsbuildinfo
+
+# Claude Code local settings
+.claude/
+
+# Accidental directories
+{docs,backend

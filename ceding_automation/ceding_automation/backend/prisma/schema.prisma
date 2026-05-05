@@ -1,0 +1,498 @@
+// Ceding Scheme Process Automation - Prisma Schema
+// Furnley House | Version 1.0 | 2026
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum UserRole {
+  CA_TEAM
+  ADVISER
+  PARAPLANNER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum PlanType {
+  PENSION
+  ISA
+  GIA
+  BOND
+  FINAL_SALARY
+  PROTECTION
+}
+
+enum PlanSubType {
+  PERSONAL_PENSION
+  SIPP
+  STAKEHOLDER
+  WORKPLACE
+  GROUP_PENSION
+  SECTION_32
+  OCCUPATIONAL_DC
+  IPP
+  ISA_STOCKS_SHARES
+  ISA_CASH
+  GIA
+  BOND_INVESTMENT
+  BOND_OFFSHORE
+}
+
+enum CaseStatus {
+  DRAFT
+  STAGE_1_LOA_PREP
+  STAGE_2_COLLECT_DETAILS
+  STAGE_3_CRM_SETUP
+  STAGE_4_PROVIDER_REQUEST
+  STAGE_5_CHASING
+  STAGE_6_DOCUMENT_UPLOAD
+  STAGE_7_MISSING_INFO
+  STAGE_8_VERIFY_CHECKLIST
+  STAGE_9_ADVISER_REVIEW
+  STAGE_10_COMPLETE
+  ON_HOLD
+  IN_REVIEW
+  APPROVED
+  CANCELLED
+}
+
+enum LOAStatus {
+  NOT_SENT
+  SENT
+  SIGNED
+}
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  EXTRACTED
+  ERROR
+}
+
+enum ConfidenceLevel {
+  HIGH
+  MEDIUM
+  LOW
+  MISSING
+  CONFLICT
+}
+
+enum FieldStatus {
+  AI_EXTRACTED
+  MANUALLY_ENTERED
+  MANUALLY_OVERRIDDEN
+  APPROVED
+  REVIEW_REQUESTED
+}
+
+enum AuditAction {
+  CASE_CREATED
+  CASE_UPDATED
+  CASE_STATUS_CHANGED
+  CASE_ASSIGNED
+  DOCUMENT_UPLOADED
+  AI_EXTRACTION_RUN
+  FIELD_EXTRACTED
+  FIELD_EDITED
+  FIELD_APPROVED
+  FIELD_REVIEW_REQUESTED
+  CONFLICT_RESOLVED
+  CALL_SCRIPT_GENERATED
+  TRANSCRIPT_UPLOADED
+  TRANSCRIPT_ANALYSED
+  CASE_MARKED_READY
+  CASE_APPROVED
+  CHECKLIST_EXPORTED
+  WORKDRIVE_EXPORTED
+  COMMENT_ADDED
+  CHASE_LOGGED
+  LOA_STATUS_UPDATED
+  ZOHO_TASK_CREATED
+  NOTIFICATION_SENT
+}
+
+enum ContactMethod {
+  PHONE
+  EMAIL
+  POST
+}
+
+enum LOAFormat {
+  ELECTRONIC
+  WET_SIGNATURE
+  EITHER
+}
+
+// ─────────────────────────────────────────────
+// USERS & AUTH
+// ─────────────────────────────────────────────
+
+model User {
+  id            String     @id @default(cuid())
+  email         String     @unique
+  name          String
+  role          UserRole
+  status        UserStatus @default(ACTIVE)
+  ssoId         String?    @unique // Zoho SSO identifier
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  // Relations
+  casesCreated      Case[]         @relation("CaseCreatedBy")
+  casesAssigned     Case[]         @relation("CaseAssignedTo")
+  casesParaplanner  Case[]         @relation("CaseParaplanner")
+  auditLogs         AuditLog[]
+  fieldEdits        ChecklistField[]
+  comments          Comment[]
+  notifications     Notification[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// PROVIDERS
+// ─────────────────────────────────────────────
+
+model Provider {
+  id                  String      @id @default(cuid())
+  name                String      @unique
+  phoneMain           String?
+  phoneCedingDept     String?
+  emailMain           String?
+  emailCedingDept     String?
+  postalAddress       String?
+  loaFormat           LOAFormat   @default(EITHER)
+  isOnOrigo           Boolean     @default(false)
+  acceptedSigType     String?     // "Electronic", "Wet", "Either"
+  planTypePrefixes    String[]    // e.g. ["PP", "ISA", "DC"]
+  notes               String?
+  isActive            Boolean     @default(true)
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  cases               Case[]
+
+  @@map("providers")
+}
+
+// ─────────────────────────────────────────────
+// CASES
+// ─────────────────────────────────────────────
+
+model Case {
+  id                String      @id @default(cuid())
+  caseRef           String      @unique // e.g. FH-2026-001234
+  
+  // Client info (from Zoho CRM)
+  clientName        String
+  clientZohoId      String?
+  zohoCaseId        String?     // Zoho CRM deal/activity ID
+  zohoDeepLink      String?
+  zohoTaskId        String?
+
+  // Plan details
+  planType          PlanType
+  planSubType       PlanSubType?
+  policyRef         String?
+  planStartDate     DateTime?
+
+  // Provider
+  providerId        String?
+  provider          Provider?   @relation(fields: [providerId], references: [id])
+
+  // Status & stage
+  status            CaseStatus  @default(STAGE_1_LOA_PREP)
+  loaStatus         LOAStatus   @default(NOT_SENT)
+  loaSentAt         DateTime?
+  loaSignedAt       DateTime?
+  ragStatus         String?     // "GREEN", "AMBER", "RED"
+
+  // Assignment
+  createdById       String
+  createdBy         User        @relation("CaseCreatedBy", fields: [createdById], references: [id])
+  assignedToId      String?
+  assignedTo        User?       @relation("CaseAssignedTo", fields: [assignedToId], references: [id])
+  paralPlannerId    String?
+  paraplanner       User?       @relation("CaseParaplanner", fields: [paralPlannerId], references: [id])
+
+  // Timestamps
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  readyForReviewAt  DateTime?
+  approvedAt        DateTime?
+  completedAt       DateTime?
+  onHoldReason      String?
+
+  // WorkDrive
+  workDriveExportPath  String?
+  workDriveExportedAt  DateTime?
+
+  // Relations
+  documents         Document[]
+  checklistFields   ChecklistField[]
+  auditLogs         AuditLog[]
+  comments          Comment[]
+  callScripts       CallScript[]
+  transcripts       Transcript[]
+  chaseAttempts     ChaseAttempt[]
+  notifications     Notification[]
+
+  @@index([status])
+  @@index([clientZohoId])
+  @@index([createdById])
+  @@index([assignedToId])
+  @@map("cases")
+}
+
+// ─────────────────────────────────────────────
+// DOCUMENTS
+// ─────────────────────────────────────────────
+
+model Document {
+  id              String          @id @default(cuid())
+  caseId          String
+  case            Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  filename        String
+  originalName    String
+  mimeType        String
+  fileSizeBytes   Int
+  storagePath     String          // Azure Blob Storage path
+  storageUrl      String?         // Pre-signed URL (temp)
+
+  status          DocumentStatus  @default(UPLOADED)
+  uploadedAt      DateTime        @default(now())
+  processedAt     DateTime?
+  errorMessage    String?
+
+  // Extraction metadata
+  pageCount       Int?
+  extractionModel String?         // e.g. "azure-gpt-4o"
+  extractionMs    Int?            // Processing time in ms
+
+  // Relations
+  checklistFields ChecklistField[]  @relation("FieldSourceDocument")
+
+  @@index([caseId])
+  @@map("documents")
+}
+
+// ─────────────────────────────────────────────
+// CHECKLIST TEMPLATE (Admin-configurable)
+// ─────────────────────────────────────────────
+
+model ChecklistTemplate {
+  id              String      @id @default(cuid())
+  planType        PlanType
+  sectionName     String      // e.g. "Pension Details", "Charges", "Benefits"
+  fieldName       String
+  fieldKey        String      // snake_case key used in API
+  fieldType       String      // "text" | "number" | "currency" | "date" | "dropdown" | "yes_no" | "percentage" | "url" | "free_text"
+  dropdownOptions String[]    // If fieldType = "dropdown"
+  isRequired      Boolean     @default(true)
+  displayOrder    Int
+  isActive        Boolean     @default(true)
+  conditionalNote String?     // Tooltip / guidance for CA team
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  checklistFields ChecklistField[]
+
+  @@unique([planType, fieldKey])
+  @@index([planType, isActive])
+  @@map("checklist_templates")
+}
+
+// ─────────────────────────────────────────────
+// CHECKLIST FIELDS (per case instance)
+// ─────────────────────────────────────────────
+
+model ChecklistField {
+  id                String          @id @default(cuid())
+  caseId            String
+  case              Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  templateId        String
+  template          ChecklistTemplate @relation(fields: [templateId], references: [id])
+
+  // Extracted value
+  value             String?
+  aiRawValue        String?         // Original AI-extracted value before edit
+  confidence        ConfidenceLevel @default(MISSING)
+  status            FieldStatus     @default(AI_EXTRACTED)
+
+  // Source citation
+  sourceDocumentId  String?
+  sourceDocument    Document?       @relation("FieldSourceDocument", fields: [sourceDocumentId], references: [id])
+  sourcePageNumber  Int?
+  sourceSection     String?         // Table heading or section name in document
+  sourceQuote       String?         // Raw text snippet extracted
+
+  // Manual override tracking
+  isManuallyOverridden Boolean      @default(false)
+  manualEditedById  String?
+  manualEditedBy    User?           @relation(fields: [manualEditedById], references: [id])
+  manualEditedAt    DateTime?
+
+  // Adviser review
+  isApproved        Boolean         @default(false)
+  approvedAt        DateTime?
+  reviewComment     String?
+  reviewRequestedAt DateTime?
+
+  // Conflict handling
+  hasConflict       Boolean         @default(false)
+  conflictValues    Json?           // Array of conflicting {value, documentId, page}
+
+  // Transcript source
+  fromTranscript    Boolean         @default(false)
+  transcriptId      String?
+
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([caseId, templateId])
+  @@index([caseId])
+  @@index([confidence])
+  @@map("checklist_fields")
+}
+
+// ─────────────────────────────────────────────
+// CALL SCRIPTS
+// ─────────────────────────────────────────────
+
+model CallScript {
+  id              String    @id @default(cuid())
+  caseId          String
+  case            Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  generatedAt     DateTime  @default(now())
+  scriptContent   Json      // Structured script: {greeting, questions: [{field, question, answerSpace}]}
+  missingFieldIds String[]  // ChecklistField IDs this script targets
+  providerPhone   String?
+  providerDept    String?
+
+  @@index([caseId])
+  @@map("call_scripts")
+}
+
+// ─────────────────────────────────────────────
+// TRANSCRIPTS
+// ─────────────────────────────────────────────
+
+model Transcript {
+  id              String    @id @default(cuid())
+  caseId          String
+  case            Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  source          String    // "PALINDROME" | "MANUAL_PASTE" | "FILE_UPLOAD"
+  rawText         String    @db.Text
+  ringCentralId   String?   // Recording ID from RingCentral
+
+  analysedAt      DateTime?
+  fieldsUpdated   Int?      // Count of fields filled from this transcript
+
+  createdAt       DateTime  @default(now())
+
+  @@index([caseId])
+  @@map("transcripts")
+}
+
+// ─────────────────────────────────────────────
+// CHASE ATTEMPTS
+// ─────────────────────────────────────────────
+
+model ChaseAttempt {
+  id              String          @id @default(cuid())
+  caseId          String
+  case            Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  method          ContactMethod
+  notes           String?
+  attemptedAt     DateTime        @default(now())
+  attemptedById   String
+
+  @@index([caseId])
+  @@map("chase_attempts")
+}
+
+// ─────────────────────────────────────────────
+// COMMENTS
+// ─────────────────────────────────────────────
+
+model Comment {
+  id            String    @id @default(cuid())
+  caseId        String
+  case          Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  authorId      String
+  author        User      @relation(fields: [authorId], references: [id])
+  content       String
+  fieldId       String?   // Optional: links comment to specific checklist field
+  createdAt     DateTime  @default(now())
+
+  @@index([caseId])
+  @@map("comments")
+}
+
+// ─────────────────────────────────────────────
+// AUDIT LOG (immutable)
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id          String      @id @default(cuid())
+  caseId      String
+  case        Case        @relation(fields: [caseId], references: [id])
+
+  userId      String
+  user        User        @relation(fields: [userId], references: [id])
+  action      AuditAction
+  fieldId     String?     // ChecklistField ID if action is field-related
+  fieldKey    String?     // Human-readable field name
+  oldValue    String?
+  newValue    String?
+  source      String?     // "AI", "MANUAL", "TRANSCRIPT", "SYSTEM"
+  metadata    Json?       // Extra context (document ID, page, etc.)
+  createdAt   DateTime    @default(now())
+
+  @@index([caseId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────
+
+model Notification {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  caseId      String?
+  case        Case?     @relation(fields: [caseId], references: [id])
+
+  title       String
+  message     String
+  deepLink    String?
+  isRead      Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  readAt      DateTime?
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
