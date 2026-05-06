@@ -5,9 +5,29 @@
 //  2. Never overwrite a field that is `approved` or `review_requested`
 //  3. Otherwise, use the AI value if it has any value, OR keep existing if AI value is null
 
-import type { Tables } from "@/integrations/supabase/types";
-
-export type ChecklistRow = Tables<"checklist_fields">;
+export interface ChecklistRow {
+  id: string;
+  case_id: string;
+  field_key: string;
+  label: string;
+  section: string;
+  value: string | null;
+  confidence: string | null;
+  status: string;
+  source_page?: number | null;
+  evidence_source?: string | null;
+  evidence_ref?: string | null;
+  extracted_at?: string | null;
+  manually_edited?: boolean;
+  notes?: string | null;
+  is_approved?: boolean;
+  approved_at?: string | null;
+  review_comment?: string | null;
+  review_requested_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+}
 
 export interface ExtractedField {
   key: string;

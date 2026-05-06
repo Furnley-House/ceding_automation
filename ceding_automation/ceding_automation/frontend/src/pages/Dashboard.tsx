@@ -18,7 +18,6 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { getCases, updateCase } from "@/services/api";
-import { supabase } from "@/integrations/supabase/client";
 import { useRole } from "@/hooks/useRole";
 import { calculateRag, RAG_STYLES, STATUS_LABELS, STATUS_STYLES } from "@/lib/caseHelpers";
 import { seedDemoData } from "@/lib/seedDemoData";
@@ -160,18 +159,11 @@ const Dashboard = () => {
         sr_prepared_at: new Date().toISOString(),
         zoho_ceding_status: "sr_in_progress",
       } as any);
-      await supabase.from("field_audit").insert({
-        case_id: c.id,
-        action: "sr_blueprint_triggered",
-        source: "dashboard",
-        actor_name: userName,
-        actor_role: role,
-        notes: `Triggered SR Preparation blueprint on task ${c.zoho_task_id ?? "(none)"}`,
-      });
       qc.invalidateQueries({ queryKey: ["cases"] });
       toast.success("SR blueprint triggered", { description: "Opening task…" });
       if (c.zoho_task_id) {
-        const taskUrl = `https://crm.zoho.eu/crm/tab/Tasks/${c.zoho_task_id}`;
+        // const taskUrl = `https://crm.zoho.eu/crm/tab/Tasks/${c.zoho_task_id}`;
+        const taskUrl = `https://crmsandbox.zoho.eu/crm/transactionsandbox/tab/Tasks/${c.zoho_task_id}`;
         window.open(taskUrl, "_blank", "noopener,noreferrer");
       }
     } catch (err) {

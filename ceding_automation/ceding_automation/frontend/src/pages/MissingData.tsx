@@ -1,16 +1,22 @@
 import { SectionHeader, ConfidenceBadge, EvidenceBadge } from "@/components/shared/StatusComponents";
 import { AlertCircle, CheckCircle, Upload, Loader2, Phone, Sparkles, Copy, Save, X, ExternalLink, Edit3, ChevronDown, ChevronUp, MessageSquareText } from "lucide-react";
 import { useState, useEffect, useCallback, useRef } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { api, checklistApi } from "@/lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import type { Tables } from "@/integrations/supabase/types";
+import type { CaseRow } from "@/lib/caseHelpers";
+import type { ChecklistRow } from "@/lib/checklistMerge";
 import type { Confidence, EvidenceSource } from "@/data/seedData";
 
-type ChecklistRow = Tables<"checklist_fields">;
-type CaseRow = Tables<"cases">;
-type ProviderRow = Tables<"providers">;
+interface ProviderRow {
+  id: string;
+  name: string;
+  phone?: string | null;
+  phone_ceding_dept?: string | null;
+  routing_rules?: unknown;
+  [key: string]: unknown;
+}
 
 interface RoutingMatch {
   department: string;
@@ -44,13 +50,11 @@ const MissingData = () => {
   const panelRef = useRef<HTMLDivElement>(null);
   const hasDragged = useRef(false);
 
-  // Initialize panel position to top-right
   useEffect(() => {
     setPanelPos({ x: window.innerWidth - 424, y: 80 });
   }, []);
 
   const onPointerDown = (e: React.PointerEvent) => {
-    // Don't start drag on action buttons
     if ((e.target as HTMLElement).closest('[role="button"]')) return;
     setIsDragging(true);
     hasDragged.current = false;
@@ -71,7 +75,6 @@ const MissingData = () => {
     setIsDragging(false);
   };
 
-  // Load RingCentral Embeddable widget
   useEffect(() => {
     if (document.getElementById("rc-widget-script")) {
       setDialerLoaded(true);
@@ -86,23 +89,27 @@ const MissingData = () => {
   }, []);
 
   const fetchCases = useCallback(async () => {
-    const { data } = await supabase
-      .from("cases")
-      .select("*")
-      .order("created_at", { ascending: false });
-    if (data) setCases(data);
+    try {
+      const res = await api.get("/cases");
+      setCases((res.data as CaseRow[]) ?? []);
+    } catch (err) {
+      console.error("fetchCases error", err);
+    }
   }, []);
 
   const fetchFields = useCallback(async (caseId: string) => {
     setLoading(true);
-    const { data } = await supabase
-      .from("checklist_fields")
-      .select("*")
-      .eq("case_id", caseId)
-      .in("status", ["missing", "needs_review"])
-      .order("section", { ascending: true });
-    if (data) setFields(data);
-    setLoading(false);
+    try {
+      const res = await api.get(`/cases/${caseId}/checklist`);
+      const raw = res.data as { fields?: ChecklistRow[] };
+      const all = raw.fields ?? [];
+      // Keep only missing/review fields
+      setFields(all.filter((f) => f.status === "missing" || f.status === "needs_review" || f.confidence === "MISSING" || f.confidence === "LOW"));
+    } catch (err) {
+      console.error("fetchFields error", err);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => { fetchCases(); }, [fetchCases]);
@@ -114,7 +121,6 @@ const MissingData = () => {
     }
   }, [cases, selectedCaseId]);
 
-  // Fetch provider routing when case changes
   useEffect(() => {
     if (selectedCaseId) {
       fetchFields(selectedCaseId);
@@ -125,72 +131,73 @@ const MissingData = () => {
 
       const theCase = cases.find(c => c.id === selectedCaseId);
       if (theCase?.provider_id) {
-        supabase.from("providers").select("*").eq("id", theCase.provider_id).single().then(({ data }) => {
+        api.get(`/providers/${theCase.provider_id}`).then(({ data }) => {
           if (data) {
-            setProvider(data);
-            matchRouting(data, theCase.plan_number);
+            setProvider(data as ProviderRow);
+            matchRouting(data as ProviderRow, theCase.plan_number);
           }
-        });
+        }).catch(() => {});
       } else if (theCase?.provider_name) {
-        // Fallback: match by name
-        supabase.from("providers").select("*").ilike("name", `%${theCase.provider_name}%`).limit(1).then(({ data }) => {
-          if (data?.[0]) {
-            setProvider(data[0]);
-            matchRouting(data[0], theCase.plan_number);
+        api.get("/providers").then(({ data }) => {
+          const providers = (data as ProviderRow[]) ?? [];
+          const match = providers.find(p =>
+            (p.name ?? "").toLowerCase().includes(theCase.provider_name.toLowerCase())
+          );
+          if (match) {
+            setProvider(match);
+            matchRouting(match, theCase.plan_number);
           }
-        });
+        }).catch(() => {});
       }
     }
   }, [selectedCaseId, fetchFields, cases]);
 
   const matchRouting = (prov: ProviderRow, planNumber: string) => {
     const rules = prov.routing_rules as any[];
-    if (!rules || !Array.isArray(rules)) return;
-    // Find the best matching prefix
+    if (!rules || !Array.isArray(rules)) {
+      setCallNumber(prov.phone_ceding_dept ?? prov.phone ?? "");
+      return;
+    }
     const sorted = [...rules].sort((a, b) => (b.planPrefix?.length ?? 0) - (a.planPrefix?.length ?? 0));
     const match = sorted.find(r => planNumber.toUpperCase().startsWith(r.planPrefix?.toUpperCase?.() ?? ""));
     if (match) {
       setRoutingMatch({ department: match.department, phone: match.phone, email: match.email, planPrefix: match.planPrefix });
       setCallNumber(match.phone);
     } else {
-      // Fallback to provider general phone
-      setCallNumber(prov.phone || "");
+      setCallNumber(prov.phone_ceding_dept ?? prov.phone ?? "");
     }
   };
 
   const selectedCase = cases.find(c => c.id === selectedCaseId);
-  const missingFields = fields.filter(f => f.status === "missing");
-  const reviewFields = fields.filter(f => f.status === "needs_review");
+  const missingFields = fields.filter(f => f.status === "missing" || f.confidence === "MISSING");
+  const reviewFields = fields.filter(f => f.status === "needs_review" || f.confidence === "LOW");
 
-  // ── AI Script (now includes both missing + review fields) ──
   const generateScript = async () => {
-    if (missingFields.length === 0 && reviewFields.length === 0) {
+    if (!selectedCaseId || (missingFields.length === 0 && reviewFields.length === 0)) {
       toast.info("No fields to generate a script for");
       return;
     }
     setScriptLoading(true);
     try {
-      const { data, error } = await supabase.functions.invoke("generate-script", {
-        body: {
-          fields: missingFields.map(f => ({ label: f.label, section: f.section })),
-          reviewFields: reviewFields.map(f => ({ label: f.label, section: f.section, value: f.value, confidence: f.confidence })),
-          clientName: selectedCase?.client_name,
-          providerName: selectedCase?.provider_name,
-          planNumber: selectedCase?.plan_number,
-        },
-      });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-      setScript(data.script);
+      const res = await api.post(`/cases/${selectedCaseId}/call-script`);
+      const saved = res.data as { scriptContent?: { greeting?: string; questions?: { question: string }[]; closing?: string } };
+      const sc = saved.scriptContent;
+      if (sc) {
+        const parts = [
+          sc.greeting,
+          sc.questions?.map((q, i) => `${i + 1}. ${q.question}`).join("\n"),
+          sc.closing,
+        ].filter(Boolean);
+        setScript(parts.join("\n\n"));
+      }
       toast.success("Script generated");
     } catch (e: any) {
-      toast.error(e.message || "Failed to generate script");
+      toast.error(e?.response?.data?.error ?? e.message ?? "Failed to generate script");
     } finally {
       setScriptLoading(false);
     }
   };
 
-  // ── Inline edit ──
   const startEdit = (field: ChecklistRow) => {
     setEditingFieldId(field.id);
     setEditValue(field.value ?? "");
@@ -204,46 +211,32 @@ const MissingData = () => {
   const saveEdit = async (field: ChecklistRow) => {
     const val = editValue.trim();
     if (!val) { toast.error("Please enter a value"); return; }
+    if (!selectedCaseId) return;
     setSaving(true);
-    const user = (await supabase.auth.getUser()).data.user;
-    const updates: Partial<ChecklistRow> = {
-      value: val,
-      status: "complete",
-      confidence: "high",
-      evidence_source: "call",
-      evidence_ref: "Obtained via provider call",
-      reviewed_by: user?.id ?? null,
-      notes: field.notes ? `${field.notes}\n✅ Value entered: "${val}"` : `✅ Value entered: "${val}"`,
-    };
-    const { error } = await supabase.from("checklist_fields").update(updates).eq("id", field.id);
-    if (error) {
-      toast.error("Failed to save");
-    } else {
+    try {
+      await api.patch(`/cases/${selectedCaseId}/checklist/${field.id}`, { value: val });
       toast.success(`"${field.label}" updated to "${val}"`);
       setFields(prev => prev.filter(f => f.id !== field.id));
+    } catch {
+      toast.error("Failed to save");
+    } finally {
+      setSaving(false);
+      setEditingFieldId(null);
     }
-    setSaving(false);
-    setEditingFieldId(null);
   };
 
-  // ── Confirm (for review fields) ──
   const handleConfirm = async (field: ChecklistRow) => {
+    if (!selectedCaseId) return;
     setConfirmingId(field.id);
-    const user = (await supabase.auth.getUser()).data.user;
-    const updates: Partial<ChecklistRow> = {
-      status: "complete",
-      confidence: "high",
-      reviewed_by: user?.id ?? null,
-      notes: field.notes ? `${field.notes}\n✅ Confirmed via Missing Data` : "✅ Confirmed via Missing Data",
-    };
-    const { error } = await supabase.from("checklist_fields").update(updates).eq("id", field.id);
-    if (error) {
-      toast.error("Failed to update");
-    } else {
+    try {
+      await checklistApi.approveField(selectedCaseId, field.id);
       toast.success(`"${field.label}" confirmed`);
       setFields(prev => prev.filter(f => f.id !== field.id));
+    } catch {
+      toast.error("Failed to update");
+    } finally {
+      setConfirmingId(null);
     }
-    setConfirmingId(null);
   };
 
   const copyScript = () => {
@@ -253,13 +246,9 @@ const MissingData = () => {
     }
   };
 
-  // Trigger RingCentral dialer or fallback to tel: link
   const handleCall = (phoneNumber?: string) => {
-    const number = phoneNumber || callNumber || provider?.phone || "";
-    if (!number) {
-      toast.error("No phone number available");
-      return;
-    }
+    const number = phoneNumber || callNumber || provider?.phone_ceding_dept || provider?.phone || "";
+    if (!number) { toast.error("No phone number available"); return; }
     if (dialerLoaded && (window as any).RCAdapter) {
       (window as any).RCAdapter.clickToCall(number, true);
     } else {
@@ -267,9 +256,7 @@ const MissingData = () => {
     }
   };
 
-  const promptAndCall = () => {
-    setShowCallPrompt(true);
-  };
+  const promptAndCall = () => { setShowCallPrompt(true); };
 
   return (
     <div className="animate-slide-in">
@@ -292,7 +279,6 @@ const MissingData = () => {
         }
       />
 
-      {/* Case selector */}
       <div className="mb-6">
         <label className="text-xs font-medium text-muted-foreground mb-1 block">Select Case</label>
         <Select value={selectedCaseId ?? ""} onValueChange={id => setSelectedCaseId(id)}>
@@ -309,7 +295,6 @@ const MissingData = () => {
         </Select>
       </div>
 
-      {/* Call prompt with routing match */}
       {showCallPrompt && (
         <div className="mb-6 rounded-xl border border-border bg-card p-5 animate-fade-in">
           <div className="flex items-start justify-between gap-4">
@@ -351,7 +336,6 @@ const MissingData = () => {
         </div>
       )}
 
-      {/* Empty state */}
       {!loading && fields.length === 0 && selectedCaseId && (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <CheckCircle className="mb-4 h-12 w-12 text-success/50" />
@@ -365,7 +349,6 @@ const MissingData = () => {
         </div>
       )}
 
-      {/* AI Script — Generate button (inline) */}
       {(missingFields.length > 0 || reviewFields.length > 0) && !script && (
         <div className="mb-8 rounded-xl border border-border bg-card overflow-hidden">
           <div className="px-5 py-4 flex items-center justify-between">
@@ -389,7 +372,6 @@ const MissingData = () => {
         </div>
       )}
 
-      {/* Floating sticky script panel */}
       {script && (
         <div
           ref={panelRef}
@@ -397,7 +379,6 @@ const MissingData = () => {
           style={{ left: panelPos.x, top: panelPos.y, width: 400 }}
         >
           <div className="rounded-2xl border border-border bg-card shadow-2xl shadow-primary/10 overflow-hidden">
-            {/* Draggable header */}
             <div
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
@@ -410,34 +391,18 @@ const MissingData = () => {
                 Call Script
               </span>
               <div className="flex items-center gap-1">
-                <span
-                  role="button"
-                  onClick={e => { e.stopPropagation(); copyScript(); }}
-                  className="rounded p-1 text-muted-foreground hover:bg-muted transition-colors"
-                  title="Copy to clipboard"
-                >
+                <span role="button" onClick={e => { e.stopPropagation(); copyScript(); }} className="rounded p-1 text-muted-foreground hover:bg-muted transition-colors" title="Copy to clipboard">
                   <Copy className="h-3.5 w-3.5" />
                 </span>
-                <span
-                  role="button"
-                  onClick={e => { e.stopPropagation(); generateScript(); }}
-                  className="rounded p-1 text-muted-foreground hover:bg-muted transition-colors"
-                  title="Regenerate"
-                >
+                <span role="button" onClick={e => { e.stopPropagation(); generateScript(); }} className="rounded p-1 text-muted-foreground hover:bg-muted transition-colors" title="Regenerate">
                   {scriptLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
                 </span>
-                <span
-                  role="button"
-                  onClick={e => { e.stopPropagation(); setScript(null); }}
-                  className="rounded p-1 text-muted-foreground hover:bg-muted transition-colors"
-                  title="Dismiss"
-                >
+                <span role="button" onClick={e => { e.stopPropagation(); setScript(null); }} className="rounded p-1 text-muted-foreground hover:bg-muted transition-colors" title="Dismiss">
                   <X className="h-3.5 w-3.5" />
                 </span>
                 {scriptExpanded ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronUp className="h-4 w-4 text-muted-foreground" />}
               </div>
             </div>
-            {/* Collapsible body */}
             {scriptExpanded && (
               <div className="max-h-[50vh] overflow-y-auto p-4">
                 <p className="text-sm text-foreground whitespace-pre-line leading-relaxed">{script}</p>
@@ -447,7 +412,6 @@ const MissingData = () => {
         </div>
       )}
 
-      {/* Missing Fields */}
       {missingFields.length > 0 && (
         <div className="mb-8">
           <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-overdue">
@@ -465,54 +429,21 @@ const MissingData = () => {
                     </div>
                     <span className="inline-flex items-center rounded-full bg-overdue/15 px-2.5 py-0.5 text-xs font-semibold text-overdue">Missing</span>
                   </div>
-                  {field.evidence_ref && (
-                    <p className="text-xs text-muted-foreground mb-2">📄 {field.evidence_ref}</p>
-                  )}
-                  {field.notes && (
-                    <p className="text-xs text-muted-foreground mb-2 whitespace-pre-line">{field.notes}</p>
-                  )}
-
+                  {field.evidence_ref && <p className="text-xs text-muted-foreground mb-2">📄 {field.evidence_ref}</p>}
+                  {field.notes && <p className="text-xs text-muted-foreground mb-2 whitespace-pre-line">{field.notes}</p>}
                   {isEditing ? (
                     <div className="flex items-center gap-2 mt-2">
-                      <Input
-                        value={editValue}
-                        onChange={e => setEditValue(e.target.value)}
-                        className="h-8 text-sm flex-1"
-                        placeholder={`Enter value for ${field.label}…`}
-                        autoFocus
-                        onKeyDown={e => {
-                          if (e.key === "Enter") saveEdit(field);
-                          if (e.key === "Escape") cancelEdit();
-                        }}
-                      />
-                      <button
-                        onClick={() => saveEdit(field)}
-                        disabled={saving}
-                        className="rounded p-1.5 text-success hover:bg-success/10 transition-colors disabled:opacity-50"
-                        title="Save"
-                      >
-                        <Save className="h-4 w-4" />
-                      </button>
-                      <button
-                        onClick={cancelEdit}
-                        className="rounded p-1.5 text-muted-foreground hover:bg-muted transition-colors"
-                        title="Cancel"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
+                      <Input value={editValue} onChange={e => setEditValue(e.target.value)} className="h-8 text-sm flex-1" placeholder={`Enter value for ${field.label}…`} autoFocus
+                        onKeyDown={e => { if (e.key === "Enter") saveEdit(field); if (e.key === "Escape") cancelEdit(); }} />
+                      <button onClick={() => saveEdit(field)} disabled={saving} className="rounded p-1.5 text-success hover:bg-success/10 transition-colors disabled:opacity-50" title="Save"><Save className="h-4 w-4" /></button>
+                      <button onClick={cancelEdit} className="rounded p-1.5 text-muted-foreground hover:bg-muted transition-colors" title="Cancel"><X className="h-4 w-4" /></button>
                     </div>
                   ) : (
                     <div className="flex gap-2">
-                      <button
-                        onClick={() => startEdit(field)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors"
-                      >
+                      <button onClick={() => startEdit(field)} className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
                         <Edit3 className="h-3.5 w-3.5 text-primary" /> Enter Value
                       </button>
-                      <button
-                        onClick={promptAndCall}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors"
-                      >
+                      <button onClick={promptAndCall} className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
                         <Phone className="h-3.5 w-3.5 text-primary" /> Call
                       </button>
                     </div>
@@ -524,7 +455,6 @@ const MissingData = () => {
         </div>
       )}
 
-      {/* Needs Review */}
       {reviewFields.length > 0 && (
         <div>
           <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-warning">
@@ -548,51 +478,18 @@ const MissingData = () => {
                       {field.evidence_source && <EvidenceBadge source={field.evidence_source as EvidenceSource} />}
                     </div>
                     <div className="flex gap-1 shrink-0">
-                      <button
-                        onClick={() => startEdit(field)}
-                        className="rounded p-1 text-primary hover:bg-primary/10 transition-colors"
-                        title="Edit value"
-                      >
-                        <Edit3 className="h-4 w-4" />
-                      </button>
-                      <button
-                        onClick={() => handleConfirm(field)}
-                        disabled={confirmingId === field.id}
-                        className="rounded p-1 text-success hover:bg-success/10 transition-colors disabled:opacity-50"
-                        title="Confirm value is correct"
-                      >
+                      <button onClick={() => startEdit(field)} className="rounded p-1 text-primary hover:bg-primary/10 transition-colors" title="Edit value"><Edit3 className="h-4 w-4" /></button>
+                      <button onClick={() => handleConfirm(field)} disabled={confirmingId === field.id} className="rounded p-1 text-success hover:bg-success/10 transition-colors disabled:opacity-50" title="Confirm value is correct">
                         {confirmingId === field.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
                       </button>
                     </div>
                   </div>
                   {isEditing && (
                     <div className="flex items-center gap-2 mt-3 ml-6">
-                      <Input
-                        value={editValue}
-                        onChange={e => setEditValue(e.target.value)}
-                        className="h-8 text-sm flex-1"
-                        placeholder={`Correct value for ${field.label}…`}
-                        autoFocus
-                        onKeyDown={e => {
-                          if (e.key === "Enter") saveEdit(field);
-                          if (e.key === "Escape") cancelEdit();
-                        }}
-                      />
-                      <button
-                        onClick={() => saveEdit(field)}
-                        disabled={saving}
-                        className="rounded p-1.5 text-success hover:bg-success/10 transition-colors disabled:opacity-50"
-                        title="Save"
-                      >
-                        <Save className="h-4 w-4" />
-                      </button>
-                      <button
-                        onClick={cancelEdit}
-                        className="rounded p-1.5 text-muted-foreground hover:bg-muted transition-colors"
-                        title="Cancel"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
+                      <Input value={editValue} onChange={e => setEditValue(e.target.value)} className="h-8 text-sm flex-1" placeholder={`Correct value for ${field.label}…`} autoFocus
+                        onKeyDown={e => { if (e.key === "Enter") saveEdit(field); if (e.key === "Escape") cancelEdit(); }} />
+                      <button onClick={() => saveEdit(field)} disabled={saving} className="rounded p-1.5 text-success hover:bg-success/10 transition-colors disabled:opacity-50" title="Save"><Save className="h-4 w-4" /></button>
+                      <button onClick={cancelEdit} className="rounded p-1.5 text-muted-foreground hover:bg-muted transition-colors" title="Cancel"><X className="h-4 w-4" /></button>
                     </div>
                   )}
                 </div>

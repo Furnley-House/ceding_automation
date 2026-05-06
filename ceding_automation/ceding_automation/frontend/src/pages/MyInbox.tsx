@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Inbox, ChevronRight, Calendar, AlertCircle } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { api } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { PARAPLANNERS } from "@/lib/paraplanners";
 import { Button } from "@/components/ui/button";
@@ -20,27 +20,20 @@ const MyInbox = () => {
   const { data: cases = [], isLoading } = useQuery({
     queryKey: ["my-inbox", me.user_id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("cases")
-        .select("*")
-        .eq("owner_id", me.user_id)
-        .order("last_activity_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as CaseRow[];
+      const res = await api.get("/cases");
+      const all = (res.data as CaseRow[]) ?? [];
+      // Filter to cases where owner matches this user
+      return all
+        .filter((c) => c.owner_id === me.user_id)
+        .sort((a, b) =>
+          new Date(b.last_activity_at ?? b.created_at ?? 0).getTime() -
+          new Date(a.last_activity_at ?? a.created_at ?? 0).getTime()
+        );
     },
   });
 
-  const { data: tasks = [] } = useQuery({
-    queryKey: ["my-inbox-tasks", me.user_id],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("tasks")
-        .select("case_id, due_date, completed")
-        .eq("assigned_to", me.user_id);
-      if (error) throw error;
-      return data ?? [];
-    },
-  });
+  // Tasks not implemented in backend — return empty so due-date logic is a no-op
+  const tasks: { case_id: string; due_date: string; completed: boolean }[] = [];
 
   const dueByCase = useMemo(() => {
     const m = new Map<string, string>();

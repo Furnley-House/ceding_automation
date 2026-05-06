@@ -1,8 +1,23 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "@/lib/api";
-import type { Tables } from "@/integrations/supabase/types";
 
-export type DocumentRow = Tables<"documents">;
+export interface DocumentRow {
+  id: string;
+  case_id?: string | null;
+  file_name?: string | null;
+  file_path?: string | null;
+  filename?: string | null;
+  original_name?: string | null;
+  status?: string | null;
+  uploaded_by?: string | null;
+  document_type?: string | null;
+  provider_name?: string | null;
+  fields_extracted?: number | null;
+  avg_confidence?: number | null;
+  extracted_data?: unknown | null;
+  created_at?: string;
+  [key: string]: unknown;
+}
 
 function toSnake(s: string): string {
   return s.replace(/([A-Z])/g, "_$1").toLowerCase();

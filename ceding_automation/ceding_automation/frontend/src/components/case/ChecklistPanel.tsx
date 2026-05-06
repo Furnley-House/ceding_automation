@@ -5,10 +5,7 @@ import { getTemplate, groupBySection, type ChecklistFieldDef } from "@/lib/check
 import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { useChecklistFields } from "@/hooks/useChecklistFields";
-import type { Tables } from "@/integrations/supabase/types";
-
-type ChecklistRow = Tables<"checklist_fields">;
+import { useChecklistFields, type ChecklistRow } from "@/hooks/useChecklistFields";
 
 interface Props {
   planType: string;

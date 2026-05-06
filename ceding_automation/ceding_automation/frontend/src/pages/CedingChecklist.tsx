@@ -2,15 +2,13 @@ import { ConfidenceBadge, EvidenceBadge, FieldStatusIcon, SectionHeader } from "
 import { useState, useEffect, useCallback } from "react";
 import { MessageSquare, Check, RotateCcw, Save, X, FileText, Loader2 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
-import { supabase } from "@/integrations/supabase/client";
+import { api, checklistApi } from "@/lib/api";
 import { toast } from "sonner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
-import type { Tables } from "@/integrations/supabase/types";
+import type { CaseRow } from "@/lib/caseHelpers";
+import type { ChecklistRow } from "@/lib/checklistMerge";
 import type { Confidence, EvidenceSource } from "@/data/seedData";
-
-type ChecklistRow = Tables<"checklist_fields">;
-type CaseRow = Tables<"cases">;
 
 const CedingChecklist = () => {
   const [mode, setMode] = useState<"edit" | "review">("review");
@@ -26,53 +24,34 @@ const CedingChecklist = () => {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"all" | "complete" | "needs_review" | "missing">("all");
 
-  // Fetch cases that have checklist fields
   const fetchCases = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("cases")
-      .select("*")
-      .order("created_at", { ascending: false });
-    if (!error && data) setCases(data);
+    try {
+      const res = await api.get("/cases");
+      setCases((res.data as CaseRow[]) ?? []);
+    } catch {
+      setCases([]);
+    }
   }, []);
 
-  // Also check documents with extracted_data but no case (standalone extractions)
-  const [standaloneDocs, setStandaloneDocs] = useState<Tables<"documents">[]>([]);
-
-  const fetchStandaloneDocs = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("documents")
-      .select("*")
-      .is("case_id", null)
-      .eq("status", "extracted")
-      .order("created_at", { ascending: false });
-    if (!error && data) setStandaloneDocs(data);
-  }, []);
-
-  // Fetch checklist fields for selected case
   const fetchFields = useCallback(async (caseId: string) => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("checklist_fields")
-      .select("*")
-      .eq("case_id", caseId)
-      .order("section", { ascending: true });
-    if (!error && data) setFields(data);
+    try {
+      const res = await api.get(`/cases/${caseId}/checklist`);
+      setFields((res.data as ChecklistRow[]) ?? []);
+    } catch {
+      setFields([]);
+    }
     setLoading(false);
   }, []);
 
   useEffect(() => {
     fetchCases();
-    fetchStandaloneDocs();
-  }, [fetchCases, fetchStandaloneDocs]);
+  }, [fetchCases]);
 
-  // Auto-select first case that has fields
+  // Auto-select first case
   useEffect(() => {
     if (selectedCaseId) return;
-    if (cases.length > 0) {
-      // Prefer cases with extraction done
-      const withExtraction = cases.find(c => c.ai_extraction_date);
-      setSelectedCaseId(withExtraction?.id ?? cases[0].id);
-    }
+    if (cases.length > 0) setSelectedCaseId(cases[0].id);
   }, [cases, selectedCaseId]);
 
   useEffect(() => {
@@ -101,26 +80,19 @@ const CedingChecklist = () => {
   const saveEdit = async (field: ChecklistRow) => {
     setSaving(true);
     const newValue = editValue.trim();
-    const updates: Partial<ChecklistRow> = {
+    const updates = {
       value: newValue || null,
       status: newValue ? "complete" : "missing",
       confidence: newValue ? "high" : null,
       evidence_source: newValue ? "manual" : null,
       evidence_ref: newValue ? "Manually entered" : null,
     };
-
-    const { error } = await supabase
-      .from("checklist_fields")
-      .update(updates)
-      .eq("id", field.id);
-
-    if (error) {
-      toast.error("Failed to save");
-    } else {
+    try {
+      await api.patch(`/cases/${selectedCaseId}/checklist/${field.id}`, updates);
       toast.success(`"${field.label}" updated`);
-      setFields(prev =>
-        prev.map(f => (f.id === field.id ? { ...f, ...updates } : f))
-      );
+      setFields(prev => prev.map(f => f.id === field.id ? { ...f, ...updates } : f));
+    } catch {
+      toast.error("Failed to save");
     }
     setSaving(false);
     setEditingFieldId(null);
@@ -129,50 +101,28 @@ const CedingChecklist = () => {
   // ── Review actions ──
   const handleApprove = async (field: ChecklistRow) => {
     setActionLoading(field.id);
-    const user = (await supabase.auth.getUser()).data.user;
-    const { error } = await supabase
-      .from("checklist_fields")
-      .update({
-        status: "complete",
-        reviewed_by: user?.id ?? null,
-        notes: field.notes ? `${field.notes}\n✅ Approved by reviewer` : "✅ Approved by reviewer",
-      })
-      .eq("id", field.id);
-    if (error) {
-      toast.error("Failed to approve");
-    } else {
+    try {
+      await checklistApi.approveField(selectedCaseId!, field.id);
       toast.success(`"${field.label}" approved`);
       setFields(prev =>
-        prev.map(f =>
-          f.id === field.id
-            ? { ...f, status: "complete", reviewed_by: user?.id ?? null, notes: field.notes ? `${field.notes}\n✅ Approved by reviewer` : "✅ Approved by reviewer" }
-            : f
-        )
+        prev.map(f => f.id === field.id ? { ...f, status: "complete" } : f)
       );
+    } catch {
+      toast.error("Failed to approve");
     }
     setActionLoading(null);
   };
 
   const handleRequestFollowUp = async (field: ChecklistRow) => {
     setActionLoading(field.id);
-    const { error } = await supabase
-      .from("checklist_fields")
-      .update({
-        status: "needs_review",
-        notes: field.notes ? `${field.notes}\n🔄 Follow-up requested` : "🔄 Follow-up requested",
-      })
-      .eq("id", field.id);
-    if (error) {
-      toast.error("Failed to update");
-    } else {
+    try {
+      await checklistApi.requestReview(selectedCaseId!, field.id, "Follow-up requested");
       toast.success(`Follow-up requested for "${field.label}"`);
       setFields(prev =>
-        prev.map(f =>
-          f.id === field.id
-            ? { ...f, status: "needs_review", notes: field.notes ? `${field.notes}\n🔄 Follow-up requested` : "🔄 Follow-up requested" }
-            : f
-        )
+        prev.map(f => f.id === field.id ? { ...f, status: "needs_review" } : f)
       );
+    } catch {
+      toast.error("Failed to update");
     }
     setActionLoading(null);
   };
@@ -184,17 +134,12 @@ const CedingChecklist = () => {
     const newNotes = existingNotes
       ? `${existingNotes}\n💬 ${commentText.trim()}`
       : `💬 ${commentText.trim()}`;
-    const { error } = await supabase
-      .from("checklist_fields")
-      .update({ notes: newNotes })
-      .eq("id", field.id);
-    if (error) {
-      toast.error("Failed to save comment");
-    } else {
+    try {
+      await api.patch(`/cases/${selectedCaseId}/checklist/${field.id}`, { notes: newNotes });
       toast.success("Comment saved");
-      setFields(prev =>
-        prev.map(f => (f.id === field.id ? { ...f, notes: newNotes } : f))
-      );
+      setFields(prev => prev.map(f => f.id === field.id ? { ...f, notes: newNotes } : f));
+    } catch {
+      toast.error("Failed to save comment");
     }
     setCommentFieldId(null);
     setCommentText("");
@@ -255,26 +200,6 @@ const CedingChecklist = () => {
           </SelectContent>
         </Select>
       </div>
-
-      {/* Standalone extracted docs notice */}
-      {standaloneDocs.length > 0 && (
-        <div className="mb-6 rounded-xl border border-border bg-muted/30 p-4">
-          <p className="text-sm font-medium text-foreground mb-2">
-            <FileText className="inline h-4 w-4 mr-1 text-primary" />
-            {standaloneDocs.length} extracted document{standaloneDocs.length > 1 ? "s" : ""} not linked to a case
-          </p>
-          <p className="text-xs text-muted-foreground">
-            These documents were extracted but have no associated case. Create a case and link the document to populate its checklist.
-          </p>
-          <ul className="mt-2 space-y-1">
-            {standaloneDocs.map(d => (
-              <li key={d.id} className="text-xs text-muted-foreground">
-                • {d.file_name} — {d.fields_extracted ?? 0} fields extracted
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {/* No case selected or no fields */}
       {!selectedCaseId && cases.length === 0 && !loading && (

@@ -1,9 +1,12 @@
 // backend/src/routes/crm.ts
 import { Router, Request, Response } from 'express';
+import { PrismaClient, CaseStatus, PlanType } from '@prisma/client';
 import { requireAuth } from '../middleware/auth';
 import * as zoho from '../services/zohoCrm';
+import { mapZohoTaskToCase } from '../services/zohoCrm';
 
 const router = Router();
+const prisma = new PrismaClient();
 
 const redirectUri = () =>
   process.env.ZOHO_REDIRECT_URI ?? 'http://localhost:3001/api/crm/oauth/callback';
@@ -68,6 +71,134 @@ router.post('/tasks', requireAuth, async (req: Request, res: Response) => {
   try {
     const data = await zoho.createTask(req.body);
     res.status(201).json(data);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── Import a Zoho task as a Case ────────────────────────────
+// Pass ?dryRun=true to preview the mapping without writing to the DB.
+// If a case with the same zohoTaskId already exists, return it instead of duplicating.
+router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: Response) => {
+  const taskId = req.params.id;
+  const dryRun = String(req.query.dryRun ?? '') === 'true';
+
+  try {
+    // 1. Fetch the task from Zoho
+    const raw = (await zoho.getTask(taskId)) as { data?: unknown[] };
+    const taskRecord = Array.isArray(raw?.data) ? (raw.data[0] as Record<string, unknown>) : null;
+    if (!taskRecord) {
+      return res.status(404).json({ error: 'Zoho task not found', raw });
+    }
+
+    // 2. Map the task fields → Case fields (best-effort, configurable via env)
+    const mapping = mapZohoTaskToCase(taskRecord);
+
+    // 3. Look up provider by name (if any)
+    let providerId: string | undefined;
+    if (mapping.providerName) {
+      const provider = await prisma.provider.findFirst({
+        where: { name: { equals: mapping.providerName, mode: 'insensitive' } },
+      });
+      providerId = provider?.id;
+    }
+
+    // 4. Resolve the Zoho task's Owner to an app user, by email first then by name.
+    //    If no match, fall back to the importer (req.user). This preserves Zoho's
+    //    "task ownership" inside our app so the CA who clicked through from CRM
+    //    sees the case as assigned to themselves.
+    let assignedAppUserId = req.user!.id;
+    let ownerResolution: 'email' | 'name' | 'fallback-caller' = 'fallback-caller';
+    if (mapping.ownerEmail) {
+      const byEmail = await prisma.user.findUnique({
+        where: { email: mapping.ownerEmail.toLowerCase() },
+      });
+      if (byEmail && byEmail.status === 'ACTIVE') {
+        assignedAppUserId = byEmail.id;
+        ownerResolution = 'email';
+      }
+    }
+    if (ownerResolution === 'fallback-caller' && mapping.ownerName) {
+      const byName = await prisma.user.findFirst({
+        where: { name: { equals: mapping.ownerName, mode: 'insensitive' }, status: 'ACTIVE' },
+      });
+      if (byName) {
+        assignedAppUserId = byName.id;
+        ownerResolution = 'name';
+      }
+    }
+
+    // 5. Re-use existing case if this Zoho task was already imported
+    const existing = await prisma.case.findFirst({
+      where: { zohoTaskId: taskId },
+      include: { provider: true },
+    });
+    if (existing) {
+      return res.json({
+        case: existing,
+        mapping,
+        zohoTask: taskRecord,
+        message: 'Case already exists for this Zoho task',
+        alreadyExisted: true,
+      });
+    }
+
+    if (dryRun) {
+      return res.json({
+        dryRun: true,
+        mapping,
+        providerResolvedId: providerId ?? null,
+        assignedAppUserId,
+        ownerResolution,
+        zohoTask: taskRecord,
+      });
+    }
+
+    // 6. Create the case
+    const count = await prisma.case.count();
+    const caseRef = `FH-${new Date().getFullYear()}-${String(count + 1).padStart(6, '0')}`;
+
+    const newCase = await prisma.case.create({
+      data: {
+        caseRef,
+        clientName: mapping.clientName || `Imported task ${taskId}`,
+        clientZohoId: mapping.clientZohoId ?? null,
+        planType: mapping.planType,
+        policyRef: mapping.policyRef ?? null,
+        providerId: providerId ?? null,
+        zohoTaskId: taskId,
+        zohoCaseId: mapping.zohoCaseId ?? null,
+        zohoDeepLink: mapping.zohoDeepLink ?? null,
+        createdById: req.user!.id,            // who triggered the import
+        assignedToId: assignedAppUserId,      // who owns the work (matches Zoho)
+        status: CaseStatus.STAGE_1_LOA_PREP,
+      },
+      include: { provider: true, createdBy: true, assignedTo: true },
+    });
+
+    // 7. Initialise checklist fields from active templates
+    const templates = await prisma.checklistTemplate.findMany({
+      where: { planType: mapping.planType, isActive: true },
+    });
+    if (templates.length > 0) {
+      await prisma.checklistField.createMany({
+        data: templates.map((t) => ({ caseId: newCase.id, templateId: t.id })),
+      });
+    }
+
+    // 8. Audit log
+    await prisma.auditLog.create({
+      data: {
+        caseId: newCase.id,
+        userId: req.user!.id,
+        action: 'CASE_CREATED',
+        source: 'SYSTEM',
+        newValue: `Imported from Zoho task ${taskId}`,
+        metadata: { zohoTaskId: taskId, mapping, ownerResolution, assignedAppUserId },
+      },
+    });
+
+    res.status(201).json({ case: newCase, mapping, zohoTask: taskRecord, ownerResolution });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

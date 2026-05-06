@@ -138,6 +138,143 @@ router.get("/:id", requireAuth, async (req: Request, res: Response) => {
   res.json(caseRecord);
 });
 
+// ── General Case Update (frontend "Mark complete & continue", etc.) ────
+// The UI was originally built against a Supabase schema with fields like
+// `current_stage`, `stages_completed`, and a string-status enum ("pending_loa",
+// "awaiting_documents", …). This endpoint accepts those legacy names and
+// translates them to the Prisma Case shape so the existing UI keeps working
+// without a frontend rewrite.
+const STAGE_TO_STATUS: Record<number, CaseStatus> = {
+  1: CaseStatus.STAGE_1_LOA_PREP,
+  2: CaseStatus.STAGE_2_COLLECT_DETAILS,
+  3: CaseStatus.STAGE_3_CRM_SETUP,
+  4: CaseStatus.STAGE_4_PROVIDER_REQUEST,
+  5: CaseStatus.STAGE_5_CHASING,
+  6: CaseStatus.STAGE_6_DOCUMENT_UPLOAD,
+  7: CaseStatus.STAGE_7_MISSING_INFO,
+  8: CaseStatus.STAGE_8_VERIFY_CHECKLIST,
+  9: CaseStatus.STAGE_9_ADVISER_REVIEW,
+  10: CaseStatus.STAGE_10_COMPLETE,
+};
+const UI_STATUS_TO_PRISMA: Record<string, CaseStatus> = {
+  pending_loa: CaseStatus.STAGE_1_LOA_PREP,
+  awaiting_documents: CaseStatus.STAGE_4_PROVIDER_REQUEST,
+  extraction_complete: CaseStatus.STAGE_8_VERIFY_CHECKLIST,
+  in_review: CaseStatus.IN_REVIEW,
+  approved: CaseStatus.APPROVED,
+  on_hold: CaseStatus.ON_HOLD,
+  complete: CaseStatus.STAGE_10_COMPLETE,
+};
+
+router.patch(
+  "/:id",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  async (req: Request, res: Response) => {
+    // Body keys arrive in camelCase (the frontend's camelKeys helper converts before send).
+    const body = req.body as Record<string, unknown>;
+    const data: Record<string, unknown> = {};
+
+    // current_stage  →  status
+    if (typeof body.currentStage === "number") {
+      const stage = body.currentStage as number;
+      if (STAGE_TO_STATUS[stage]) {
+        data.status = STAGE_TO_STATUS[stage];
+        if (stage === 9) data.readyForReviewAt = new Date();
+        if (stage === 10) data.completedAt = new Date();
+      }
+    }
+
+    // status: "complete" / "pending_loa" / etc.  →  CaseStatus enum
+    if (typeof body.status === "string") {
+      const upper = body.status.toUpperCase();
+      // If the UI sent the canonical Prisma enum, accept it directly.
+      if ((Object.values(CaseStatus) as string[]).includes(upper)) {
+        data.status = upper as CaseStatus;
+        if (upper === "STAGE_10_COMPLETE" || upper === "APPROVED") {
+          data.completedAt = data.completedAt ?? new Date();
+        }
+      } else if (UI_STATUS_TO_PRISMA[body.status]) {
+        data.status = UI_STATUS_TO_PRISMA[body.status];
+        if (body.status === "complete") data.completedAt = new Date();
+        if (body.status === "approved") data.approvedAt = new Date();
+        if (body.status === "in_review") data.readyForReviewAt = new Date();
+      }
+    }
+
+    // cedingCompleteDate (yyyy-mm-dd or ISO)  →  completedAt
+    if (typeof body.cedingCompleteDate === "string" && body.cedingCompleteDate) {
+      data.completedAt = new Date(body.cedingCompleteDate);
+    }
+
+    // Manual edits to the basic case fields
+    if (typeof body.clientName === "string") data.clientName = body.clientName;
+    if (typeof body.policyRef === "string") data.policyRef = body.policyRef;
+    if (typeof body.planNumber === "string") data.policyRef = body.planNumber;
+    if (typeof body.providerId === "string") data.providerId = body.providerId;
+    if (typeof body.assignedToId === "string") data.assignedToId = body.assignedToId;
+    if (typeof body.paralPlannerId === "string") data.paralPlannerId = body.paralPlannerId;
+    if (typeof body.ragStatus === "string") data.ragStatus = body.ragStatus;
+    if (typeof body.onHoldReason === "string") data.onHoldReason = body.onHoldReason;
+    if (typeof body.zohoTaskId === "string") data.zohoTaskId = body.zohoTaskId;
+    if (typeof body.zohoCaseId === "string") data.zohoCaseId = body.zohoCaseId;
+    if (typeof body.zohoDeepLink === "string") data.zohoDeepLink = body.zohoDeepLink;
+
+    // Fields the legacy UI sends that have no Prisma column — silently drop:
+    //   stagesCompleted, lastActivityAt, zohoCedingStatus, zohoSyncedAt.
+    // (updatedAt is maintained automatically by Prisma.)
+
+    if (Object.keys(data).length === 0) {
+      // Nothing meaningful — short-circuit with the current record.
+      const current = await prisma.case.findUnique({
+        where: { id: req.params.id },
+        include: { provider: true, assignedTo: true, createdBy: true },
+      });
+      if (!current) return res.status(404).json({ error: "Case not found" });
+      return res.json(current);
+    }
+
+    let updated;
+    try {
+      updated = await prisma.case.update({
+        where: { id: req.params.id },
+        data,
+        include: { provider: true, assignedTo: true, createdBy: true },
+      });
+    } catch (err) {
+      const e = err as { code?: string; message?: string };
+      if (e.code === "P2025") return res.status(404).json({ error: "Case not found" });
+      return res.status(500).json({ error: e.message ?? "Update failed" });
+    }
+
+    // Audit log (only if status changed — avoid spam for trivial edits)
+    if (data.status) {
+      await prisma.auditLog.create({
+        data: {
+          caseId: req.params.id,
+          userId: req.user!.id,
+          action: "CASE_STATUS_CHANGED",
+          newValue: String(data.status),
+          source: "MANUAL",
+          metadata: body as Record<string, unknown>,
+        },
+      });
+    } else {
+      await prisma.auditLog.create({
+        data: {
+          caseId: req.params.id,
+          userId: req.user!.id,
+          action: "CASE_UPDATED",
+          source: "MANUAL",
+          metadata: body as Record<string, unknown>,
+        },
+      });
+    }
+
+    res.json(updated);
+  },
+);
+
 // ── Update Case Stage ────────────────────────────────────
 router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Request, res: Response) => {
   const { status, onHoldReason } = req.body;

@@ -55,19 +55,65 @@ const STATUS_MAP: Record<string, string> = {
   CANCELLED: "complete",
 };
 
+// ── Backend status → 1..10 stage number ──────────────────────────────────
+// The legacy UI tracks position in the workflow as `current_stage` (1..10).
+// The Prisma schema only has `status` (an enum), so we derive the stage here.
+const STATUS_TO_STAGE: Record<string, number> = {
+  DRAFT: 1,
+  STAGE_1_LOA_PREP: 1,
+  STAGE_2_COLLECT_DETAILS: 2,
+  STAGE_3_CRM_SETUP: 3,
+  STAGE_4_PROVIDER_REQUEST: 4,
+  STAGE_5_CHASING: 5,
+  STAGE_6_DOCUMENT_UPLOAD: 6,
+  STAGE_7_MISSING_INFO: 7,
+  STAGE_8_VERIFY_CHECKLIST: 8,
+  STAGE_9_ADVISER_REVIEW: 9,
+  STAGE_10_COMPLETE: 10,
+  IN_REVIEW: 9,
+  APPROVED: 9,
+  ON_HOLD: 1,
+  CANCELLED: 1,
+};
+
 // ── Flatten nested case fields to match UI expectations ──────────────────
 function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
   const provider = c.provider as Record<string, unknown> | null | undefined;
   const assignedTo = c.assigned_to as Record<string, unknown> | null | undefined;
+  const createdBy = c.created_by as Record<string, unknown> | null | undefined;
   const rawStatus = (c.status as string | undefined) ?? "";
-  const uiStatus = STATUS_MAP[rawStatus.toUpperCase()] ?? rawStatus.toLowerCase();
+  const upperStatus = rawStatus.toUpperCase();
+  const uiStatus = STATUS_MAP[upperStatus] ?? rawStatus.toLowerCase();
+
+  // Derive `current_stage` (1..10) from the status enum so the legacy stepper UI
+  // works against the new schema. Anything before that stage is "completed".
+  const currentStage = STATUS_TO_STAGE[upperStatus] ?? 1;
+  const stagesCompleted: number[] = Array.from(
+    { length: Math.max(0, currentStage - 1) },
+    (_, i) => i + 1,
+  );
+  // If the case is fully complete, mark stage 10 itself as completed too.
+  if (upperStatus === "STAGE_10_COMPLETE" || upperStatus === "APPROVED") {
+    if (!stagesCompleted.includes(10)) stagesCompleted.push(10);
+  }
+
+  // The CA-team ownership check (e.g. CaseDetail / Cases list) reads `owner_name`.
+  // Treat the assigned user as the "owner"; fall back to the creator so a freshly
+  // imported case is never orphaned.
+  const ownerName =
+    (assignedTo?.name as string | undefined) ??
+    (createdBy?.name as string | undefined) ??
+    "";
   return {
     ...c,
     backend_status: rawStatus,       // keep original for API calls
     status: uiStatus,
+    current_stage: currentStage,
+    stages_completed: stagesCompleted,
     provider_name: provider?.name ?? "",
     plan_number: c.policy_ref ?? c.policy_reference ?? "",
     assigned_to_name: assignedTo?.name ?? "",
+    owner_name: ownerName,
   };
 }
 
@@ -163,6 +209,36 @@ export async function runAIExtraction(documentId: string, caseId?: string) {
 export async function getProviders() {
   const res = await api.get("/providers");
   return snakeKeys(res.data) as unknown[];
+}
+
+// ==================== ZOHO CRM ====================
+
+export async function getCrmTask(zohoTaskId: string) {
+  const res = await api.get(`/crm/tasks/${zohoTaskId}`);
+  return res.data;
+}
+
+export async function listCrmTasks(page = 1, perPage = 50) {
+  const res = await api.get(`/crm/tasks`, { params: { page, per_page: perPage } });
+  return res.data;
+}
+
+/**
+ * Imports a Zoho task as a Case. Pass dryRun=true to preview the field mapping
+ * without writing to the database. If a case for that Zoho task already exists,
+ * the backend returns it (alreadyExisted=true) instead of duplicating.
+ */
+export async function importCrmTaskAsCase(zohoTaskId: string, dryRun = false) {
+  const res = await api.post(`/crm/tasks/${zohoTaskId}/import-as-case`, null, {
+    params: dryRun ? { dryRun: 'true' } : undefined,
+  });
+  return res.data as {
+    case?: Record<string, unknown>;
+    mapping?: Record<string, unknown>;
+    zohoTask?: Record<string, unknown>;
+    alreadyExisted?: boolean;
+    dryRun?: boolean;
+  };
 }
 
 // ==================== TASKS ====================

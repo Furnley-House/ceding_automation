@@ -122,6 +122,9 @@ enum AuditAction {
   LOA_STATUS_UPDATED
   ZOHO_TASK_CREATED
   NOTIFICATION_SENT
+  FUND_LINE_ADDED
+  FUND_LINE_UPDATED
+  FUND_LINE_REMOVED
 }
 
 enum ContactMethod {
@@ -141,23 +144,24 @@ enum LOAFormat {
 // ─────────────────────────────────────────────
 
 model User {
-  id            String     @id @default(cuid())
-  email         String     @unique
-  name          String
-  role          UserRole
-  status        UserStatus @default(ACTIVE)
-  ssoId         String?    @unique // Zoho SSO identifier
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  id        String     @id @default(cuid())
+  email     String     @unique
+  name      String
+  role      UserRole
+  status    UserStatus @default(ACTIVE)
+  ssoId     String?    @unique // Zoho SSO identifier
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
 
   // Relations
-  casesCreated      Case[]         @relation("CaseCreatedBy")
-  casesAssigned     Case[]         @relation("CaseAssignedTo")
-  casesParaplanner  Case[]         @relation("CaseParaplanner")
-  auditLogs         AuditLog[]
-  fieldEdits        ChecklistField[]
-  comments          Comment[]
-  notifications     Notification[]
+  casesCreated     Case[]              @relation("CaseCreatedBy")
+  casesAssigned    Case[]              @relation("CaseAssignedTo")
+  casesParaplanner Case[]              @relation("CaseParaplanner")
+  auditLogs        AuditLog[]
+  fieldEdits       ChecklistField[]
+  fundLineEdits    ChecklistFundLine[] @relation("FundLineEditedBy")
+  comments         Comment[]
+  notifications    Notification[]
 
   @@map("users")
 }
@@ -167,23 +171,23 @@ model User {
 // ─────────────────────────────────────────────
 
 model Provider {
-  id                  String      @id @default(cuid())
-  name                String      @unique
-  phoneMain           String?
-  phoneCedingDept     String?
-  emailMain           String?
-  emailCedingDept     String?
-  postalAddress       String?
-  loaFormat           LOAFormat   @default(EITHER)
-  isOnOrigo           Boolean     @default(false)
-  acceptedSigType     String?     // "Electronic", "Wet", "Either"
-  planTypePrefixes    String[]    // e.g. ["PP", "ISA", "DC"]
-  notes               String?
-  isActive            Boolean     @default(true)
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
+  id               String    @id @default(cuid())
+  name             String    @unique
+  phoneMain        String?
+  phoneCedingDept  String?
+  emailMain        String?
+  emailCedingDept  String?
+  postalAddress    String?
+  loaFormat        LOAFormat @default(EITHER)
+  isOnOrigo        Boolean   @default(false)
+  acceptedSigType  String? // "Electronic", "Wet", "Either"
+  planTypePrefixes String[] // e.g. ["PP", "ISA", "DC"]
+  notes            String?
+  isActive         Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  cases               Case[]
+  cases Case[]
 
   @@map("providers")
 }
@@ -193,62 +197,63 @@ model Provider {
 // ─────────────────────────────────────────────
 
 model Case {
-  id                String      @id @default(cuid())
-  caseRef           String      @unique // e.g. FH-2026-001234
-  
+  id      String @id @default(cuid())
+  caseRef String @unique // e.g. FH-2026-001234
+
   // Client info (from Zoho CRM)
-  clientName        String
-  clientZohoId      String?
-  zohoCaseId        String?     // Zoho CRM deal/activity ID
-  zohoDeepLink      String?
-  zohoTaskId        String?
+  clientName   String
+  clientZohoId String?
+  zohoCaseId   String? // Zoho CRM deal/activity ID
+  zohoDeepLink String?
+  zohoTaskId   String?
 
   // Plan details
-  planType          PlanType
-  planSubType       PlanSubType?
-  policyRef         String?
-  planStartDate     DateTime?
+  planType      PlanType
+  planSubType   PlanSubType?
+  policyRef     String?
+  planStartDate DateTime?
 
   // Provider
-  providerId        String?
-  provider          Provider?   @relation(fields: [providerId], references: [id])
+  providerId String?
+  provider   Provider? @relation(fields: [providerId], references: [id])
 
   // Status & stage
-  status            CaseStatus  @default(STAGE_1_LOA_PREP)
-  loaStatus         LOAStatus   @default(NOT_SENT)
-  loaSentAt         DateTime?
-  loaSignedAt       DateTime?
-  ragStatus         String?     // "GREEN", "AMBER", "RED"
+  status      CaseStatus @default(STAGE_1_LOA_PREP)
+  loaStatus   LOAStatus  @default(NOT_SENT)
+  loaSentAt   DateTime?
+  loaSignedAt DateTime?
+  ragStatus   String? // "GREEN", "AMBER", "RED"
 
   // Assignment
-  createdById       String
-  createdBy         User        @relation("CaseCreatedBy", fields: [createdById], references: [id])
-  assignedToId      String?
-  assignedTo        User?       @relation("CaseAssignedTo", fields: [assignedToId], references: [id])
-  paralPlannerId    String?
-  paraplanner       User?       @relation("CaseParaplanner", fields: [paralPlannerId], references: [id])
+  createdById    String
+  createdBy      User    @relation("CaseCreatedBy", fields: [createdById], references: [id])
+  assignedToId   String?
+  assignedTo     User?   @relation("CaseAssignedTo", fields: [assignedToId], references: [id])
+  paralPlannerId String?
+  paraplanner    User?   @relation("CaseParaplanner", fields: [paralPlannerId], references: [id])
 
   // Timestamps
-  createdAt         DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
-  readyForReviewAt  DateTime?
-  approvedAt        DateTime?
-  completedAt       DateTime?
-  onHoldReason      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  readyForReviewAt DateTime?
+  approvedAt       DateTime?
+  completedAt      DateTime?
+  onHoldReason     String?
 
   // WorkDrive
-  workDriveExportPath  String?
-  workDriveExportedAt  DateTime?
+  workDriveExportPath String?
+  workDriveExportedAt DateTime?
 
   // Relations
-  documents         Document[]
-  checklistFields   ChecklistField[]
-  auditLogs         AuditLog[]
-  comments          Comment[]
-  callScripts       CallScript[]
-  transcripts       Transcript[]
-  chaseAttempts     ChaseAttempt[]
-  notifications     Notification[]
+  documents       Document[]
+  checklistFields ChecklistField[]
+  fundLines       ChecklistFundLine[]
+  auditLogs       AuditLog[]
+  comments        Comment[]
+  callScripts     CallScript[]
+  transcripts     Transcript[]
+  chaseAttempts   ChaseAttempt[]
+  notifications   Notification[]
 
   @@index([status])
   @@index([clientZohoId])
@@ -262,29 +267,30 @@ model Case {
 // ─────────────────────────────────────────────
 
 model Document {
-  id              String          @id @default(cuid())
-  caseId          String
-  case            Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
-  filename        String
-  originalName    String
-  mimeType        String
-  fileSizeBytes   Int
-  storagePath     String          // Azure Blob Storage path
-  storageUrl      String?         // Pre-signed URL (temp)
+  filename      String
+  originalName  String
+  mimeType      String
+  fileSizeBytes Int
+  storagePath   String // Azure Blob Storage path
+  storageUrl    String? // Pre-signed URL (temp)
 
-  status          DocumentStatus  @default(UPLOADED)
-  uploadedAt      DateTime        @default(now())
-  processedAt     DateTime?
-  errorMessage    String?
+  status       DocumentStatus @default(UPLOADED)
+  uploadedAt   DateTime       @default(now())
+  processedAt  DateTime?
+  errorMessage String?
 
   // Extraction metadata
   pageCount       Int?
-  extractionModel String?         // e.g. "azure-gpt-4o"
-  extractionMs    Int?            // Processing time in ms
+  extractionModel String? // e.g. "azure-gpt-4o"
+  extractionMs    Int? // Processing time in ms
 
   // Relations
-  checklistFields ChecklistField[]  @relation("FieldSourceDocument")
+  checklistFields ChecklistField[]    @relation("FieldSourceDocument")
+  fundLines       ChecklistFundLine[] @relation("FundLineSourceDocument")
 
   @@index([caseId])
   @@map("documents")
@@ -295,20 +301,20 @@ model Document {
 // ─────────────────────────────────────────────
 
 model ChecklistTemplate {
-  id              String      @id @default(cuid())
+  id              String   @id @default(cuid())
   planType        PlanType
-  sectionName     String      // e.g. "Pension Details", "Charges", "Benefits"
+  sectionName     String // e.g. "Pension Details", "Charges", "Benefits"
   fieldName       String
-  fieldKey        String      // snake_case key used in API
-  fieldType       String      // "text" | "number" | "currency" | "date" | "dropdown" | "yes_no" | "percentage" | "url" | "free_text"
-  dropdownOptions String[]    // If fieldType = "dropdown"
-  isRequired      Boolean     @default(true)
+  fieldKey        String // snake_case key used in API
+  fieldType       String // "text" | "number" | "currency" | "date" | "dropdown" | "yes_no" | "percentage" | "url" | "free_text"
+  dropdownOptions String[] // If fieldType = "dropdown"
+  isRequired      Boolean  @default(true)
   displayOrder    Int
-  isActive        Boolean     @default(true)
-  conditionalNote String?     // Tooltip / guidance for CA team
-  
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  isActive        Boolean  @default(true)
+  conditionalNote String? // Tooltip / guidance for CA team
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   checklistFields ChecklistField[]
 
@@ -322,48 +328,48 @@ model ChecklistTemplate {
 // ─────────────────────────────────────────────
 
 model ChecklistField {
-  id                String          @id @default(cuid())
-  caseId            String
-  case              Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
-  templateId        String
-  template          ChecklistTemplate @relation(fields: [templateId], references: [id])
+  templateId String
+  template   ChecklistTemplate @relation(fields: [templateId], references: [id])
 
   // Extracted value
-  value             String?
-  aiRawValue        String?         // Original AI-extracted value before edit
-  confidence        ConfidenceLevel @default(MISSING)
-  status            FieldStatus     @default(AI_EXTRACTED)
+  value      String?
+  aiRawValue String? // Original AI-extracted value before edit
+  confidence ConfidenceLevel @default(MISSING)
+  status     FieldStatus     @default(AI_EXTRACTED)
 
   // Source citation
-  sourceDocumentId  String?
-  sourceDocument    Document?       @relation("FieldSourceDocument", fields: [sourceDocumentId], references: [id])
-  sourcePageNumber  Int?
-  sourceSection     String?         // Table heading or section name in document
-  sourceQuote       String?         // Raw text snippet extracted
+  sourceDocumentId String?
+  sourceDocument   Document? @relation("FieldSourceDocument", fields: [sourceDocumentId], references: [id])
+  sourcePageNumber Int?
+  sourceSection    String? // Table heading or section name in document
+  sourceQuote      String? // Raw text snippet extracted
 
   // Manual override tracking
-  isManuallyOverridden Boolean      @default(false)
-  manualEditedById  String?
-  manualEditedBy    User?           @relation(fields: [manualEditedById], references: [id])
-  manualEditedAt    DateTime?
+  isManuallyOverridden Boolean   @default(false)
+  manualEditedById     String?
+  manualEditedBy       User?     @relation(fields: [manualEditedById], references: [id])
+  manualEditedAt       DateTime?
 
   // Adviser review
-  isApproved        Boolean         @default(false)
+  isApproved        Boolean   @default(false)
   approvedAt        DateTime?
   reviewComment     String?
   reviewRequestedAt DateTime?
 
   // Conflict handling
-  hasConflict       Boolean         @default(false)
-  conflictValues    Json?           // Array of conflicting {value, documentId, page}
+  hasConflict    Boolean @default(false)
+  conflictValues Json? // Array of conflicting {value, documentId, page}
 
   // Transcript source
-  fromTranscript    Boolean         @default(false)
-  transcriptId      String?
+  fromTranscript Boolean @default(false)
+  transcriptId   String?
 
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([caseId, templateId])
   @@index([caseId])
@@ -376,13 +382,13 @@ model ChecklistField {
 // ─────────────────────────────────────────────
 
 model CallScript {
-  id              String    @id @default(cuid())
-  caseId          String
-  case            Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
-  generatedAt     DateTime  @default(now())
-  scriptContent   Json      // Structured script: {greeting, questions: [{field, question, answerSpace}]}
-  missingFieldIds String[]  // ChecklistField IDs this script targets
+  generatedAt     DateTime @default(now())
+  scriptContent   Json // Structured script: {greeting, questions: [{field, question, answerSpace}]}
+  missingFieldIds String[] // ChecklistField IDs this script targets
   providerPhone   String?
   providerDept    String?
 
@@ -395,18 +401,18 @@ model CallScript {
 // ─────────────────────────────────────────────
 
 model Transcript {
-  id              String    @id @default(cuid())
-  caseId          String
-  case            Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
-  source          String    // "PALINDROME" | "MANUAL_PASTE" | "FILE_UPLOAD"
-  rawText         String    @db.Text
-  ringCentralId   String?   // Recording ID from RingCentral
+  source        String // "PALINDROME" | "MANUAL_PASTE" | "FILE_UPLOAD"
+  rawText       String  @db.Text
+  ringCentralId String? // Recording ID from RingCentral
 
-  analysedAt      DateTime?
-  fieldsUpdated   Int?      // Count of fields filled from this transcript
+  analysedAt    DateTime?
+  fieldsUpdated Int? // Count of fields filled from this transcript
 
-  createdAt       DateTime  @default(now())
+  createdAt DateTime @default(now())
 
   @@index([caseId])
   @@map("transcripts")
@@ -417,14 +423,14 @@ model Transcript {
 // ─────────────────────────────────────────────
 
 model ChaseAttempt {
-  id              String          @id @default(cuid())
-  caseId          String
-  case            Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
-  method          ContactMethod
-  notes           String?
-  attemptedAt     DateTime        @default(now())
-  attemptedById   String
+  method        ContactMethod
+  notes         String?
+  attemptedAt   DateTime      @default(now())
+  attemptedById String
 
   @@index([caseId])
   @@map("chase_attempts")
@@ -435,15 +441,15 @@ model ChaseAttempt {
 // ─────────────────────────────────────────────
 
 model Comment {
-  id            String    @id @default(cuid())
-  caseId        String
-  case          Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
-  authorId      String
-  author        User      @relation(fields: [authorId], references: [id])
-  content       String
-  fieldId       String?   // Optional: links comment to specific checklist field
-  createdAt     DateTime  @default(now())
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  content   String
+  fieldId   String? // Optional: links comment to specific checklist field
+  createdAt DateTime @default(now())
 
   @@index([caseId])
   @@map("comments")
@@ -454,20 +460,20 @@ model Comment {
 // ─────────────────────────────────────────────
 
 model AuditLog {
-  id          String      @id @default(cuid())
-  caseId      String
-  case        Case        @relation(fields: [caseId], references: [id])
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id])
 
-  userId      String
-  user        User        @relation(fields: [userId], references: [id])
-  action      AuditAction
-  fieldId     String?     // ChecklistField ID if action is field-related
-  fieldKey    String?     // Human-readable field name
-  oldValue    String?
-  newValue    String?
-  source      String?     // "AI", "MANUAL", "TRANSCRIPT", "SYSTEM"
-  metadata    Json?       // Extra context (document ID, page, etc.)
-  createdAt   DateTime    @default(now())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id])
+  action    AuditAction
+  fieldId   String? // ChecklistField ID if action is field-related
+  fieldKey  String? // Human-readable field name
+  oldValue  String?
+  newValue  String?
+  source    String? // "AI", "MANUAL", "TRANSCRIPT", "SYSTEM"
+  metadata  Json? // Extra context (document ID, page, etc.)
+  createdAt DateTime    @default(now())
 
   @@index([caseId])
   @@index([userId])
@@ -476,22 +482,72 @@ model AuditLog {
 }
 
 // ─────────────────────────────────────────────
+// CHECKLIST FUND LINES
+// Structured representation of the repeating "Fund Details" table
+// in the Pension / ISA / GIA checklist tabs:
+//   Fund Name | ISIN/Sedol/Citi code | Units | Price/unit | Value | Fund Charge
+// ─────────────────────────────────────────────
+
+model ChecklistFundLine {
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  planType PlanType // PENSION | ISA | GIA — copied from case for fast filtering
+
+  // Row data (matches Excel columns; all nullable so partial rows can be saved)
+  fundName      String
+  isinSedolCiti String? // ISIN / Sedol / Citi code
+  numberOfUnits Decimal? @db.Decimal(20, 6)
+  pricePerUnit  Decimal? @db.Decimal(20, 6)
+  value         Decimal? @db.Decimal(20, 2)
+  fundCharge    Decimal? @db.Decimal(8, 4) // stored as percentage e.g. 0.7500 = 0.75%
+
+  // Flag: this row is a with-profits holding (subject to MVR / bonus rate / PPFM rules)
+  isWithProfits Boolean @default(false)
+
+  // Source citation (mirrors ChecklistField)
+  sourceDocumentId String?
+  sourceDocument   Document? @relation("FundLineSourceDocument", fields: [sourceDocumentId], references: [id])
+  sourcePageNumber Int?
+  sourceQuote      String?
+
+  // Provenance
+  status     FieldStatus     @default(MANUALLY_ENTERED)
+  confidence ConfidenceLevel @default(MISSING)
+
+  // Audit
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  editedById String?
+  editedBy   User?    @relation("FundLineEditedBy", fields: [editedById], references: [id])
+
+  // Display
+  displayOrder Int @default(0)
+
+  @@index([caseId])
+  @@index([caseId, isWithProfits])
+  @@index([planType])
+  @@map("checklist_fund_lines")
+}
+
+// ─────────────────────────────────────────────
 // NOTIFICATIONS
 // ─────────────────────────────────────────────
 
 model Notification {
-  id          String    @id @default(cuid())
-  userId      String
-  user        User      @relation(fields: [userId], references: [id])
-  caseId      String?
-  case        Case?     @relation(fields: [caseId], references: [id])
+  id     String  @id @default(cuid())
+  userId String
+  user   User    @relation(fields: [userId], references: [id])
+  caseId String?
+  case   Case?   @relation(fields: [caseId], references: [id])
 
-  title       String
-  message     String
-  deepLink    String?
-  isRead      Boolean   @default(false)
-  createdAt   DateTime  @default(now())
-  readAt      DateTime?
+  title     String
+  message   String
+  deepLink  String?
+  isRead    Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
 
   @@index([userId, isRead])
   @@map("notifications")

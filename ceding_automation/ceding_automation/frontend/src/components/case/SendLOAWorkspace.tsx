@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
+import { api } from "@/lib/api";
 import type { CaseRow } from "@/lib/caseHelpers";
 import { providers as seedProviders, type Provider } from "@/data/seedData";
 import { Button } from "@/components/ui/button";
@@ -69,11 +69,10 @@ export function SendLOAWorkspace({ caseItem }: Props) {
 
   const updateMutation = useMutation({
     mutationFn: async (updates: Record<string, any>) => {
-      const { error } = await supabase
-        .from("cases")
-        .update({ ...updates, last_activity_at: new Date().toISOString() })
-        .eq("id", caseItem.id);
-      if (error) throw error;
+      await api.patch(`/cases/${caseItem.id}`, {
+        ...updates,
+        lastActivityAt: new Date().toISOString(),
+      });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["case", caseItem.id] });

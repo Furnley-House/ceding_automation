@@ -91,9 +91,29 @@ router.get("/:caseId/documents/:docId/url", requireAuth, async (req: Request, re
   const doc = await prisma.document.findUnique({ where: { id: req.params.docId } });
   if (!doc) return res.status(404).json({ error: "Document not found" });
 
-  const url = await generateSasUrl(doc.storagePath, 60); // 60 min expiry
+  let url = await generateSasUrl(doc.storagePath, 60); // 60 min expiry
+
+  // Local fallback paths are relative (/uploads/...) — make them absolute so the browser can load them
+  if (url.startsWith("/")) {
+    url = `${req.protocol}://${req.get("host")}${url}`;
+  }
+
   res.json({ url });
 });
+
+// ── Delete Document ─────────────────────────────────────
+router.delete(
+  "/:caseId/documents/:docId",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const doc = await prisma.document.findUnique({ where: { id: req.params.docId } });
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+
+    await prisma.document.delete({ where: { id: req.params.docId } });
+    res.json({ message: "Document deleted" });
+  }
+);
 
 // ── Manually Trigger Extraction ─────────────────────────
 router.post(

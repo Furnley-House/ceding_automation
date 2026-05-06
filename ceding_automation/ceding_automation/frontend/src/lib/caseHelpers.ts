@@ -1,6 +1,32 @@
-import type { Tables } from "@/integrations/supabase/types";
-
-export type CaseRow = Tables<"cases">;
+export interface CaseRow {
+  id: string;
+  case_ref: string;
+  client_name: string;
+  provider_name: string;
+  provider_id?: string | null;
+  plan_number: string;
+  plan_type: string;
+  status: string;
+  current_stage?: number | null;
+  stages_completed?: number[] | null;
+  missing_fields_count?: number | null;
+  confidence_score?: number | null;
+  rag?: string | null;
+  owner_name?: string | null;
+  owner_id?: string | null;
+  current_value?: string | null;
+  transfer_value?: string | null;
+  case_notes?: string | null;
+  last_activity_at?: string | null;
+  updated_at?: string | null;
+  created_at?: string;
+  loa_sent_date?: string | null;
+  zoho_task_id?: string | null;
+  zoho_ceding_status?: string | null;
+  sr_prepared_at?: string | null;
+  ceding_complete_date?: string | null;
+  [key: string]: unknown;
+}
 
 export const CASE_STATUSES = [
   "pending_loa",

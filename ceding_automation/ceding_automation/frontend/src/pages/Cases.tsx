@@ -10,7 +10,7 @@ import {
   AlertTriangle,
   Loader2,
 } from "lucide-react";
-import { getCases, createCase } from "@/services/api";
+import { getCases, createCase, importCrmTaskAsCase } from "@/services/api";
 import {
   CASE_STATUSES,
   PLAN_TYPES,
@@ -29,11 +29,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
-const ZOHO_SAMPLES = [
-  { client_name: "Eleanor Whitmore", provider_name: "Aviva", plan_number: "AV-PP-55021", plan_type: "Personal Pension" },
-  { client_name: "Tom Beckett", provider_name: "Royal London", plan_number: "RL-ISA-77103", plan_type: "ISA" },
-  { client_name: "Sophie Allen", provider_name: "Standard Life", plan_number: "SL-BND-22019", plan_type: "Bond" },
-];
+// (Demo seed data was removed — Import CRM task now hits the real Zoho API via the backend.)
 
 const Cases = () => {
   const navigate = useNavigate();
@@ -50,6 +46,65 @@ const Cases = () => {
   useEffect(() => {
     const s = searchParams.get("status");
     if (s && s !== statusFilter) setStatusFilter(s);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  // ── Auto-import a CRM task when arriving from a Zoho deep link ──
+  // Accepts both param names so either Zoho button format works:
+  //   /cases?zohoTaskId=<id>   (canonical)
+  //   /cases?taskid=<id>       (Zoho button default)
+  const [importingTaskId, setImportingTaskId] = useState<string | null>(null);
+  useEffect(() => {
+    const taskId =
+      searchParams.get("zohoTaskId") ??
+      searchParams.get("taskId") ??
+      searchParams.get("taskid");
+    if (!taskId || importingTaskId === taskId) return;
+    setImportingTaskId(taskId);
+
+    (async () => {
+      const t = toast.loading(`Looking up CRM task…`);
+      try {
+        const result = await importCrmTaskAsCase(taskId);
+        const importedCase = result.case as {
+          id?: string;
+          case_ref?: string;
+          caseRef?: string;
+          client_name?: string;
+          clientName?: string;
+        } | undefined;
+
+        const caseId = importedCase?.id;
+        const ref = importedCase?.case_ref ?? importedCase?.caseRef ?? taskId;
+        const client = importedCase?.client_name ?? importedCase?.clientName ?? "Unknown";
+
+        toast.success(
+          result.alreadyExisted ? `Existing case — ${client}` : `Case created — ${client}`,
+          { id: t, description: ref },
+        );
+
+        // Clean all task-id params from the URL before navigating so a back/refresh
+        // doesn't trigger another import attempt.
+        const next = new URLSearchParams(searchParams);
+        next.delete("zohoTaskId");
+        next.delete("taskId");
+        next.delete("taskid");
+        setSearchParams(next, { replace: true });
+
+        if (caseId) {
+          // Navigate directly to the case detail — whether new or existing.
+          navigate(`/cases/${caseId}`, { replace: true });
+        } else {
+          qc.invalidateQueries({ queryKey: ["cases"] });
+        }
+      } catch (e) {
+        toast.error("Import failed", {
+          id: t,
+          description: e instanceof Error ? e.message : "Unknown error",
+        });
+        setImportingTaskId(null); // allow retry on next visit
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
@@ -96,17 +151,37 @@ const Cases = () => {
     } as any);
   };
 
-  const simulateZoho = () => {
-    const sample = ZOHO_SAMPLES[Math.floor(Math.random() * ZOHO_SAMPLES.length)];
-    createMutation.mutate({
-      case_ref: generateCaseRef(sample.plan_type),
-      ...sample,
-      status: "pending_loa",
-      owner_name: userName ?? null,
-      zoho_task_id: `ZT-${Math.floor(Math.random() * 90000) + 10000}`,
-      case_notes: "Imported from CRM blueprint task.",
-      current_stage: 1,
-    } as any);
+  // Prompt for a Zoho task ID, then call the backend import endpoint.
+  // For end-to-end testing: enter the Zoho task record ID (the long numeric string
+  // shown in the URL when viewing a task in Zoho CRM, e.g. 4716998000001234567).
+  const importFromCrm = async () => {
+    const taskId = window.prompt("Enter the Zoho CRM task ID to import:");
+    if (!taskId?.trim()) return;
+    const id = taskId.trim();
+    const t = toast.loading(`Looking up CRM task…`);
+    try {
+      const result = await importCrmTaskAsCase(id);
+      const importedCase = result.case as {
+        id?: string;
+        case_ref?: string;
+        caseRef?: string;
+        client_name?: string;
+        clientName?: string;
+      } | undefined;
+      const ref = importedCase?.case_ref ?? importedCase?.caseRef ?? id;
+      const client = importedCase?.client_name ?? importedCase?.clientName ?? "Unknown";
+      toast.success(
+        result.alreadyExisted ? `Existing case — ${client}` : `Case created — ${client}`,
+        { id: t, description: ref },
+      );
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      if (importedCase?.id) navigate(`/cases/${importedCase.id}`, { replace: false });
+    } catch (e) {
+      toast.error("Import failed", {
+        id: t,
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
   };
 
   const filtered = useMemo(() => {
@@ -140,7 +215,7 @@ const Cases = () => {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={simulateZoho} disabled={createMutation.isPending} className="gap-2">
+          <Button variant="outline" onClick={importFromCrm} disabled={createMutation.isPending} className="gap-2">
             <Sparkles className="h-4 w-4 text-teal" /> Import CRM task
           </Button>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>

@@ -33,17 +33,17 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     let cancelled = false;
     (async () => {
       const doc = documents.find((d) => d.id === selectedId);
-      if (!doc?.file_path) {
+      if (!doc) {
         setPdfUrl(null);
         return;
       }
-      const url = await getSignedUrl(doc.file_path);
+      const url = await getSignedUrl(caseId, doc.id);
       if (!cancelled) setPdfUrl(url);
     })();
     return () => {
       cancelled = true;
     };
-  }, [selectedId, documents]);
+  }, [selectedId, documents, caseId]);
 
   const selectedDoc = useMemo(
     () => documents.find((d) => d.id === selectedId) ?? null,
@@ -54,7 +54,9 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     if (!sourcePage) return;
     // If the field cites a different document, switch to it
     if (evidenceSource) {
-      const match = documents.find((d) => d.file_name === evidenceSource);
+      const match = documents.find(
+        (d) => ((d as any).original_name ?? (d as any).file_name) === evidenceSource
+      );
       if (match && match.id !== selectedId) {
         setSelectedId(match.id);
       }
@@ -92,7 +94,7 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
           <div className="flex-1 rounded-md border border-border bg-card overflow-hidden min-h-[400px]">
             <PdfViewer
               url={pdfUrl}
-              fileName={selectedDoc?.file_name}
+              fileName={(selectedDoc as any)?.original_name ?? (selectedDoc as any)?.file_name}
               jumpToPage={jumpRequest?.page ?? null}
               jumpBanner={jumpRequest?.banner ?? null}
             />

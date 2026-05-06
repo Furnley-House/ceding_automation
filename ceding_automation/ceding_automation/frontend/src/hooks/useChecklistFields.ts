@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
-import type { Tables } from "@/integrations/supabase/types";
+import type { ChecklistRow } from "@/lib/checklistMerge";
 import type { ChecklistFieldDef } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
 
-export type ChecklistRow = Tables<"checklist_fields">;
+export type { ChecklistRow };
 
 interface UseChecklistArgs {
   caseId: string;
@@ -43,7 +43,8 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
     setLoading(true);
     try {
       const res = await api.get(`/cases/${caseId}/checklist`);
-      setRows((snakeKeys(res.data) as ChecklistRow[]) ?? []);
+      const raw = res.data as { fields?: unknown[]; [k: string]: unknown };
+      setRows((snakeKeys(raw.fields ?? raw) as ChecklistRow[]) ?? []);
     } catch (err) {
       console.error("useChecklistFields refresh error", err);
     } finally {
@@ -51,36 +52,16 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
     }
   }, [caseId]);
 
-  // Initial load — seed missing template fields on first open
+  // Initial load — fetch only. Fields are created by AI extraction or manual CA entry,
+  // never pre-seeded as empty rows (AI layer is managed separately on Azure).
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
       try {
         const res = await api.get(`/cases/${caseId}/checklist`);
-        const data = (snakeKeys(res.data) as ChecklistRow[]) ?? [];
-
-        const existingKeys = new Set(data.map((r) => r.field_key).filter(Boolean));
-        const missing = template.filter((t) => !existingKeys.has(t.key));
-
-        if (missing.length > 0) {
-          // Seed missing fields via backend
-          await Promise.allSettled(
-            missing.map((t) =>
-              api.post(`/cases/${caseId}/checklist/seed`, camelKeys({
-                field_key: t.key,
-                label: t.label,
-                section: t.section,
-                value: null,
-                status: "missing",
-              }))
-            )
-          );
-          const refreshed = await api.get(`/cases/${caseId}/checklist`);
-          if (!cancelled) setRows((snakeKeys(refreshed.data) as ChecklistRow[]) ?? []);
-        } else {
-          if (!cancelled) setRows(data);
-        }
+        const raw = res.data as { fields?: unknown[]; [k: string]: unknown };
+        if (!cancelled) setRows((snakeKeys(raw.fields ?? raw) as ChecklistRow[]) ?? []);
       } catch (err) {
         console.error("useChecklistFields load error", err);
       } finally {
@@ -88,7 +69,7 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
       }
     })();
     return () => { cancelled = true; };
-  }, [caseId, template]);
+  }, [caseId]);
 
   const byKey = useMemo(() => {
     const m = new Map<string, ChecklistRow>();
@@ -101,9 +82,27 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
     patch: Partial<ChecklistRow>,
     _audit?: { action: string; notes?: string | null }
   ) => {
-    const existing = byKey.get(fieldKey);
-    if (!existing) return;
+    let existing = byKey.get(fieldKey);
     try {
+      if (!existing) {
+        // No DB row yet — create one on first manual edit by seeding this single field.
+        // Look up label/section from the template prop if available.
+        const tpl = template.find((t) => t.key === fieldKey);
+        const seedRes = await api.post(`/cases/${caseId}/checklist/seed`, camelKeys({
+          field_key: fieldKey,
+          label: tpl?.label ?? fieldKey,
+          section: tpl?.section ?? "General",
+          value: null,
+          status: "missing",
+        }));
+        // Seed returns the created/found row
+        const seeded = (snakeKeys(seedRes.data) as ChecklistRow);
+        existing = seeded;
+        setRows((prev) => {
+          const without = prev.filter((r) => r.field_key !== fieldKey);
+          return [...without, seeded];
+        });
+      }
       await api.patch(
         `/cases/${caseId}/checklist/${existing.id}`,
         camelKeys({ ...patch, isManuallyEdited: patch.value !== existing.value ? true : undefined })

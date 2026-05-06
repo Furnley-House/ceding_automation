@@ -37,8 +37,91 @@ router.get("/:caseId/checklist", requireAuth, async (req: Request, res: Response
     approved: fields.filter((f) => f.isApproved).length,
   };
 
-  res.json({ grouped, summary, fields });
+  // Flatten template display fields onto each field so the frontend can use
+  // field.fieldKey / field.label / field.section directly (after snake_keys).
+  const normalised = fields.map((f) => ({
+    ...f,
+    fieldKey: f.template.fieldKey,
+    label: f.template.fieldName,
+    section: f.template.sectionName,
+    fieldType: f.template.fieldType,
+    isRequired: f.template.isRequired,
+    conditionalNote: f.template.conditionalNote,
+    dropdownOptions: f.template.dropdownOptions,
+  }));
+
+  const normalisedGrouped = normalised.reduce((acc: Record<string, unknown[]>, field) => {
+    const section = field.section;
+    if (!acc[section]) acc[section] = [];
+    acc[section].push(field);
+    return acc;
+  }, {});
+
+  res.json({ grouped: normalisedGrouped, summary, fields: normalised });
 });
+
+// ── Seed a single missing checklist field ─────────────────
+// Called by the frontend when it detects a template field that has no DB row yet
+router.post(
+  "/:caseId/checklist/seed",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { fieldKey, label, section, value } = req.body;
+    if (!fieldKey) return res.status(400).json({ error: "fieldKey is required" });
+
+    const caseRecord = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+    });
+    if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+    // Find or create the template for this plan type + fieldKey
+    let template = await prisma.checklistTemplate.findUnique({
+      where: { planType_fieldKey: { planType: caseRecord.planType, fieldKey } },
+    });
+
+    if (!template) {
+      const maxOrder = await prisma.checklistTemplate.findFirst({
+        where: { planType: caseRecord.planType },
+        orderBy: { displayOrder: "desc" },
+        select: { displayOrder: true },
+      });
+      template = await prisma.checklistTemplate.create({
+        data: {
+          planType: caseRecord.planType,
+          sectionName: section || "General",
+          fieldName: label || fieldKey,
+          fieldKey,
+          fieldType: "text",
+          isRequired: false,
+          displayOrder: (maxOrder?.displayOrder ?? 0) + 1,
+        },
+      });
+    }
+
+    // Upsert: create the field row if it doesn't exist; skip if it does
+    const field = await prisma.checklistField.upsert({
+      where: { caseId_templateId: { caseId: req.params.caseId, templateId: template.id } },
+      create: {
+        caseId: req.params.caseId,
+        templateId: template.id,
+        value: value ?? null,
+        confidence: "MISSING",
+        status: "AI_EXTRACTED",
+      },
+      update: {}, // leave existing data untouched
+    });
+
+    // Return the field with template fields flattened so the frontend can use
+    // field.fieldKey / field.label / field.section directly (after snake_keys).
+    res.status(201).json({
+      ...field,
+      fieldKey: template.fieldKey,
+      label: template.fieldName,
+      section: template.sectionName,
+      fieldType: template.fieldType,
+    });
+  }
+);
 
 // ── Edit a checklist field (CA Team) ─────────────────────
 router.patch(

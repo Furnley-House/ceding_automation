@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { useAuthStore } from "@/lib/store";
 
 export type Role = "ca_team" | "adviser" | "paraplanner" | "admin";
 
@@ -9,8 +10,11 @@ export const ROLE_LABELS: Record<Role, string> = {
   admin: "Admin",
 };
 
+// Display labels shown on the role-picker tiles (before sign-in).
+// Once signed in, the rest of the app uses the actual user's name from the auth
+// store (not these labels), so ownership checks reflect the JWT identity.
 export const ROLE_USERS: Record<Role, string> = {
-  ca_team: "Priya Ramesh",
+  ca_team: "Revathy S",
   adviser: "James Whitfield",
   paraplanner: "Emma Clarke",
   admin: "Nicki Foster",
@@ -50,6 +54,9 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
     return v && ["ca_team", "adviser", "paraplanner", "admin"].includes(v) ? (v as Role) : null;
   });
 
+  // Subscribe to the auth store so userName updates the moment a user signs in / out.
+  const authUserName = useAuthStore((s) => s.user?.name ?? null);
+
   useEffect(() => {
     if (role) localStorage.setItem(KEY, role);
   }, [role]);
@@ -60,9 +67,14 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
     setRoleState(null);
   };
 
+  // Prefer the signed-in user's real name (from the JWT) so ownership checks line
+  // up with what the backend assigns. Fall back to the static ROLE_USERS label
+  // only in the rare dev-mode case where login didn't succeed.
+  const userName = authUserName ?? (role ? ROLE_USERS[role] : null);
+
   const value: RoleCtx = {
     role,
-    userName: role ? ROLE_USERS[role] : null,
+    userName,
     setRole,
     clearRole,
     isCA: role === "ca_team",

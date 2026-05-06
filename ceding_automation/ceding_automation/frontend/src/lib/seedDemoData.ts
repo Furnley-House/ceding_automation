@@ -1,4 +1,4 @@
-import { supabase } from "@/integrations/supabase/client";
+import { api } from "@/lib/api";
 
 const DEMO_CASES = [
   {
@@ -85,11 +85,11 @@ const DEMO_CASES = [
 ];
 
 export async function seedDemoData() {
-  const { data: existing } = await supabase.from("cases").select("case_ref");
-  const existingRefs = new Set((existing ?? []).map((c) => c.case_ref));
+  const res = await api.get("/cases");
+  const existing = (res.data as { case_ref?: string }[]) ?? [];
+  const existingRefs = new Set(existing.map((c) => c.case_ref));
   const toInsert = DEMO_CASES.filter((c) => !existingRefs.has(c.case_ref));
   if (toInsert.length === 0) return { inserted: 0 };
-  const { error } = await supabase.from("cases").insert(toInsert as any);
-  if (error) throw error;
+  await Promise.all(toInsert.map((c) => api.post("/cases", c)));
   return { inserted: toInsert.length };
 }

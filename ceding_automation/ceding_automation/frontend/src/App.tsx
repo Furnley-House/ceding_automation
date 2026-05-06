@@ -9,6 +9,7 @@ import { AuthProvider } from "@/hooks/useAuth";
 import { RoleGuard } from "@/components/RoleGuard";
 import { AppLayout } from "@/components/layout/AppLayout";
 import RolePicker from "./pages/RolePicker";
+import AuthCallback from "./pages/AuthCallback";
 import Dashboard from "./pages/Dashboard";
 import Cases from "./pages/Cases";
 import CaseDetail from "./pages/CaseDetail";
@@ -37,6 +38,8 @@ const App = () => (
             <BrowserRouter>
               <Routes>
                 <Route path="/" element={<RolePicker />} />
+                {/* Azure AD SSO callback — must be outside RoleGuard */}
+                <Route path="/auth/callback" element={<AuthCallback />} />
                 <Route path="/presentation" element={<Presentation />} />
                 <Route path="/loa-workflow" element={<LOAWorkflow />} />
                 <Route

@@ -17,7 +17,10 @@ api.interceptors.response.use(
   (err) => {
     if (err.response?.status === 401) {
       useAuthStore.getState().logout();
-      window.location.href = "/login";
+      // Redirect to the login/role-picker page (root) — not /login which doesn't exist
+      if (!window.location.pathname.startsWith("/?")) {
+        window.location.href = `/?returnTo=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+      }
     }
     return Promise.reject(err);
   }
