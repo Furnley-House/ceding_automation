@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
-import { supabase } from "@/integrations/supabase/client";
+import { casesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { PARAPLANNERS, type Paraplanner } from "@/lib/paraplanners";
 import type { CaseRow } from "@/lib/caseHelpers";
@@ -24,10 +24,6 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onAssigned?: () => void;
-}
-
-function fakeZohoTaskId() {
-  return `ZH-${Math.floor(100000000 + Math.random() * 900000000)}`;
 }
 
 function defaultDueDate() {
@@ -51,71 +47,13 @@ export function AssignParaplannerDialog({ caseItem, open, onOpenChange, onAssign
   const assignMutation = useMutation({
     mutationFn: async () => {
       const pp = PARAPLANNERS.find((p) => p.user_id === selectedId)!;
-      const zohoId = fakeZohoTaskId();
-      const taskTitle = `Paraplanner review · ${caseItem.client_name}`;
-
-      // 1) Update case — assigned role + owner + last activity
-      const { error: caseErr } = await supabase
-        .from("cases")
-        .update({
-          assigned_role: "paraplanner",
-          owner_id: pp.user_id,
-          owner_name: pp.full_name,
-          status: "ready_for_review",
-          last_activity_at: new Date().toISOString(),
-          zoho_task_id: zohoId,
-        })
-        .eq("id", caseItem.id);
-      if (caseErr) throw caseErr;
-
-      // 2) Create the task row
-      const { error: taskErr } = await supabase.from("tasks").insert({
-        case_id: caseItem.id,
-        type: "review",
-        title: taskTitle,
-        client_name: caseItem.client_name,
-        provider_name: caseItem.provider_name,
-        assigned_to: pp.user_id,
-        assigned_name: pp.full_name,
-        due_date: dueDate,
-        completed: false,
-      });
-      if (taskErr) throw taskErr;
-
-      // 3) Notify the paraplanner
-      const { error: notifErr } = await supabase.from("notifications").insert({
-        recipient_user_id: pp.user_id,
-        recipient_role: "paraplanner",
-        type: "case_assigned",
-        title: `New case assigned: ${caseItem.client_name}`,
-        body:
-          (note.trim() ? `${note.trim()}\n\n` : "") +
-          `${caseItem.provider_name} · ${caseItem.plan_type} · ${caseItem.plan_number}\nDue ${new Date(dueDate).toLocaleDateString("en-GB")}`,
-        case_id: caseItem.id,
-        link: `/cases/${caseItem.id}`,
-        actor_name: userName,
-        actor_role: role,
-      });
-      if (notifErr) throw notifErr;
-
-      // 4) Audit row (case-level event)
-      await supabase.from("field_audit").insert({
-        case_id: caseItem.id,
-        action: "assign",
-        source: "manual",
-        field_label: "Case assignment",
-        old_value: caseItem.owner_name ?? "Unassigned",
-        new_value: `${pp.full_name} (paraplanner)`,
-        actor_name: userName,
-        actor_role: role,
-        notes: note.trim() || `CRM task ${zohoId} · due ${dueDate}`,
-      });
-
-      return { paraplanner: pp, zohoId };
+      const noteWithDue = [note.trim(), `Due: ${dueDate}`].filter(Boolean).join("\n\n");
+      await casesApi.assignParaplanner(caseItem.id, pp.user_id, noteWithDue || undefined);
+      return { paraplanner: pp };
     },
-    onSuccess: ({ paraplanner, zohoId }) => {
+    onSuccess: ({ paraplanner }) => {
       toast.success(`Assigned to ${paraplanner.full_name}`, {
-        description: `CRM task ${zohoId} created · paraplanner notified.`,
+        description: "Case updated · paraplanner notified.",
       });
       qc.invalidateQueries({ queryKey: ["case", caseItem.id] });
       qc.invalidateQueries({ queryKey: ["cases"] });

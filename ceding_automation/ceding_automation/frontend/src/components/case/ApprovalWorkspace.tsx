@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
+import { checklistApi, casesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { useChecklistFields } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
@@ -31,9 +31,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import type { CaseRow } from "@/lib/caseHelpers";
-import type { Tables } from "@/integrations/supabase/types";
-
-type ChecklistRow = Tables<"checklist_fields">;
+import type { ChecklistRow } from "@/lib/checklistMerge";
 
 type FilterTab = "all" | "pending" | "review" | "approved" | "missing";
 
@@ -43,7 +41,7 @@ interface Props {
 
 export function ApprovalWorkspace({ caseItem }: Props) {
   const qc = useQueryClient();
-  const { role, userName, canApprove } = useRole();
+  const { canApprove } = useRole();
   const template = useMemo(() => getTemplate(caseItem.plan_type), [caseItem.plan_type]);
   const { rows, loading, refresh } = useChecklistFields({ caseId: caseItem.id, template });
 
@@ -115,29 +113,6 @@ export function ApprovalWorkspace({ caseItem }: Props) {
     }
   };
 
-  const writeAudit = async (
-    targetRows: ChecklistRow[],
-    action: "approve" | "request_review",
-    notes?: string,
-  ) => {
-    if (targetRows.length === 0) return;
-    await supabase.from("field_audit").insert(
-      targetRows.map((r) => ({
-        case_id: caseItem.id,
-        field_key: r.field_key,
-        field_label: r.label,
-        action,
-        source: "manual",
-        old_value: r.value,
-        new_value: r.value,
-        confidence: r.confidence,
-        actor_role: role ?? null,
-        actor_name: userName ?? null,
-        notes: notes ?? null,
-      })),
-    );
-  };
-
   const bulkApprove = useMutation({
     mutationFn: async () => {
       const targets = rows.filter(
@@ -146,15 +121,7 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       if (targets.length === 0) {
         throw new Error("No eligible fields selected (must have a value and not already approved).");
       }
-      const { error } = await supabase
-        .from("checklist_fields")
-        .update({ status: "approved" })
-        .in(
-          "id",
-          targets.map((r) => r.id),
-        );
-      if (error) throw error;
-      await writeAudit(targets, "approve", `Bulk approve · ${targets.length} field${targets.length === 1 ? "" : "s"}`);
+      await Promise.all(targets.map((r) => checklistApi.approveField(caseItem.id, r.id)));
       return targets.length;
     },
     onSuccess: (n) => {
@@ -175,13 +142,11 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       action: "approve" | "request_review";
       notes?: string;
     }) => {
-      const newStatus = action === "approve" ? "approved" : "review_requested";
-      const { error } = await supabase
-        .from("checklist_fields")
-        .update({ status: newStatus, notes: notes ?? row.notes })
-        .eq("id", row.id);
-      if (error) throw error;
-      await writeAudit([row], action, notes);
+      if (action === "approve") {
+        await checklistApi.approveField(caseItem.id, row.id);
+      } else {
+        await checklistApi.requestReview(caseItem.id, row.id, notes ?? "");
+      }
     },
     onSuccess: (_, vars) => {
       toast.success(vars.action === "approve" ? "Field approved" : "Review requested");
@@ -195,15 +160,7 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       const targets = rows.filter((r) => selected.has(r.id) && r.status !== "review_requested");
       if (targets.length === 0) throw new Error("No fields selected.");
       if (!notes.trim()) throw new Error("Please add a comment for the CA team.");
-      const { error } = await supabase
-        .from("checklist_fields")
-        .update({ status: "review_requested", notes: notes.trim() })
-        .in(
-          "id",
-          targets.map((r) => r.id),
-        );
-      if (error) throw error;
-      await writeAudit(targets, "request_review", `Bulk review request: ${notes.trim()}`);
+      await Promise.all(targets.map((r) => checklistApi.requestReview(caseItem.id, r.id, notes.trim())));
       return targets.length;
     },
     onSuccess: (n) => {
@@ -225,39 +182,7 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       if (notApproved.length > 0) {
         throw new Error(`${notApproved.length} field${notApproved.length === 1 ? " is" : "s are"} not yet approved.`);
       }
-      const { error } = await supabase
-        .from("cases")
-        .update({
-          status: "approved",
-          last_activity_at: new Date().toISOString(),
-        })
-        .eq("id", caseItem.id);
-      if (error) throw error;
-
-      await supabase.from("field_audit").insert({
-        case_id: caseItem.id,
-        action: "case_approved",
-        source: "manual",
-        field_label: "Case sign-off",
-        old_value: caseItem.status,
-        new_value: "approved",
-        actor_role: role ?? null,
-        actor_name: userName ?? null,
-        notes: "All fields approved · case marked complete by reviewer.",
-      });
-
-      // Notify CA team owner if known.
-      await supabase.from("notifications").insert({
-        recipient_user_id: "00000000-0000-0000-0000-000000000000",
-        recipient_role: "ca_team",
-        type: "case_approved",
-        title: `Case approved: ${caseItem.client_name}`,
-        body: `${userName ?? "Reviewer"} signed off all fields. Ready for export.`,
-        case_id: caseItem.id,
-        link: `/cases/${caseItem.id}`,
-        actor_name: userName,
-        actor_role: role,
-      });
+      await casesApi.updateStatus(caseItem.id, "approved");
     },
     onSuccess: () => {
       toast.success("Case marked approved", {

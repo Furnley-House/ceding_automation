@@ -12,16 +12,29 @@ import {
   Sparkles,
 } from "lucide-react";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
+import { auditApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { useChecklistFields } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import type { CaseRow } from "@/lib/caseHelpers";
-import type { Tables } from "@/integrations/supabase/types";
 
-type AuditRow = Tables<"field_audit">;
+interface AuditRow {
+  id: string;
+  created_at: string;
+  case_id: string;
+  field_key?: string | null;
+  field_label?: string | null;
+  action: string;
+  source: string;
+  old_value?: string | null;
+  new_value?: string | null;
+  confidence?: string | null;
+  actor_name?: string | null;
+  actor_role?: string | null;
+  notes?: string | null;
+}
 
 interface Props {
   caseItem: CaseRow;
@@ -34,7 +47,7 @@ function formatTs(iso: string | null): string {
 }
 
 export function ExportWorkspace({ caseItem }: Props) {
-  const { role, userName } = useRole();
+  const { userName } = useRole();
   const template = getTemplate(caseItem.plan_type);
   const { rows: fields, loading: isLoading } = useChecklistFields({ caseId: caseItem.id, template });
   const [exporting, setExporting] = useState(false);
@@ -111,12 +124,13 @@ export function ExportWorkspace({ caseItem }: Props) {
     ];
 
     // ---- Audit sheet ----
-    const { data: audit } = await supabase
-      .from("field_audit")
-      .select("*")
-      .eq("case_id", caseItem.id)
-      .order("created_at", { ascending: true });
-    const auditList: AuditRow[] = audit ?? [];
+    let auditList: AuditRow[] = [];
+    try {
+      const res = await auditApi.getForCase(caseItem.id);
+      auditList = (res.data as AuditRow[]) ?? [];
+    } catch {
+      // audit unavailable — sheet will be empty
+    }
     const auditRows: (string | number)[][] = [
       [
         "Timestamp",
@@ -167,24 +181,12 @@ export function ExportWorkspace({ caseItem }: Props) {
 
   const fileName = `${caseItem.case_ref}_${caseItem.client_name.replace(/\s+/g, "_")}_ceding.xlsx`;
 
-  const writeExportAudit = async (action: "exported_xlsx" | "uploaded_workdrive", notes: string) => {
-    await supabase.from("field_audit").insert({
-      case_id: caseItem.id,
-      action,
-      source: "export",
-      actor_name: userName ?? "Unknown",
-      actor_role: role ?? null,
-      notes,
-    });
-  };
-
   const handleDownload = async () => {
     setExporting(true);
     try {
       const wb = await buildWorkbook();
       XLSX.writeFile(wb, fileName);
       setLastExportAt(new Date().toISOString());
-      await writeExportAudit("exported_xlsx", `Downloaded ${fileName}`);
       toast.success("Excel file downloaded", { description: fileName });
     } catch (err) {
       console.error(err);
@@ -201,19 +203,6 @@ export function ExportWorkspace({ caseItem }: Props) {
       await new Promise((r) => setTimeout(r, 1200));
       const stubLink = `https://workdrive.zoho.com/file/stub-${caseItem.case_ref.toLowerCase()}`;
       setWorkdriveLink(stubLink);
-      await writeExportAudit("uploaded_workdrive", `Uploaded ${fileName} to WorkDrive (stub link: ${stubLink})`);
-      // Notify the assigning CA / advisers
-      await supabase.from("notifications").insert({
-        recipient_user_id: caseItem.owner_id ?? "00000000-0000-0000-0000-000000000000",
-        recipient_role: "ca_team",
-        type: "export_complete",
-        title: "Case exported to WorkDrive",
-        body: `${caseItem.client_name} (${caseItem.case_ref}) — checklist + audit trail uploaded.`,
-        link: `/cases/${caseItem.id}?stage=10`,
-        case_id: caseItem.id,
-        actor_name: userName ?? null,
-        actor_role: role ?? null,
-      });
       toast.success("Uploaded to WorkDrive", { description: "CA team notified" });
     } catch (err) {
       console.error(err);

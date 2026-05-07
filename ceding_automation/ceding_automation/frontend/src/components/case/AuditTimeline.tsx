@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import type { Tables } from "@/integrations/supabase/types";
+import { auditApi } from "@/lib/api";
 import {
   Sparkles,
   Pencil,
@@ -26,8 +25,28 @@ import {
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 
-type AuditRow = Tables<"field_audit">;
-type CaseRow = Pick<Tables<"cases">, "id" | "case_ref" | "client_name" | "provider_name">;
+interface AuditRow {
+  id: string;
+  created_at: string;
+  case_id: string;
+  field_key?: string | null;
+  field_label?: string | null;
+  action: string;
+  source: string;
+  old_value?: string | null;
+  new_value?: string | null;
+  confidence?: string | null;
+  actor_name?: string | null;
+  actor_role?: string | null;
+  notes?: string | null;
+}
+
+interface CaseRow {
+  id: string;
+  case_ref: string;
+  client_name: string;
+  provider_name: string;
+}
 
 interface Props {
   /** Scope to a single case. Omit for global view. */
@@ -107,56 +126,22 @@ export function AuditTimeline({ caseId, showCase = false }: Props) {
     let cancelled = false;
     (async () => {
       setLoading(true);
-      let q = supabase
-        .from("field_audit")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(500);
-      if (caseId) q = q.eq("case_id", caseId);
-      const { data, error } = await q;
-      if (error) console.error("audit load", error);
-      if (!cancelled) setRows(data ?? []);
-
-      if (showCase && data && data.length > 0) {
-        const ids = Array.from(new Set(data.map((r) => r.case_id)));
-        const { data: cs } = await supabase
-          .from("cases")
-          .select("id, case_ref, client_name, provider_name")
-          .in("id", ids);
-        if (!cancelled && cs) {
-          const map: Record<string, CaseRow> = {};
-          cs.forEach((c) => (map[c.id] = c));
-          setCases(map);
-        }
+      if (!caseId) {
+        // Global audit view has no backend endpoint — show empty state
+        if (!cancelled) { setRows([]); setLoading(false); }
+        return;
+      }
+      try {
+        const res = await auditApi.getForCase(caseId);
+        if (!cancelled) setRows((res.data as AuditRow[]) ?? []);
+      } catch (err) {
+        console.error("audit load", err);
+        if (!cancelled) setRows([]);
       }
       if (!cancelled) setLoading(false);
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [caseId, showCase]);
-
-  // Realtime — refetch on insert
-  useEffect(() => {
-    const channel = supabase
-      .channel(`audit-${caseId ?? "global"}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "field_audit",
-          ...(caseId ? { filter: `case_id=eq.${caseId}` } : {}),
-        },
-        (payload) => {
-          setRows((prev) => [payload.new as AuditRow, ...prev]);
-        },
-      )
-      .subscribe();
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [caseId]);
 
   const filtered = useMemo(() => {
     return rows.filter((r) => {

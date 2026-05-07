@@ -27,10 +27,8 @@ import { Button } from "@/components/ui/button";
 import { useChecklistFields } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
+import { casesApi } from "@/lib/api";
 import { toast } from "sonner";
-import { useRole } from "@/hooks/useRole";
-
 interface StageProps {
   caseItem: CaseRow;
 }
@@ -194,7 +192,6 @@ export function StageCallAssist({ caseItem }: StageProps) {
 
 export function StageReviewChecklist({ caseItem }: StageProps) {
   const qc = useQueryClient();
-  const { userName, role } = useRole();
   const template = useMemo(() => getTemplate(caseItem.plan_type), [caseItem.plan_type]);
   const { rows, loading } = useChecklistFields({ caseId: caseItem.id, template });
 
@@ -231,38 +228,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
           "No paraplanner is assigned to this case from CRM. Re-import the task from Zoho CRM with an assignee.",
         );
       }
-      const { error: caseErr } = await supabase
-        .from("cases")
-        .update({
-          assigned_role: "paraplanner",
-          status: "in_review",
-          last_activity_at: new Date().toISOString(),
-        })
-        .eq("id", caseItem.id);
-      if (caseErr) throw caseErr;
-
-      await supabase.from("notifications").insert({
-        recipient_user_id: caseItem.owner_id,
-        recipient_role: "paraplanner",
-        type: "case_assigned",
-        title: `Approval requested: ${caseItem.client_name}`,
-        body: `Checklist complete — please review and approve.`,
-        case_id: caseItem.id,
-        actor_name: userName,
-        actor_role: role,
-        link: `/cases/${caseItem.id}`,
-      });
-
-      await supabase.from("field_audit").insert({
-        case_id: caseItem.id,
-        action: "send_for_approval",
-        source: "manual",
-        field_label: "Approval request",
-        new_value: caseItem.owner_name,
-        actor_name: userName,
-        actor_role: role,
-        notes: "Checklist sent to paraplanner for approval",
-      });
+      await casesApi.updateStatus(caseItem.id, "in_review");
     },
     onSuccess: () => {
       toast.success(`Sent to ${caseItem.owner_name} for approval`);
