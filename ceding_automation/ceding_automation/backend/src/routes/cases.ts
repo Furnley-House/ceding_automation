@@ -3,6 +3,8 @@ import { Router, Request, Response } from "express";
 import { PrismaClient, CaseStatus, PlanType } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { z } from "zod";
+import * as zoho from "../services/zohoCrm";
+import { mapZohoTaskToCase } from "../services/zohoCrm";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -345,6 +347,16 @@ router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADM
     await prisma.comment.create({
       data: { caseId: req.params.id, authorId: req.user!.id, content: note },
     });
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.id,
+        userId: req.user!.id,
+        action: "COMMENT_ADDED",
+        source: "MANUAL",
+        newValue: note,
+        metadata: { context: "assign-paraplanner", paralPlannerId },
+      },
+    });
   }
 
   await prisma.auditLog.create({
@@ -365,6 +377,16 @@ router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADM
       title: "Case assigned for review",
       message: `A ceding case has been assigned to you for review.`,
       deepLink: `/cases/${req.params.id}`,
+    },
+  });
+  await prisma.auditLog.create({
+    data: {
+      caseId: req.params.id,
+      userId: req.user!.id,
+      action: "NOTIFICATION_SENT",
+      source: "SYSTEM",
+      newValue: "Paraplanner: case assigned for review",
+      metadata: { recipientUserId: paralPlannerId, channel: "in-app" },
     },
   });
 
@@ -395,6 +417,210 @@ router.post("/:id/chase", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async 
   });
 
   res.json(chase);
+});
+
+// ── Sync Case from Zoho ──────────────────────────────────
+// Re-fetches the linked Zoho task, diffs the basic details against the DB,
+// and updates only the fields that have changed in Zoho. Designed to be
+// called whenever a case detail page loads, so manual edits made directly in
+// Zoho (provider, policy ref, plan type, etc.) propagate into the app.
+//
+// Response shape:
+//   { synced: true, changed: boolean, changes: [{field, from, to}], case }
+router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Response) => {
+  const id = req.params.id;
+  const caseRecord = await prisma.case.findUnique({
+    where: { id },
+    include: {
+      provider: true,
+      assignedTo: { select: { id: true, name: true, email: true } },
+    },
+  });
+  if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+  if (!caseRecord.zohoTaskId) {
+    return res.status(400).json({ error: "Case is not linked to a Zoho task" });
+  }
+
+  // 1. Pull the latest task from Zoho
+  let taskRecord: Record<string, unknown> | null = null;
+  try {
+    const raw = (await zoho.getTask(caseRecord.zohoTaskId)) as { data?: unknown[] };
+    taskRecord = Array.isArray(raw?.data) ? (raw.data[0] as Record<string, unknown>) : null;
+  } catch (err) {
+    return res.status(502).json({
+      error: `Zoho fetch failed: ${(err as Error).message}`,
+      zohoTaskId: caseRecord.zohoTaskId,
+    });
+  }
+  if (!taskRecord) {
+    return res.status(404).json({
+      error: "Zoho task no longer exists",
+      zohoTaskId: caseRecord.zohoTaskId,
+    });
+  }
+
+  // 2. Map fields
+  const mapping = mapZohoTaskToCase(taskRecord);
+
+  // 3a. Resolve provider from name → ID (only if the name has actually changed)
+  let resolvedProviderId: string | null = caseRecord.providerId;
+  const currentProviderName = caseRecord.provider?.name ?? null;
+  if (
+    mapping.providerName &&
+    mapping.providerName.trim().toLowerCase() !==
+      (currentProviderName ?? "").trim().toLowerCase()
+  ) {
+    const provider = await prisma.provider.findFirst({
+      where: { name: { equals: mapping.providerName, mode: "insensitive" } },
+    });
+    if (provider) {
+      resolvedProviderId = provider.id;
+    }
+    // If no match, leave the existing providerId alone — better than orphaning.
+  }
+
+  // 3b. Resolve Zoho Owner → app user.
+  //
+  // Critical: when Zoho says the Owner has changed but the new person isn't
+  // in our DB yet, we MUST NOT fall back to the previous assignee — that
+  // would let a no-longer-responsible CA keep access to a case that's now
+  // someone else's work. So:
+  //
+  //   • Email match (active)        → assign to that user
+  //   • Email match (inactive)      → unassign (set null)
+  //   • No email match BUT Zoho gave us an email
+  //                                  → auto-create the user from Zoho data
+  //                                    (Zoho is the authoritative HR/CRM
+  //                                    record; the new person will inherit
+  //                                    this account when they later sign in
+  //                                    via SSO, since accounts dedupe by
+  //                                    email)
+  //   • Name-only match (active)    → assign to that user
+  //   • Name-only, no match         → unassign (don't leave stale owner)
+  //   • Zoho returned no owner info → leave existing assignment alone
+  //                                    (probably a transient API hiccup)
+  let resolvedAssignedToId: string | null = caseRecord.assignedToId;
+  let resolvedAssignedName: string | null = caseRecord.assignedTo?.name ?? null;
+  const currentAssignedName = caseRecord.assignedTo?.name ?? null;
+
+  if (mapping.ownerEmail) {
+    const lower = mapping.ownerEmail.toLowerCase();
+    const existing = await prisma.user.findUnique({ where: { email: lower } });
+
+    if (existing && existing.status === "ACTIVE") {
+      resolvedAssignedToId = existing.id;
+      resolvedAssignedName = existing.name;
+    } else if (existing && existing.status === "INACTIVE") {
+      // Explicitly disabled — don't reactivate, and don't keep old owner.
+      resolvedAssignedToId = null;
+      resolvedAssignedName = null;
+    } else {
+      // Auto-provision from Zoho data so the case can be assigned cleanly.
+      const created = await prisma.user.create({
+        data: {
+          email: lower,
+          name: mapping.ownerName?.trim() || lower.split("@")[0],
+          role: "CA_TEAM",
+          status: "ACTIVE",
+        },
+      });
+      resolvedAssignedToId = created.id;
+      resolvedAssignedName = created.name;
+    }
+  } else if (mapping.ownerName) {
+    // No email — try a name match. We deliberately do NOT auto-create from a
+    // name alone: without an email there's no way to dedupe the user against
+    // a future SSO sign-in.
+    const byName = await prisma.user.findFirst({
+      where: {
+        name: { equals: mapping.ownerName, mode: "insensitive" },
+        status: "ACTIVE",
+      },
+    });
+    if (byName) {
+      resolvedAssignedToId = byName.id;
+      resolvedAssignedName = byName.name;
+    } else {
+      resolvedAssignedToId = null;
+      resolvedAssignedName = null;
+    }
+  }
+
+  // 4. Diff
+  const updates: Record<string, unknown> = {};
+  const changes: { field: string; from: unknown; to: unknown }[] = [];
+
+  const considerChange = (
+    field: string,
+    incoming: unknown,
+    current: unknown,
+    dbField: string = field,
+  ) => {
+    // Skip if Zoho returned nothing for this field — never blank-out an
+    // existing value just because Zoho omits it on this read.
+    if (incoming === undefined || incoming === null || incoming === "") return;
+    if (incoming === current) return;
+    updates[dbField] = incoming;
+    changes.push({ field, from: current, to: incoming });
+  };
+
+  considerChange("clientName", mapping.clientName, caseRecord.clientName);
+  considerChange("policyRef", mapping.policyRef, caseRecord.policyRef);
+  considerChange("planType", mapping.planType, caseRecord.planType);
+  considerChange("zohoDeepLink", mapping.zohoDeepLink, caseRecord.zohoDeepLink);
+  considerChange("zohoCaseId", mapping.zohoCaseId, caseRecord.zohoCaseId);
+  considerChange("clientZohoId", mapping.clientZohoId, caseRecord.clientZohoId);
+  if (resolvedProviderId !== caseRecord.providerId) {
+    updates.providerId = resolvedProviderId;
+    changes.push({
+      field: "provider",
+      from: currentProviderName,
+      to: mapping.providerName ?? null,
+    });
+  }
+  if (resolvedAssignedToId !== caseRecord.assignedToId) {
+    updates.assignedToId = resolvedAssignedToId;
+    changes.push({
+      field: "assignedTo",
+      from: currentAssignedName,
+      to: resolvedAssignedName,
+    });
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return res.json({
+      synced: true,
+      changed: false,
+      changes: [],
+      case: caseRecord,
+    });
+  }
+
+  // 5. Apply updates
+  const updated = await prisma.case.update({
+    where: { id },
+    data: updates,
+    include: { provider: true, assignedTo: true, createdBy: true },
+  });
+
+  // 6. Audit (one summary entry per sync — no enum value for "ZOHO sync",
+  // so we use CASE_UPDATED + source SYSTEM and stash the diff in metadata).
+  await prisma.auditLog.create({
+    data: {
+      caseId: id,
+      userId: req.user!.id,
+      action: "CASE_UPDATED",
+      source: "SYSTEM",
+      newValue: `Synced ${changes.length} field${changes.length === 1 ? "" : "s"} from Zoho`,
+      metadata: {
+        sync: "zoho",
+        zohoTaskId: caseRecord.zohoTaskId,
+        changes,
+      },
+    },
+  });
+
+  res.json({ synced: true, changed: true, changes, case: updated });
 });
 
 export { router as caseRoutes };

@@ -1,6 +1,6 @@
 // backend/src/routes/documents.ts
 import { Router, Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import multer from "multer";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { uploadToAzureBlob, generateSasUrl } from "../services/storage";
@@ -102,6 +102,10 @@ router.get("/:caseId/documents/:docId/url", requireAuth, async (req: Request, re
 });
 
 // ── Delete Document ─────────────────────────────────────
+//
+// Hard-delete (rare in production — usually we'd soft-delete instead). The
+// audit row is the only post-hoc evidence the file ever existed, so it's
+// captured before the row is removed and includes the filename + metadata.
 router.delete(
   "/:caseId/documents/:docId",
   requireAuth,
@@ -111,6 +115,25 @@ router.delete(
     if (!doc) return res.status(404).json({ error: "Document not found" });
 
     await prisma.document.delete({ where: { id: req.params.docId } });
+
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.caseId,
+        userId: req.user!.id,
+        action: "DOCUMENT_DELETED",
+        source: "MANUAL",
+        oldValue: doc.filename ?? doc.originalName ?? doc.id,
+        metadata: {
+          documentId: doc.id,
+          filename: doc.filename,
+          originalName: doc.originalName,
+          status: doc.status,
+          pageCount: doc.pageCount,
+          uploadedAt: doc.createdAt,
+        },
+      },
+    });
+
     res.json({ message: "Document deleted" });
   }
 );
@@ -168,7 +191,12 @@ async function triggerExtraction(docId: string, caseId: string, userId: string) 
       })),
     });
 
-    // Save extracted values to checklist fields
+    // Save extracted values to checklist fields and stage per-field audit
+    // entries. We accumulate audit rows in `fieldAudits` and write them in a
+    // single `createMany` after the loop — a 50-field extraction would
+    // otherwise be 50 sequential round-trips.
+    const fieldAudits: Prisma.AuditLogCreateManyInput[] = [];
+
     for (const result of extracted.fields) {
       const field = caseRecord.checklistFields.find(
         (f) => f.template.fieldKey === result.fieldKey
@@ -190,6 +218,26 @@ async function triggerExtraction(docId: string, caseId: string, userId: string) 
             confidence: "CONFLICT",
           },
         });
+        // Conflict — log so the audit trail shows which field / page caused it
+        fieldAudits.push({
+          caseId,
+          userId,
+          action: "FIELD_EXTRACTED",
+          source: "AI",
+          fieldId: field.id,
+          fieldKey: field.template.fieldKey,
+          oldValue: field.value,
+          newValue: result.value,
+          metadata: {
+            fieldLabel: field.template.fieldName,
+            confidence: "CONFLICT",
+            documentId: docId,
+            page: result.pageNumber ?? null,
+            section: result.section ?? null,
+            quote: result.quote ?? null,
+            conflictedWith: field.value,
+          },
+        });
       } else {
         await prisma.checklistField.update({
           where: { id: field.id },
@@ -205,7 +253,30 @@ async function triggerExtraction(docId: string, caseId: string, userId: string) 
             hasConflict: false,
           },
         });
+        fieldAudits.push({
+          caseId,
+          userId,
+          action: "FIELD_EXTRACTED",
+          source: "AI",
+          fieldId: field.id,
+          fieldKey: field.template.fieldKey,
+          oldValue: field.value,
+          newValue: result.value,
+          metadata: {
+            fieldLabel: field.template.fieldName,
+            confidence: result.confidence,
+            documentId: docId,
+            page: result.pageNumber ?? null,
+            section: result.section ?? null,
+            quote: result.quote ?? null,
+          },
+        });
       }
+    }
+
+    // Batch-insert per-field audit rows (skipped if extraction returned zero).
+    if (fieldAudits.length > 0) {
+      await prisma.auditLog.createMany({ data: fieldAudits });
     }
 
     const elapsedMs = Date.now() - start;
@@ -221,13 +292,20 @@ async function triggerExtraction(docId: string, caseId: string, userId: string) 
       },
     });
 
+    // Document-level summary entry — sits alongside the per-field rows so the
+    // timeline can group them visually.
     await prisma.auditLog.create({
       data: {
         caseId,
         userId,
         action: "AI_EXTRACTION_RUN",
         newValue: `${extracted.fields.length} fields extracted`,
-        metadata: { documentId: docId, elapsedMs, model: extracted.model },
+        metadata: {
+          documentId: docId,
+          elapsedMs,
+          model: extracted.model,
+          fieldCount: extracted.fields.length,
+        },
         source: "AI",
       },
     });

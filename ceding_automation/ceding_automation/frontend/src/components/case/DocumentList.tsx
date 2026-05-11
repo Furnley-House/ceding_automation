@@ -1,6 +1,9 @@
 import { useState } from "react";
 import {
   FileText,
+  FileSpreadsheet,
+  FileType,
+  File as FileIcon,
   Loader2,
   Sparkles,
   Trash2,
@@ -39,6 +42,40 @@ function getFileName(d: DocumentRow): string {
     (d as any).file_name ??
     "Unnamed document"
   );
+}
+
+/**
+ * Pick a file-type icon + tint based on extension or MIME. Keeps the doc list
+ * scannable when a case has a mix of provider PDFs, Excel illustrations and
+ * Word notes.
+ */
+function getFileTypeIcon(d: DocumentRow): { Icon: typeof FileText; cls: string } {
+  const name = getFileName(d).toLowerCase();
+  const mime = ((d as any).mime_type ?? (d as any).mimeType ?? "").toLowerCase();
+
+  if (name.endsWith(".pdf") || mime === "application/pdf") {
+    return { Icon: FileText, cls: "text-overdue" };
+  }
+  if (
+    name.endsWith(".xlsx") ||
+    name.endsWith(".xls") ||
+    mime.includes("spreadsheet") ||
+    mime === "application/vnd.ms-excel"
+  ) {
+    return { Icon: FileSpreadsheet, cls: "text-success" };
+  }
+  if (
+    name.endsWith(".docx") ||
+    name.endsWith(".doc") ||
+    mime.includes("wordprocessingml") ||
+    mime === "application/msword"
+  ) {
+    return { Icon: FileType, cls: "text-info" };
+  }
+  if (name.endsWith(".txt") || mime === "text/plain") {
+    return { Icon: FileText, cls: "text-muted-foreground" };
+  }
+  return { Icon: FileIcon, cls: "text-muted-foreground" };
 }
 
 export function DocumentList({
@@ -88,6 +125,7 @@ export function DocumentList({
         const isExtracting = extractingId === d.id || rawStatus === "PROCESSING";
         const fileName = getFileName(d);
         const errorMsg = (d as any).error_message ?? (d as any).extraction_error;
+        const { Icon: TypeIcon, cls: typeIconCls } = getFileTypeIcon(d);
 
         return (
           <li
@@ -104,7 +142,7 @@ export function DocumentList({
               className="flex items-center gap-2.5 min-w-0 flex-1 text-left"
             >
               <div className="h-9 w-9 rounded bg-muted flex items-center justify-center shrink-0">
-                <FileText className="h-4 w-4 text-muted-foreground" />
+                <TypeIcon className={`h-4 w-4 ${typeIconCls}`} />
               </div>
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-semibold text-foreground truncate">

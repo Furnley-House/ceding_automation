@@ -213,9 +213,12 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
     pickId(task, ['Who_Id']) ||
     pickId(task, ['What_Id']);
 
+  // `Provider_group` is the actual field used on Furnley House's Zoho Tasks;
+  // the older `Provider` / `Provider_Name` / `Ceding_Provider` keys are kept
+  // as fallbacks so older orgs still map cleanly.
   const providerName =
     (providerField && pickString(task, [providerField])) ||
-    pickString(task, ['Provider', 'Provider_Name', 'Ceding_Provider']);
+    pickString(task, ['Provider_group', 'Provider', 'Provider_Name', 'Ceding_Provider']);
 
   const planTypeRaw =
     (planTypeField && pickString(task, [planTypeField])) ||

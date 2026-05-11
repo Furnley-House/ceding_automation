@@ -188,6 +188,17 @@ export function ExportWorkspace({ caseItem }: Props) {
       XLSX.writeFile(wb, fileName);
       setLastExportAt(new Date().toISOString());
       toast.success("Excel file downloaded", { description: fileName });
+      // Audit. Server-side write so the actor is the JWT subject and can't be
+      // spoofed. Failure here is non-blocking — the user got their file.
+      try {
+        await auditApi.logExport(caseItem.id, {
+          action: "CHECKLIST_EXPORTED",
+          fileName,
+          notes: `${stats.approved}/${stats.total} fields approved at export time`,
+        });
+      } catch (auditErr) {
+        console.warn("Failed to log CHECKLIST_EXPORTED audit:", auditErr);
+      }
     } catch (err) {
       console.error(err);
       toast.error("Export failed", { description: err instanceof Error ? err.message : "Unknown error" });
@@ -204,6 +215,16 @@ export function ExportWorkspace({ caseItem }: Props) {
       const stubLink = `https://workdrive.zoho.com/file/stub-${caseItem.case_ref.toLowerCase()}`;
       setWorkdriveLink(stubLink);
       toast.success("Uploaded to WorkDrive", { description: "CA team notified" });
+      try {
+        await auditApi.logExport(caseItem.id, {
+          action: "WORKDRIVE_EXPORTED",
+          fileName,
+          destination: stubLink,
+          notes: "Uploaded to WorkDrive (Client / Deal WIP)",
+        });
+      } catch (auditErr) {
+        console.warn("Failed to log WORKDRIVE_EXPORTED audit:", auditErr);
+      }
     } catch (err) {
       console.error(err);
       toast.error("Upload failed", { description: err instanceof Error ? err.message : "Unknown error" });

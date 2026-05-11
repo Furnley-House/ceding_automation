@@ -10,7 +10,26 @@ interface Props {
   onUploaded?: () => void;
 }
 
-const MAX_BYTES = 20 * 1024 * 1024; // 20 MB
+const MAX_BYTES = 20 * 1024 * 1024; // 20 MB (backend allows up to 50 MB; UI is intentionally stricter)
+
+// Per FR-06: accept PDF, Word (.doc/.docx), Excel (.xls/.xlsx) and plain text.
+// Some browsers / OSes report `application/octet-stream` for legacy Office
+// files instead of the real MIME type, so we accept the file when EITHER the
+// extension OR the MIME is recognised.
+const ALLOWED_EXTENSIONS = [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt"] as const;
+const ALLOWED_MIME_TYPES = [
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "text/plain",
+];
+const EXTENSION_RE = new RegExp(`(${ALLOWED_EXTENSIONS.join("|").replace(/\./g, "\\.")})$`, "i");
+
+function isAcceptedFile(f: File): boolean {
+  return EXTENSION_RE.test(f.name) || ALLOWED_MIME_TYPES.includes(f.type);
+}
 
 export function DocumentUploader({ caseId, onUploaded }: Props) {
   const [busy, setBusy] = useState(false);
@@ -24,8 +43,10 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
           toast.error(`${f.name} is over 20 MB`);
           return false;
         }
-        if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") {
-          toast.error(`${f.name} is not a PDF`);
+        if (!isAcceptedFile(f)) {
+          toast.error(`${f.name} is not a supported format`, {
+            description: "Allowed: PDF, Word (.doc/.docx), Excel (.xls/.xlsx), plain text (.txt)",
+          });
           return false;
         }
         return true;
@@ -53,7 +74,14 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
-    accept: { "application/pdf": [".pdf"] },
+    accept: {
+      "application/pdf": [".pdf"],
+      "application/msword": [".doc"],
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+      "application/vnd.ms-excel": [".xls"],
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+      "text/plain": [".txt"],
+    },
     multiple: true,
     noClick: true,
   });
@@ -68,10 +96,10 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
       <input {...getInputProps()} />
       <Upload className="h-10 w-10 mx-auto mb-3 text-muted-foreground" />
       <p className="text-sm font-semibold text-foreground mb-1">
-        {isDragActive ? "Drop the PDFs here…" : "Drop policy pack PDFs here"}
+        {isDragActive ? "Drop the documents here…" : "Drop policy documents here"}
       </p>
       <p className="text-xs text-muted-foreground mb-4">
-        Multiple files supported · 20 MB max each · provider packs, illustrations, terms
+        PDF · Word (.doc/.docx) · Excel (.xls/.xlsx) · Plain text (.txt) · 20 MB max each
       </p>
       <Button type="button" onClick={open} disabled={busy} variant="outline" size="sm">
         {busy ? (

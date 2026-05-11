@@ -134,26 +134,64 @@ router.get("/azure/callback", async (req: Request, res: Response) => {
         ?.toLowerCase()
         ?.trim() ?? "";
 
+    // Azure object id — stable per-user identifier we store on the user row
+    // so admins can see at a glance who has signed in via SSO at least once.
+    const azureOid = (payload.oid as string | undefined) ?? null;
+
     if (!email) {
       throw new Error("Azure AD did not return an email address. Check the app registration scopes.");
     }
 
     // Look up our app user by email
-    const user = await prisma.user.findUnique({
+    let user = await prisma.user.findUnique({
       where: { email },
-      select: { id: true, email: true, name: true, role: true, status: true },
+      select: { id: true, email: true, name: true, role: true, status: true, ssoId: true },
     });
 
+    // Auto-provision on first sign-in.
+    //
+    // If Azure AD vouches for this email (i.e. the user successfully
+    // authenticated against our tenant), we trust them as a Furnley House
+    // member and create a baseline `CA_TEAM` account on the fly. Admins can
+    // promote them to ADVISER / PARAPLANNER / ADMIN afterwards. The
+    // AZURE_TENANT_ID env var is the gate that keeps this safe — only users
+    // inside the configured directory can ever reach this branch.
+    //
+    // Without this, a CA whose Zoho task gets reassigned to a brand-new hire
+    // would have no way to hand the case over until an admin manually creates
+    // the new hire's row, which is exactly the friction we want to avoid.
     if (!user) {
-      const msg = encodeURIComponent(
-        `No account found for ${email}. Ask an admin to add you in the Ceding App.`
-      );
-      return res.redirect(`${fe}/auth/callback?error=${msg}`);
-    }
+      const displayName =
+        ((payload.name as string | undefined) ??
+          [payload.given_name, payload.family_name]
+            .filter(Boolean)
+            .join(" ")
+            .trim() ??
+          "")
+          .trim() || email.split("@")[0];
 
-    if (user.status === "INACTIVE") {
+      user = await prisma.user.create({
+        data: {
+          email,
+          name: displayName,
+          role: "CA_TEAM",
+          status: "ACTIVE",
+          ssoId: azureOid,
+        },
+        select: { id: true, email: true, name: true, role: true, status: true, ssoId: true },
+      });
+    } else if (user.status === "INACTIVE") {
       const msg = encodeURIComponent("Your account is inactive. Contact an admin.");
       return res.redirect(`${fe}/auth/callback?error=${msg}`);
+    } else if (azureOid && user.ssoId !== azureOid) {
+      // Backfill / refresh ssoId so the admin panel "Sign-in" column lights up
+      // for users who pre-existed before SSO wiring.
+      try {
+        await prisma.user.update({ where: { id: user.id }, data: { ssoId: azureOid } });
+      } catch {
+        // Non-blocking — if the update fails (e.g. ssoId collision) we just
+        // skip it. The user can still sign in.
+      }
     }
 
     // Issue our own JWT

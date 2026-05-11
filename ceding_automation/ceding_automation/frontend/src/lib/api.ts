@@ -78,16 +78,59 @@ export const checklistApi = {
 
 // ── Providers ────────────────────────────────────────────
 export const providersApi = {
-  list: () => api.get("/providers"),
+  list: (includeInactive = false) =>
+    api.get("/providers", {
+      params: includeInactive ? { includeInactive: "true" } : undefined,
+    }),
   get: (id: string) => api.get(`/providers/${id}`),
   create: (data: Record<string, unknown>) => api.post("/providers", data),
   update: (id: string, data: Record<string, unknown>) => api.put(`/providers/${id}`, data),
   delete: (id: string) => api.delete(`/providers/${id}`),
 };
 
+// ── Checklist Templates (admin) ──────────────────────────
+export const checklistTemplatesApi = {
+  list: (params?: { planType?: string; includeInactive?: boolean }) =>
+    api.get("/checklist-templates", {
+      params: {
+        ...(params?.planType ? { planType: params.planType } : {}),
+        ...(params?.includeInactive ? { includeInactive: "true" } : {}),
+      },
+    }),
+  create: (data: Record<string, unknown>) => api.post("/checklist-templates", data),
+  update: (id: string, data: Record<string, unknown>) =>
+    api.patch(`/checklist-templates/${id}`, data),
+  reorder: (items: { id: string; displayOrder: number }[]) =>
+    api.post("/checklist-templates/reorder", items),
+  delete: (id: string) => api.delete(`/checklist-templates/${id}`),
+};
+
 // ── Audit ────────────────────────────────────────────────
 export const auditApi = {
   getForCase: (caseId: string) => api.get(`/audit/cases/${caseId}`),
+  // Global audit (admin / paraplanner / adviser only — backend gates access)
+  list: (params?: {
+    action?: string;
+    source?: string;
+    caseId?: string;
+    userId?: string;
+    search?: string;
+    from?: string;
+    to?: string;
+    page?: number;
+    limit?: number;
+  }) => api.get("/audit", { params }),
+  // Record an export action — server writes the audit row using the JWT
+  // identity so the actor can't be spoofed.
+  logExport: (
+    caseId: string,
+    body: {
+      action: "CHECKLIST_EXPORTED" | "WORKDRIVE_EXPORTED";
+      fileName?: string;
+      destination?: string;
+      notes?: string;
+    },
+  ) => api.post(`/audit/cases/${caseId}/log-export`, body),
 };
 
 // ── Notifications ────────────────────────────────────────

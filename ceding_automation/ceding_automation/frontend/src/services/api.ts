@@ -150,6 +150,23 @@ export async function updateCase(id: string, updates: Record<string, unknown>) {
   return snakeKeys(res.data);
 }
 
+/**
+ * Re-pulls the linked Zoho task and updates any case fields that have changed
+ * (provider, policy ref, plan type, client name, etc.). Returns a `changed`
+ * flag and the list of diffs so the UI can show a confirmation toast.
+ */
+export interface SyncResult {
+  synced: boolean;
+  changed: boolean;
+  changes: Array<{ field: string; from: unknown; to: unknown }>;
+  case?: Record<string, unknown>;
+}
+
+export async function syncCaseFromZoho(id: string): Promise<SyncResult> {
+  const res = await api.post(`/cases/${id}/sync-from-zoho`);
+  return res.data as SyncResult;
+}
+
 // ==================== CHECKLIST ====================
 
 export async function getChecklistFields(caseId: string) {
