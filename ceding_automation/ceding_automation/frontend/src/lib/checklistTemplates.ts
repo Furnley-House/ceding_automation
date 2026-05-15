@@ -36,7 +36,7 @@ const NOTES_FIELD: ChecklistFieldDef = {
 // ────────────────────────────────────────────────────────────
 const PENSION_FIELDS: ChecklistFieldDef[] = [
   // Basic Details
-  { key: "provider_name", label: "Provider Name", type: "text", section: "Basic Details", required: true },
+  { key: "Provider_group", label: "Provider Name", type: "text", section: "Basic Details", required: true },
   { key: "provider_contact", label: "Provider Telephone & Email", type: "text", section: "Basic Details" },
   { key: "plan_number", label: "Plan Number", type: "text", section: "Basic Details", required: true },
   { key: "pension_type", label: "Type of Pension (Personal Pension / SIPP / Other)", type: "text", section: "Basic Details", required: true },
@@ -123,7 +123,7 @@ const PENSION_FIELDS: ChecklistFieldDef[] = [
 // ISA
 // ────────────────────────────────────────────────────────────
 const ISA_FIELDS: ChecklistFieldDef[] = [
-  { key: "provider_name", label: "Provider Name", type: "text", section: "Basic Details", required: true },
+  { key: "Provider_group", label: "Provider Name", type: "text", section: "Basic Details", required: true },
   { key: "provider_contact", label: "Provider Telephone & Email", type: "text", section: "Basic Details" },
   { key: "plan_number", label: "Plan Number", type: "text", section: "Basic Details", required: true },
   { key: "isa_type", label: "Type of ISA", type: "select", section: "Basic Details", options: ["Stocks & Shares", "Cash", "Lifetime"], required: true },
@@ -169,7 +169,7 @@ const ISA_FIELDS: ChecklistFieldDef[] = [
 // ────────────────────────────────────────────────────────────
 const GIA_FIELDS: ChecklistFieldDef[] = [
   { key: "single_or_joint", label: "Single or Joint client", type: "select", section: "Basic Details", options: ["Single", "Joint"], required: true },
-  { key: "provider_name", label: "Provider Name", type: "text", section: "Basic Details", required: true },
+  { key: "Provider_group", label: "Provider Name", type: "text", section: "Basic Details", required: true },
   { key: "provider_contact", label: "Provider Telephone & Email", type: "text", section: "Basic Details" },
   { key: "plan_number", label: "Plan Number", type: "text", section: "Basic Details", required: true },
   { key: "start_date", label: "Start Date", type: "date", section: "Basic Details" },

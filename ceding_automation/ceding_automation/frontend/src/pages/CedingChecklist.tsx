@@ -152,7 +152,7 @@ const CedingChecklist = () => {
         title="Ceding Checklist"
         subtitle={
           selectedCase
-            ? `${selectedCase.client_name} — ${selectedCase.provider_name} ${selectedCase.plan_number} · ${selectedCase.plan_type}`
+            ? `${selectedCase.client_name} — ${selectedCase.Provider_group} ${selectedCase.plan_number} · ${selectedCase.plan_type}`
             : "Select a case to view its checklist"
         }
         action={
@@ -194,7 +194,7 @@ const CedingChecklist = () => {
           <SelectContent>
             {cases.map(c => (
               <SelectItem key={c.id} value={c.id}>
-                {c.client_name} — {c.provider_name} {c.plan_number}
+                {c.client_name} — {c.Provider_group} {c.plan_number}
               </SelectItem>
             ))}
           </SelectContent>

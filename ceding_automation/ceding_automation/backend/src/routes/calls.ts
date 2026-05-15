@@ -1,5 +1,6 @@
 // backend/src/routes/calls.ts
 import { Router, Request, Response } from "express";
+import axios from "axios";
 import { PrismaClient } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
 import {
@@ -7,7 +8,13 @@ import {
   getRingOutStatus,
   cancelRingOut,
   isRingCentralConfigured,
+  getAccessToken,
   AGENT_PHONE,
+  fetchCallTranscript,
+  listCallRecordings,
+  listCallRecordingsWithToken,
+  transcribeRecordingWithToken,
+  transcribeRecording,
 } from "../services/ringcentral";
 import { generateCallScript, analyseTranscript } from "../services/aiCallAssist";
 
@@ -229,6 +236,184 @@ router.post(
     });
 
     res.json({ transcriptId: saved.id, fieldsUpdated: updated });
+  }
+);
+
+// ── List recordings using a caller-supplied RC access token ──────────────────
+// The token is obtained by the logged-in user from the RC widget's network
+// requests (DevTools → Network → any platform.ringcentral.com call →
+// Request Headers → Authorization: Bearer <TOKEN>).
+// This bypasses server-side JWT config so any team member can use their own token.
+router.get(
+  "/:caseId/calls/rc-recordings-token",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { rcToken } = req.query as { rcToken?: string };
+    if (!rcToken) return res.status(400).json({ error: "rcToken query param is required" });
+    res.set('Cache-Control', 'no-store'); // prevent 304 caching — token + recordings change frequently
+    try {
+      const recordings = await listCallRecordingsWithToken(rcToken, { perPage: 30 });
+      res.json({ recordings });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to fetch recordings";
+      // Use 403 (not 401) so the frontend's global auth interceptor doesn't log the user out
+      const httpStatus = (err as any)?.rcStatus === 403 || msg.includes("expired") || msg.includes("Unauthorized") ? 403 : 503;
+      res.status(httpStatus).json({ error: msg });
+    }
+  }
+);
+
+// ── Stream recording audio through backend (server JWT — browser never sees the token) ──
+router.get(
+  "/:caseId/calls/rc-recording-audio",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { contentUri, rcToken: userToken } = req.query as { contentUri?: string; rcToken?: string };
+    if (!contentUri) return res.status(400).json({ error: "contentUri required" });
+    try {
+      // Prefer server JWT; fall back to user-supplied token
+      let bearerToken: string;
+      if (isRingCentralConfigured()) {
+        bearerToken = await getAccessToken();
+      } else if (userToken) {
+        bearerToken = userToken;
+      } else {
+        return res.status(503).json({ error: "RC not configured and no token provided" });
+      }
+      const audioResp = await axios.get(decodeURIComponent(contentUri), {
+        headers: { Authorization: `Bearer ${bearerToken}` },
+        responseType: "stream",
+      });
+      res.set("Content-Type", (audioResp.headers as Record<string, string>)["content-type"] || "audio/mpeg");
+      res.set("Content-Disposition", (audioResp.headers as Record<string, string>)["content-disposition"] || "inline; filename=recording.mp3");
+      (audioResp.data as NodeJS.ReadableStream).pipe(res);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to stream recording";
+      console.error("[calls] rc-recording-audio error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  }
+);
+
+// ── Transcribe using server-side JWT (no user token needed) ──────────────────────
+router.post(
+  "/:caseId/calls/rc-transcribe",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { contentUri } = req.body as { contentUri?: string };
+    if (!contentUri) return res.status(400).json({ error: "contentUri required" });
+    try {
+      const result = await transcribeRecording(contentUri);
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Transcription failed";
+      console.error("[calls] rc-transcribe error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  }
+);
+
+// ── Transcribe a recording using Azure Whisper + caller-supplied RC token ────────
+// Frontend passes the recording's contentUri and the user's RC bearer token.
+// Backend downloads the MP3 from RC's media server and sends it to Azure Whisper.
+router.post(
+  "/:caseId/calls/rc-transcribe-recording",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { contentUri, rcToken } = req.body as { contentUri?: string; rcToken?: string };
+    if (!contentUri || !rcToken) {
+      return res.status(400).json({ error: "contentUri and rcToken are required" });
+    }
+    try {
+      const result = await transcribeRecordingWithToken(contentUri, rcToken);
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Transcription failed";
+      console.error("[calls] rc-transcribe error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  }
+);
+
+// ── Debug: return raw RC call-log response to diagnose recording field structure ──
+router.get(
+  "/:caseId/calls/rc-debug",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { rcToken } = req.query as { rcToken?: string };
+    if (!rcToken) return res.status(400).json({ error: "rcToken required" });
+    res.set("Cache-Control", "no-store");
+    const servers = ["https://platform.ringcentral.com", "https://platform.devtest.ringcentral.com"];
+    const out: Record<string, unknown> = {};
+    for (const server of servers) {
+      try {
+        const { data } = await (await import("axios")).default.get(
+          `${server}/restapi/v1.0/account/~/extension/~/call-log`,
+          { headers: { Authorization: `Bearer ${rcToken}` }, params: { type: "Voice", showRecording: true, perPage: 10 } }
+        );
+        const records = ((data as Record<string, unknown>)?.records ?? []) as Record<string, unknown>[];
+        out[server] = {
+          ok: true,
+          totalCount: (data as Record<string, unknown>).totalCount,
+          records: records.slice(0, 5).map((r) => ({
+            id: r.id,
+            direction: r.direction,
+            startTime: r.startTime,
+            recording: r.recording,
+          })),
+        };
+      } catch (err: unknown) {
+        out[server] = { ok: false, status: (err as any)?.response?.status, msg: (err as Error).message };
+      }
+    }
+    res.json(out);
+  }
+);
+
+// ── List recent RC call recordings (filterable by provider phone) ─────────────
+router.get(
+  "/:caseId/calls/rc-recordings",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { phoneNumber, dateFrom, perPage } = req.query as {
+      phoneNumber?: string;
+      dateFrom?: string;
+      perPage?: string;
+    };
+    try {
+      const recordings = await listCallRecordings({
+        phoneNumber,
+        dateFrom,
+        perPage: perPage ? parseInt(perPage, 10) : 20,
+      });
+      res.json({ recordings });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to fetch recordings";
+      console.error("[calls] rc-recordings error:", msg);
+      res.status(503).json({ error: msg });
+    }
+  }
+);
+
+// ── Fetch RC call transcript by telephony session ID ─────────────────────────
+// Called automatically by the frontend after rc-call-end-notify fires.
+// Looks up the call recording via RC call-log, then submits to RC AI STT.
+router.get(
+  "/:caseId/calls/rc-transcript",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { telephonySessionId } = req.query as { telephonySessionId?: string };
+    if (!telephonySessionId) {
+      return res.status(400).json({ error: "telephonySessionId is required" });
+    }
+    try {
+      const result = await fetchCallTranscript(telephonySessionId);
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to fetch transcript";
+      console.error("[calls] rc-transcript error:", msg);
+      res.status(503).json({ error: msg });
+    }
   }
 );
 

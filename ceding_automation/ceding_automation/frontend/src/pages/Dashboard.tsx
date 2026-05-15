@@ -289,7 +289,7 @@ const Dashboard = () => {
                 >
                   <p className="text-sm font-semibold text-foreground truncate">{c.client_name}</p>
                   <p className="text-xs text-muted-foreground mt-0.5 truncate">
-                    {c.provider_name} · {c.plan_type} ·{" "}
+                    {c.Provider_group} · {c.plan_type} ·{" "}
                     <span className="font-mono">{c.case_ref}</span>
                     {c.zoho_task_id && (
                       <>
@@ -455,7 +455,7 @@ const Dashboard = () => {
                               )}
                               <div className="flex-1 min-w-0">
                                 <p className="text-xs font-medium text-foreground truncate">
-                                  {c.provider_name} · {c.plan_type}
+                                  {c.Provider_group} · {c.plan_type}
                                   {!isMine && c.owner_name && (
                                     <span className="ml-2 text-[10px] font-normal text-muted-foreground">
                                       · owned by {c.owner_name}
@@ -527,7 +527,7 @@ const Dashboard = () => {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-foreground truncate">{c.client_name}</p>
                       <p className="text-xs text-muted-foreground mt-0.5">
-                        {c.provider_name} · {c.plan_type} · {c.plan_number}
+                        {c.Provider_group} · {c.plan_type} · {c.plan_number}
                       </p>
                     </div>
                     <span className={`hidden sm:inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${statusStyle}`}>

@@ -41,7 +41,7 @@ export function AppHeader() {
             const q = searchQuery.toLowerCase();
             return (
               c.client_name.toLowerCase().includes(q) ||
-              c.provider_name.toLowerCase().includes(q) ||
+              c.Provider_group.toLowerCase().includes(q) ||
               c.plan_number.toLowerCase().includes(q) ||
               c.case_ref.toLowerCase().includes(q)
             );
@@ -100,7 +100,7 @@ export function AppHeader() {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-foreground truncate">{c.client_name}</p>
                     <p className="text-xs text-muted-foreground">
-                      {c.provider_name} · {c.plan_number}
+                      {c.Provider_group} · {c.plan_number}
                     </p>
                   </div>
                   <span className="text-[10px] font-mono text-muted-foreground">{c.case_ref}</span>

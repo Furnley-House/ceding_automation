@@ -215,7 +215,7 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
 
   const providerName =
     (providerField && pickString(task, [providerField])) ||
-    pickString(task, ['Provider', 'Provider_Name', 'Ceding_Provider']);
+    pickString(task, ['Provider_group', 'Provider', 'Provider_Name', 'Ceding_Provider']);
 
   const planTypeRaw =
     (planTypeField && pickString(task, [planTypeField])) ||

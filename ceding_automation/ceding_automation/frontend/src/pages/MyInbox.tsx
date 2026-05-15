@@ -122,7 +122,7 @@ const MyInbox = () => {
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground truncate mt-0.5">
-                      {c.provider_name} · {c.plan_type} · {c.plan_number}
+                      {c.Provider_group} · {c.Plan_Number}
                     </p>
                   </div>
 

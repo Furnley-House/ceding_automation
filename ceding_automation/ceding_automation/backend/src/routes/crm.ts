@@ -94,13 +94,16 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
     // 2. Map the task fields → Case fields (best-effort, configurable via env)
     const mapping = mapZohoTaskToCase(taskRecord);
 
-    // 3. Look up provider by name (if any)
+    // 3. Look up provider by name; create a bare record if none found so the name is never lost.
     let providerId: string | undefined;
     if (mapping.providerName) {
-      const provider = await prisma.provider.findFirst({
+      let provider = await prisma.provider.findFirst({
         where: { name: { equals: mapping.providerName, mode: 'insensitive' } },
       });
-      providerId = provider?.id;
+      if (!provider) {
+        provider = await prisma.provider.create({ data: { name: mapping.providerName } });
+      }
+      providerId = provider.id;
     }
 
     // 4. Resolve the Zoho task's Owner to an app user, by email first then by name.
@@ -134,6 +137,26 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
       include: { provider: true },
     });
     if (existing) {
+      // Backfill any blank fields that Zoho now provides
+      const patches: Record<string, unknown> = {};
+      if (!existing.providerId && providerId) patches.providerId = providerId;
+      if (!existing.policyRef && mapping.policyRef) patches.policyRef = mapping.policyRef;
+      if (!existing.zohoDeepLink && mapping.zohoDeepLink) patches.zohoDeepLink = mapping.zohoDeepLink;
+
+      if (Object.keys(patches).length > 0) {
+        const updated = await prisma.case.update({
+          where: { id: existing.id },
+          data: patches,
+          include: { provider: true, createdBy: true, assignedTo: true },
+        });
+        return res.json({
+          case: updated,
+          mapping,
+          zohoTask: taskRecord,
+          message: 'Case already exists — missing fields backfilled',
+          alreadyExisted: true,
+        });
+      }
       return res.json({
         case: existing,
         mapping,

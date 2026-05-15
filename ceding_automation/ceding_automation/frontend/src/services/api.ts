@@ -110,8 +110,11 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
     status: uiStatus,
     current_stage: currentStage,
     stages_completed: stagesCompleted,
-    provider_name: provider?.name ?? "",
+    Provider_group: provider?.name ?? "",
+    Plan_Number: c.policy_ref ?? c.policy_reference ?? "",
     plan_number: c.policy_ref ?? c.policy_reference ?? "",
+    provider_phone_main: (provider?.phone_main as string) ?? "",
+    provider_phone_ceding: (provider?.phone_ceding_dept as string) ?? "",
     assigned_to_name: assignedTo?.name ?? "",
     owner_name: ownerName,
   };

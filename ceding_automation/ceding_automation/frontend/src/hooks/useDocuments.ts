@@ -11,7 +11,7 @@ export interface DocumentRow {
   status?: string | null;
   uploaded_by?: string | null;
   document_type?: string | null;
-  provider_name?: string | null;
+  Provider_group?: string | null;
   fields_extracted?: number | null;
   avg_confidence?: number | null;
   extracted_data?: unknown | null;
