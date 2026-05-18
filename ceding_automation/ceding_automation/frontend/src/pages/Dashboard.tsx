@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -13,6 +13,7 @@ import {
   ChevronDown,
   Phone,
   FileText,
+  FileCheck2,
   Upload,
   Users,
   Wand2,
@@ -31,11 +32,11 @@ const BASELINE_MIN_PER_CASE = 195; // FR-01 KPI: ~195 min baseline before automa
 const MOCK_AI_CONFIDENCE_TREND = "▲ 3 pts"; // MOCK — needs historical snapshots
 const MOCK_PHASE_MEDIANS = [
   // MOCK — needs audit_log aggregation by CASE_STATUS_CHANGED transitions
-  { label: "1 · LOA prep", minutes: 3.2, color: "#00C2CB", widthPct: 18 },
-  { label: "2 · AI extract", minutes: 1.1, color: "#4f7cf2", widthPct: 8 },
-  { label: "3 · Call Assist", minutes: 4.4, color: "#6e56cf", widthPct: 28 },
-  { label: "4 · Apply findings", minutes: 2.0, color: "#d99c4d", widthPct: 14 },
-  { label: "5 · Hand off", minutes: 0.6, color: "#ef6b6b", widthPct: 5 },
+  { label: "1 · LOA prep", minutes: 3.2, color: "#63B1BC", widthPct: 18 },
+  { label: "2 · AI extract", minutes: 1.1, color: "#426DA9", widthPct: 8 },
+  { label: "3 · Call Assist", minutes: 4.4, color: "#8C4799", widthPct: 28 },
+  { label: "4 · Apply findings", minutes: 2.0, color: "#FFB81C", widthPct: 14 },
+  { label: "5 · Hand off", minutes: 0.6, color: "#CB333B", widthPct: 5 },
 ];
 const MOCK_PROVIDER_RESPONSE_DAYS = 1.2; // MOCK — needs LOA-sent → first-doc median
 const MOCK_PROVIDER_RESPONSE_DELTA = "▼ 0.4d slower (Aviva)";
@@ -65,6 +66,62 @@ function timeAgo(iso: string | Date | null | undefined): string {
   const days = Math.round(h / 24);
   if (days < 7) return `${days}d ago`;
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+}
+
+// Animates a numeric target from 0 → target over `duration` ms using
+// an ease-out curve. Falls back to the raw value when reduced-motion
+// is requested or when the target is not a finite number.
+function useCountUp(target: number | string, duration = 1400, delayMs = 0): string {
+  const isNum = typeof target === "number" && Number.isFinite(target);
+  const [display, setDisplay] = useState<number>(isNum ? 0 : 0);
+  const rafRef = useRef<number | null>(null);
+  const startRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!isNum) return;
+    const prefersReducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReducedMotion) {
+      setDisplay(target as number);
+      return;
+    }
+
+    const isInteger = Number.isInteger(target as number);
+    const targetNum = target as number;
+    let cancelled = false;
+
+    const tick = (now: number) => {
+      if (cancelled) return;
+      if (startRef.current === null) startRef.current = now;
+      const elapsed = now - startRef.current - delayMs;
+      if (elapsed < 0) {
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      const t = Math.min(1, elapsed / duration);
+      const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic
+      const current = targetNum * eased;
+      setDisplay(isInteger ? Math.round(current) : Math.round(current * 10) / 10);
+      if (t < 1) {
+        rafRef.current = requestAnimationFrame(tick);
+      } else {
+        setDisplay(targetNum);
+      }
+    };
+
+    startRef.current = null;
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, [target, duration, delayMs, isNum]);
+
+  if (!isNum) return String(target);
+  return Number.isInteger(target as number)
+    ? String(display)
+    : display.toFixed(1);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -241,7 +298,7 @@ const Dashboard = () => {
     const otherN = arr.slice(3).reduce((s, x) => s + x.n, 0);
     if (otherN > 0) top.push({ name: "Other", n: otherN });
     const total = top.reduce((s, x) => s + x.n, 0);
-    const palette = ["#00C2CB", "#6e56cf", "#4f7cf2", "#ef6b6b"];
+    const palette = ["#63B1BC", "#8C4799", "#426DA9", "#CB333B"];
     return top.map((p, i) => ({
       ...p,
       pct: total > 0 ? Math.round((p.n / total) * 1000) / 10 : 0,
@@ -273,13 +330,30 @@ const Dashboard = () => {
           ? top.stages_completed.length
           : 0;
         const progressPct = Math.round((completed / totalStages) * 100);
+        const tasksLeft = Math.max(0, totalStages - completed);
+        // "Prepare for SR" is the action that takes the user to Stage 9
+        // (Export — SR pack assembly + WorkDrive upload). It is the next
+        // action *after* all preceding case-team tasks have been completed
+        // for a client. The UI stage map is:
+        //   1 CaseDetails · 2 SendLOA · 3 DocumentUpload · 4 AIExtraction
+        //   5 CallAssist  · 6 ReviewChecklist · 7 AuditTrail · 8 Approval
+        //   9 Export (= Prepare SR pack) · 10 Complete
+        // So when `completed === 8` (stages 1-8 done) AND the case isn't
+        // yet closed AND SR hasn't already been prepared, the next action
+        // is to assemble the SR pack — that's when we surface the button.
+        const status = (top.status ?? "").toLowerCase();
+        const caseClosed = ["complete", "approved"].includes(status);
+        const alreadyPrepared = Boolean(top.sr_prepared_at);
+        const srReady =
+          !caseClosed && !alreadyPrepared && completed === 8;
         return {
           name,
           top,
           completed,
           totalStages,
           progressPct,
-          tasksLeft: Math.max(0, totalStages - completed),
+          tasksLeft,
+          srReady,
           updatedRelative: timeAgo(top.updated_at ?? top.created_at),
         };
       })
@@ -354,29 +428,36 @@ const Dashboard = () => {
         className="rounded-2xl px-8 py-7 text-white relative overflow-hidden"
         style={{
           background:
-            "linear-gradient(135deg, #0D1B2A 0%, #0a1620 60%, #15293f 100%)",
+            "linear-gradient(135deg, #253746 0%, #1a2832 60%, #2f4555 100%)",
         }}
       >
         <div
           className="absolute inset-0 pointer-events-none"
           style={{
             background:
-              "radial-gradient(40% 80% at 100% 0%, rgba(0,194,203,0.12), transparent 60%), radial-gradient(30% 60% at 80% 100%, rgba(184,136,74,0.08), transparent 60%)",
+              "radial-gradient(40% 80% at 100% 0%, rgba(99,177,188,0.12), transparent 60%), radial-gradient(30% 60% at 80% 100%, rgba(184,136,74,0.08), transparent 60%)",
           }}
         />
         <div className="flex items-center justify-between gap-8 relative">
           <div className="min-w-0">
             <div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-teal flex items-center gap-2.5">
               <span>{heroDate} · Week {weekNum}</span>
-              <span className="flex-1 max-w-[60px] h-px" style={{ background: "linear-gradient(90deg, rgba(0,194,203,0.5), transparent)" }} />
+              <span className="flex-1 max-w-[60px] h-px" style={{ background: "linear-gradient(90deg, rgba(99,177,188,0.5), transparent)" }} />
             </div>
-            <h1 className="font-serif text-[36px] leading-tight font-medium tracking-tight mt-3 mb-2">
+            <h1 className="font-sans text-[36px] leading-tight font-bold tracking-tight mt-3 mb-2">
               Welcome back, <em className="text-teal not-italic">{userName?.split(" ")[0] ?? "there"}.</em>
             </h1>
             <p className="text-sm leading-relaxed text-white/60 max-w-[520px]">
               {topCase ? (
                 <>
-                  {topCase.tasksLeft <= 1 ? (
+                  {topCase.srReady ? (
+                    <>
+                      <strong className="text-white/85 font-semibold">{topCase.name}</strong>'s
+                      {topCase.top.provider_name ? ` ${topCase.top.provider_name}` : ""}
+                      {topCase.top.plan_type ? ` ${topCase.top.plan_type}` : ""} case is ready
+                      for SR pack. All upstream tasks are complete.
+                    </>
+                  ) : topCase.tasksLeft <= 1 ? (
                     <>
                       <strong className="text-white/85 font-semibold">{topCase.name}</strong>'s
                       {topCase.top.provider_name ? ` ${topCase.top.provider_name}` : ""}
@@ -399,13 +480,27 @@ const Dashboard = () => {
           </div>
           <div className="flex gap-2 shrink-0">
             {topCase ? (
-              <Button
-                onClick={() => navigate(`/cases/${topCase.top.id}`)}
-                className="gap-2 rounded-full bg-teal text-primary hover:bg-teal/90 border border-teal h-10 px-5 font-semibold"
-              >
-                <Zap className="h-4 w-4" />
-                Resume {topCase.name.split(" ")[0]}'s case
-              </Button>
+              topCase.srReady ? (
+                <Button
+                  onClick={() =>
+                    navigate(`/cases/${topCase.top.id}`, {
+                      state: { goToStage: 9 },
+                    })
+                  }
+                  className="gap-2 rounded-full bg-gradient-to-r from-[#8C4799] to-[#a76ab2] text-white hover:from-[#9b5fa6] hover:to-[#b87fc2] border-0 h-10 px-5 font-semibold shadow-[0_0_0_4px_rgba(140,71,153,0.18)]"
+                >
+                  <FileCheck2 className="h-4 w-4" />
+                  Prepare SR for {topCase.name.split(" ")[0]}
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => navigate(`/cases/${topCase.top.id}`)}
+                  className="gap-2 rounded-full bg-teal text-primary hover:bg-teal/90 border border-teal h-10 px-5 font-semibold"
+                >
+                  <Zap className="h-4 w-4" />
+                  Resume {topCase.name.split(" ")[0]}'s case
+                </Button>
+              )
             ) : null}
             <Button
               variant="outline"
@@ -430,15 +525,17 @@ const Dashboard = () => {
           }
           icon={<Briefcase className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=active")}
+          index={0}
         />
         <KpiTile
-          tone="navy"
+          tone="green"
           label="Done · week"
           value={stats.doneWeek}
           sub="primary KPI"
           delta={stats.doneWeek >= 4 ? "▲ on target" : `target 4 · ${Math.max(0, 4 - stats.doneWeek)} to go`}
           icon={<CheckCircle2 className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=complete")}
+          index={1}
         />
         <KpiTile
           tone="blue"
@@ -447,23 +544,26 @@ const Dashboard = () => {
           sub="awaiting paraplanner"
           icon={<Clock className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=in_review")}
+          index={2}
         />
         <KpiTile
-          tone="coral"
+          tone="gold"
           label="On hold"
           value={stats.onHold}
           sub={stats.onHold === 0 ? "all clear" : "review reason"}
           icon={<AlertTriangle className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=on_hold")}
+          index={3}
         />
         <KpiTile
-          tone="gold"
+          tone="navy"
           label="Time saved"
           value={stats.timeSavedMin ?? "—"}
           suffix={stats.timeSavedMin !== null ? "m" : undefined}
           sub="avg/case vs baseline"
           delta={stats.timeSavedMin !== null ? `baseline ${BASELINE_MIN_PER_CASE}m` : "needs completed cases"}
           icon={<Clock className="h-4 w-4" />}
+          index={4}
         />
         <KpiTile
           tone="violet"
@@ -472,6 +572,7 @@ const Dashboard = () => {
           suffix={stats.aiConfidence !== null ? "%" : undefined}
           sub={`${cases.length} cases · ${MOCK_AI_CONFIDENCE_TREND}`}
           icon={<Sparkles className="h-4 w-4" />}
+          index={5}
         />
       </div>
 
@@ -484,8 +585,8 @@ const Dashboard = () => {
           subtitle="· last 5 weeks"
           legend={
             <>
-              <LegendDot color="#00C2CB" /> Cases opened
-              <LegendDot color="#6e56cf" /> SR delivered
+              <LegendDot color="#63B1BC" /> Cases opened
+              <LegendDot color="#8C4799" /> SR delivered
             </>
           }
         >
@@ -588,7 +689,11 @@ const Dashboard = () => {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-sm font-semibold tracking-tight truncate">{c.name}</span>
-                          {isReady ? (
+                          {c.srReady ? (
+                            <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gradient-to-r from-[#8C4799] to-[#a76ab2] text-white">
+                              Ready for SR
+                            </span>
+                          ) : isReady ? (
                             <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-teal text-primary">
                               {c.tasksLeft} task left
                             </span>
@@ -619,8 +724,8 @@ const Dashboard = () => {
                             style={{
                               width: `${c.progressPct}%`,
                               background: isReady
-                                ? "linear-gradient(90deg, #16a34a, #34d399)"
-                                : "linear-gradient(90deg, #00C2CB, #2fd9e0)",
+                                ? "linear-gradient(90deg, #56C271, #7ad091)"
+                                : "linear-gradient(90deg, #63B1BC, #7fc1cb)",
                             }}
                           />
                         </div>
@@ -634,16 +739,39 @@ const Dashboard = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          navigate(`/cases/${c.top.id}`);
+                          if (c.srReady) {
+                            // Jump straight into Stage 9 (Export / SR pack).
+                            navigate(`/cases/${c.top.id}`, {
+                              state: { goToStage: 9 },
+                            });
+                          } else {
+                            navigate(`/cases/${c.top.id}`);
+                          }
                         }}
                         className={`h-8 px-3 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-colors ${
-                          isReady
-                            ? "bg-teal text-primary hover:bg-teal/90 shadow-[0_0_0_4px_rgba(0,194,203,0.16)]"
-                            : "bg-primary text-primary-foreground hover:bg-primary/90"
+                          c.srReady
+                            ? "bg-gradient-to-r from-[#7a3d87] to-[#8C4799] text-white hover:from-[#8C4799] hover:to-[#a76ab2] shadow-[0_0_0_4px_rgba(140,71,153,0.18)]"
+                            : isReady
+                              ? "bg-teal text-primary hover:bg-teal/90 shadow-[0_0_0_4px_rgba(99,177,188,0.16)]"
+                              : "bg-primary text-primary-foreground hover:bg-primary/90"
                         }`}
                       >
-                        {isReady ? "Resume" : "Open"}
-                        <ArrowRight className="h-3 w-3" />
+                        {c.srReady ? (
+                          <>
+                            <FileCheck2 className="h-3 w-3" />
+                            Prepare SR
+                          </>
+                        ) : isReady ? (
+                          <>
+                            Resume
+                            <ArrowRight className="h-3 w-3" />
+                          </>
+                        ) : (
+                          <>
+                            Open
+                            <ArrowRight className="h-3 w-3" />
+                          </>
+                        )}
                       </button>
                     </li>
                   );
@@ -709,10 +837,10 @@ const Dashboard = () => {
               className="absolute -right-5 -bottom-5 w-32 h-32 rounded-full pointer-events-none"
               style={{
                 background:
-                  "radial-gradient(circle, rgba(0,194,203,0.10), transparent 70%)",
+                  "radial-gradient(circle, rgba(99,177,188,0.10), transparent 70%)",
               }}
             />
-            <div className="font-serif text-[28px] font-medium leading-none tracking-tight text-foreground">
+            <div className="font-sans text-[28px] font-bold leading-none tracking-tight text-foreground">
               {today.toLocaleDateString("en-GB", { weekday: "long" })}
               <div className="text-sm text-muted-foreground mt-2 font-sans font-medium tracking-wider uppercase">
                 {today.toLocaleDateString("en-GB", {
@@ -810,8 +938,8 @@ const Dashboard = () => {
                         className="h-8 w-8 rounded-full text-white text-[11px] font-bold flex items-center justify-center"
                         style={{
                           background: me
-                            ? "linear-gradient(135deg, #f59e0b, #dc2626)"
-                            : "linear-gradient(135deg, #0d9488, #22d3ee)",
+                            ? "linear-gradient(135deg, #FFB81C, #CB333B)"
+                            : "linear-gradient(135deg, #56C271, #63B1BC)",
                         }}
                       >
                         {initials(t.name)}
@@ -833,7 +961,7 @@ const Dashboard = () => {
                             className="h-full rounded-full transition-all duration-700"
                             style={{
                               width: `${Math.min(100, t.pct)}%`,
-                              background: t.over ? "#b45309" : "#5a6779",
+                              background: t.over ? "#C28B1C" : "#5a6878",
                             }}
                           />
                         </div>
@@ -894,15 +1022,16 @@ interface AuditRow {
 
 const KPI_TONES: Record<string, { bg: string; text: string; iconBg: string }> = {
   teal: {
-    bg: "linear-gradient(135deg, #00C2CB, #2fd9e0 80%, #5feaef)",
-    text: "#0D1B2A",
-    iconBg: "rgba(13,27,42,0.12)",
+    bg: "linear-gradient(135deg, #63B1BC, #7fc1cb 80%, #9bd0d8)",
+    text: "#253746",
+    iconBg: "rgba(37,55,70,0.12)",
   },
-  navy: { bg: "linear-gradient(135deg, #1e2d3f, #29405d)", text: "white", iconBg: "rgba(255,255,255,0.18)" },
-  blue: { bg: "linear-gradient(135deg, #4f7cf2, #6b94ff)", text: "white", iconBg: "rgba(255,255,255,0.18)" },
-  coral: { bg: "linear-gradient(135deg, #ef6b6b, #f59292)", text: "white", iconBg: "rgba(255,255,255,0.18)" },
-  gold: { bg: "linear-gradient(135deg, #d99c4d, #e9b97c)", text: "white", iconBg: "rgba(255,255,255,0.18)" },
-  violet: { bg: "linear-gradient(135deg, #6e56cf, #9d8aec)", text: "white", iconBg: "rgba(255,255,255,0.18)" },
+  navy: { bg: "linear-gradient(135deg, #253746, #3a5364)", text: "white", iconBg: "rgba(255,255,255,0.18)" },
+  blue: { bg: "linear-gradient(135deg, #426DA9, #5e85bd)", text: "white", iconBg: "rgba(255,255,255,0.18)" },
+  coral: { bg: "linear-gradient(135deg, #CB333B, #db5d64)", text: "white", iconBg: "rgba(255,255,255,0.18)" },
+  gold: { bg: "linear-gradient(135deg, #FFB81C, #ffc94d)", text: "#2a1f00", iconBg: "rgba(0,0,0,0.10)" },
+  violet: { bg: "linear-gradient(135deg, #8C4799, #a76ab2)", text: "white", iconBg: "rgba(255,255,255,0.18)" },
+  green: { bg: "linear-gradient(135deg, #B7BF10, #cbd239)", text: "#1f2305", iconBg: "rgba(0,0,0,0.10)" },
 };
 
 function KpiTile({
@@ -914,6 +1043,7 @@ function KpiTile({
   delta,
   icon,
   onClick,
+  index = 0,
 }: {
   tone: keyof typeof KPI_TONES;
   label: string;
@@ -923,8 +1053,11 @@ function KpiTile({
   delta?: string;
   icon: React.ReactNode;
   onClick?: () => void;
+  index?: number;
 }) {
   const t = KPI_TONES[tone];
+  // Stagger each tile by ~120ms so the counters fire in a wave on page load.
+  const animated = useCountUp(value, 1400, index * 120);
   return (
     <button
       type="button"
@@ -936,7 +1069,7 @@ function KpiTile({
       <div className="flex items-start justify-between gap-2">
         <span
           className="text-[11px] font-bold tracking-[0.08em] uppercase"
-          style={{ opacity: tone === "teal" ? 0.7 : 0.85 }}
+          style={{ opacity: tone === "teal" ? 0.7 : tone === "green" || tone === "gold" ? 0.8 : 0.85 }}
         >
           {label}
         </span>
@@ -948,13 +1081,13 @@ function KpiTile({
         </span>
       </div>
       <div>
-        <div className="font-serif text-3xl font-medium leading-none tracking-tight mt-1">
-          {value}
+        <div className="font-sans text-3xl font-bold leading-none tracking-tight mt-1 tabular-nums">
+          {animated}
           {suffix ? <span className="text-lg opacity-75">{suffix}</span> : null}
         </div>
         <div
           className="text-[11px] mt-1.5 flex items-center gap-1.5"
-          style={{ opacity: tone === "teal" ? 0.7 : 0.78 }}
+          style={{ opacity: tone === "teal" ? 0.7 : tone === "green" || tone === "gold" ? 0.8 : 0.78 }}
         >
           <span>{sub}</span>
           {delta ? <span className="font-semibold">· {delta}</span> : null}
@@ -1044,8 +1177,8 @@ function CaseflowChart({
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-44 mt-1" preserveAspectRatio="none">
       <defs>
         <linearGradient id="tealGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#00C2CB" stopOpacity="0.35" />
-          <stop offset="100%" stopColor="#00C2CB" stopOpacity="0" />
+          <stop offset="0%" stopColor="#63B1BC" stopOpacity="0.35" />
+          <stop offset="100%" stopColor="#63B1BC" stopOpacity="0" />
         </linearGradient>
       </defs>
       <g stroke="#eef0f4" strokeWidth="1">
@@ -1054,21 +1187,21 @@ function CaseflowChart({
         ))}
       </g>
       <path d={area} fill="url(#tealGrad)" opacity={0.6} />
-      <path d={line} stroke="#00C2CB" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      <path d={violetLine} stroke="#6e56cf" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      <path d={line} stroke="#63B1BC" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      <path d={violetLine} stroke="#8C4799" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
       {buckets.map((b, i) => (
         <g key={i}>
-          <circle cx={30 + i * step} cy={yOf(b.opened)} r="3.5" fill="#00C2CB" />
+          <circle cx={30 + i * step} cy={yOf(b.opened)} r="3.5" fill="#63B1BC" />
           {b.delivered > 0 ? (
-            <circle cx={30 + i * step} cy={yOf(b.delivered)} r="3" fill="#6e56cf" />
+            <circle cx={30 + i * step} cy={yOf(b.delivered)} r="3" fill="#8C4799" />
           ) : null}
           <text
             x={30 + i * step}
             y={H - 6}
             textAnchor="middle"
-            fill="#8a94a3"
+            fill="#888B8D"
             fontSize="9"
-            fontFamily="Inter"
+            fontFamily="Quicksand"
           >
             {b.label}
           </text>
@@ -1109,10 +1242,10 @@ function DonutChart({
         offset -= s.pct;
         return node;
       })}
-      <text x="21" y="20.5" textAnchor="middle" fontFamily="Fraunces, Georgia, serif" fontSize="7" fontWeight="500" fill="#0D1B2A">
+      <text x="21" y="20.5" textAnchor="middle" fontFamily="Quicksand" fontSize="7" fontWeight="700" fill="#253746">
         {total}
       </text>
-      <text x="21" y="25" textAnchor="middle" fontFamily="Inter" fontSize="2.5" fill="#8a94a3">
+      <text x="21" y="25" textAnchor="middle" fontFamily="Quicksand" fontSize="2.5" fill="#888B8D">
         total
       </text>
     </svg>
@@ -1136,11 +1269,11 @@ const ACTION_DOT: Record<string, { tone: string; icon: React.ElementType }> = {
   CHASE_LOGGED: { tone: "warn", icon: AlertTriangle },
 };
 const DOT_BG: Record<string, string> = {
-  good: "linear-gradient(135deg, #00C2CB, #2fd9e0)",
-  warn: "linear-gradient(135deg, #d99c4d, #e9b97c)",
-  bad: "linear-gradient(135deg, #ef6b6b, #f59292)",
-  teal: "linear-gradient(135deg, #6e56cf, #9d8aec)",
-  blue: "linear-gradient(135deg, #4f7cf2, #6b94ff)",
+  good: "linear-gradient(135deg, #56C271, #7ad091)",
+  warn: "linear-gradient(135deg, #FFB81C, #ffc94d)",
+  bad: "linear-gradient(135deg, #CB333B, #db5d64)",
+  teal: "linear-gradient(135deg, #8C4799, #a76ab2)",
+  blue: "linear-gradient(135deg, #426DA9, #5e85bd)",
 };
 
 function ActivityRow({ row }: { row: AuditRow }) {
@@ -1185,7 +1318,7 @@ function ActivityRow({ row }: { row: AuditRow }) {
     <li className="grid grid-cols-[22px_1fr_auto] gap-3.5 px-5 py-3 items-start relative hover:bg-muted/30 transition-colors">
       <span
         className="w-5 h-5 rounded-full flex items-center justify-center text-white shrink-0 z-10 relative"
-        style={{ background: DOT_BG[meta.tone] ?? "#94a3b8" }}
+        style={{ background: DOT_BG[meta.tone] ?? "#888B8D" }}
       >
         <Icon className="h-3 w-3" strokeWidth={2.5} />
       </span>
@@ -1236,11 +1369,11 @@ function AccordionCard({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const ICON_BG: Record<string, string> = {
-    teal: "linear-gradient(135deg, #00C2CB, #2fd9e0)",
-    violet: "linear-gradient(135deg, #6e56cf, #9d8aec)",
-    coral: "linear-gradient(135deg, #ef6b6b, #f59292)",
-    gold: "linear-gradient(135deg, #d99c4d, #e9b97c)",
-    blue: "linear-gradient(135deg, #4f7cf2, #6b94ff)",
+    teal: "linear-gradient(135deg, #63B1BC, #7fc1cb)",
+    violet: "linear-gradient(135deg, #8C4799, #a76ab2)",
+    coral: "linear-gradient(135deg, #CB333B, #db5d64)",
+    gold: "linear-gradient(135deg, #FFB81C, #ffc94d)",
+    blue: "linear-gradient(135deg, #426DA9, #5e85bd)",
   };
   const handle = () => {
     setOpen((o) => !o);
@@ -1255,7 +1388,7 @@ function AccordionCard({
       >
         <span
           className="w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0 transition-transform hover:scale-110"
-          style={{ background: ICON_BG[iconTone], color: iconTone === "teal" ? "#0D1B2A" : "white" }}
+          style={{ background: ICON_BG[iconTone], color: iconTone === "teal" ? "#253746" : "white" }}
         >
           {icon}
         </span>
@@ -1339,14 +1472,14 @@ function InsightRow({
   deltaTone?: "up" | "down";
 }) {
   const SWATCH: Record<string, string> = {
-    coral: "linear-gradient(135deg, #ef6b6b, #f59292)",
-    blue: "linear-gradient(135deg, #4f7cf2, #6b94ff)",
-    gold: "linear-gradient(135deg, #d99c4d, #e9b97c)",
+    coral: "linear-gradient(135deg, #CB333B, #db5d64)",
+    blue: "linear-gradient(135deg, #426DA9, #5e85bd)",
+    gold: "linear-gradient(135deg, #FFB81C, #ffc94d)",
   };
   const numColor: Record<string, string> = {
-    coral: "#ef6b6b",
-    blue: "#4f7cf2",
-    gold: "#d99c4d",
+    coral: "#CB333B",
+    blue: "#426DA9",
+    gold: "#FFB81C",
   };
   return (
     <div className="flex items-center gap-3 text-xs py-3 border-b border-dashed border-border last:border-b-0">
@@ -1356,7 +1489,7 @@ function InsightRow({
       >
         <Sparkles className="h-4 w-4" />
       </span>
-      <div className="font-serif text-xl font-medium leading-none tabular-nums min-w-[60px]" style={{ color: numColor[tone] }}>
+      <div className="font-sans text-xl font-bold leading-none tabular-nums min-w-[60px]" style={{ color: numColor[tone] }}>
         {num}
         {suffix ? <span className="text-xs text-muted-foreground ml-0.5">{suffix}</span> : null}
       </div>

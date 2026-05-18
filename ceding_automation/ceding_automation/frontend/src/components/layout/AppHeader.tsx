@@ -13,7 +13,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { NotificationBell } from "./NotificationBell";
-import logo from "@/assets/logo-dark.png";
 
 export function AppHeader() {
   const [searchQuery, setSearchQuery] = useState("");
@@ -65,10 +64,9 @@ export function AppHeader() {
 
   return (
     <header className="app-header sticky top-0 z-30 flex h-16 items-center justify-between border-b border-border bg-card px-6">
-      {/* Left: logo + app name */}
-      <div className="flex items-center gap-4 mr-6">
-        <img src={logo} alt="Furnley House" className="h-8 w-auto" />
-        <div className="hidden md:block border-l border-border pl-4">
+      {/* Left: app context (logo is already in the sidebar) */}
+      <div className="flex items-center mr-6">
+        <div className="hidden md:block">
           <p className="text-sm font-bold theme-heading text-foreground leading-tight">Ceding Application</p>
           <p className="text-[10px] text-muted-foreground leading-tight">Furnley House Financial Planning Partners</p>
         </div>

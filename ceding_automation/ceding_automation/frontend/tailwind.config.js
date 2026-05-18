@@ -88,7 +88,9 @@ export default {
         },
       },
       fontFamily: {
-        sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+        sans: ["Quicksand", "ui-sans-serif", "system-ui", "sans-serif"],
+        serif: ["Quicksand", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
       borderRadius: {
         lg: "var(--radius)",
