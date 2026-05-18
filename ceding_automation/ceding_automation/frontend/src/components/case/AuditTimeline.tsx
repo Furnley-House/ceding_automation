@@ -59,6 +59,13 @@ interface AuditRow {
   notes?: string | null;
 }
 
+interface CaseRow {
+  id: string;
+  case_ref: string;
+  client_name: string;
+  Provider_group: string;
+}
+
 interface Props {
   /** Scope to a single case. Omit for global view. */
   caseId?: string;

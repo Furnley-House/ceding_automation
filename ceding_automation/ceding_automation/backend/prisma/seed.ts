@@ -19,6 +19,7 @@ async function main() {
     { email: "ca@furnleyhouse.co.uk", name: "Priya Ramesh", role: UserRole.CA_TEAM },
     { email: "paraplanner@furnleyhouse.co.uk", name: "Emma Clarke", role: UserRole.PARAPLANNER },
     { email: "adviser@furnleyhouse.co.uk", name: "James Whitfield", role: UserRole.ADVISER },
+    { email: "srinath.k@furnleyhouse.co.uk", name: "Srinath K", role: UserRole.CA_TEAM },
   ];
   for (const u of demoUsers) {
     await prisma.user.upsert({
@@ -48,6 +49,7 @@ async function main() {
 
   const providers: ProviderInput[] = [
     // ── ORIGO-ONLY (on Origo network, no contact details on file) ────────────
+    { name: "Test -Sri",                          isOnOrigo: true },
     { name: "7IM",                                isOnOrigo: true },
     { name: "Aberdeen",                           isOnOrigo: true },
     { name: "AIG Life",                           isOnOrigo: true },
@@ -129,6 +131,14 @@ async function main() {
     { name: "Yorsipp",                           isOnOrigo: true },
 
     // ── ORIGO + CONTACT DETAILS ──────────────────────────────────────────────
+    {
+      name: "Test -Sri",
+      phoneMain: "01162185867",
+      emailMain: "sri@test.com",
+      postalAddress: "abrdn Elevate, PO Box 6891, Basingstoke, RG24 4SN",
+      isOnOrigo: true,
+      notes: "Previously Standard Life Elevate; now under abrdn brand",
+    },
     {
       name: "Aberdeen (Elevate)",
       phoneMain: "0345 300 4177",
@@ -654,7 +664,7 @@ async function main() {
     note?: string;
   }> = [
     // ── Basic Details ──
-    { section: "Basic Details", key: "provider_name", label: "Provider Name", type: "text", order: 1 },
+    { section: "Basic Details", key: "Provider_group", label: "Provider Name", type: "text", order: 1 },
     { section: "Basic Details", key: "provider_phone_email", label: "Provider Telephone Number & Email Address", type: "text", order: 2 },
     { section: "Basic Details", key: "plan_number", label: "Plan Number", type: "text", order: 3 },
     { section: "Basic Details", key: "pension_type", label: "Type of Pension (Personal Pension / SIPP / Other)", type: "dropdown", order: 4, options: ["Personal Pension Plan", "SIPP", "IPP", "Group Stakeholder", "Stakeholder", "Occupational DC", "Workplace", "Section 32", "Group Pension Plan", "Other"] },
@@ -776,7 +786,7 @@ async function main() {
     note?: string;
   }> = [
     // ── Basic Details ──
-    { section: "Basic Details", key: "provider_name", label: "Provider Name", type: "text", order: 1 },
+    { section: "Basic Details", key: "Provider_group", label: "Provider Name", type: "text", order: 1 },
     { section: "Basic Details", key: "provider_phone_email", label: "Provider Telephone Number & Email Address", type: "text", order: 2 },
     { section: "Basic Details", key: "plan_number", label: "Plan Number", type: "text", order: 3 },
     { section: "Basic Details", key: "isa_type", label: "Type of ISA (Stocks & Shares / Cash / Lifetime)", type: "dropdown", order: 4, options: ["Stocks and Shares ISA", "Cash ISA", "Innovative Finance ISA", "Lifetime ISA"] },
@@ -863,7 +873,7 @@ async function main() {
   }> = [
     // ── Basic Details ──
     { section: "Basic Details", key: "single_or_joint", label: "Single or Joint client", type: "dropdown", order: 1, options: ["Single", "Joint"] },
-    { section: "Basic Details", key: "provider_name", label: "Provider Name", type: "text", order: 2 },
+    { section: "Basic Details", key: "Provider_group", label: "Provider Name", type: "text", order: 2 },
     { section: "Basic Details", key: "provider_phone_email", label: "Provider Telephone Number & Email Address", type: "text", order: 3 },
     { section: "Basic Details", key: "plan_number", label: "Plan Number", type: "text", order: 4 },
     { section: "Basic Details", key: "start_date", label: "Start Date", type: "date", order: 5 },

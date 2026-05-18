@@ -2,7 +2,7 @@ import { useParams, useNavigate, Link, useLocation } from "react-router-dom";
 import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, AlertTriangle } from "lucide-react";
-import { getCaseById, updateCase, syncCaseFromZoho } from "@/services/api";
+import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho } from "@/services/api";
 import { CEDING_STAGES, STATUS_LABELS, STATUS_STYLES, RAG_STYLES, calculateRag } from "@/lib/caseHelpers";
 import { isSupportedPlanType, SUPPORTED_PLAN_TYPES } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
@@ -34,6 +34,20 @@ const CaseDetail = () => {
     queryFn: () => getCaseById(id!),
     enabled: !!id,
   });
+
+  const syncFromZoho = async () => {
+    const zohoTaskId = (caseItem as any)?.zoho_task_id;
+    if (!zohoTaskId) return;
+    const t = toast.loading("Syncing from Zoho…");
+    try {
+      await importCrmTaskAsCase(zohoTaskId);
+      await qc.invalidateQueries({ queryKey: ["case", id] });
+      await qc.invalidateQueries({ queryKey: ["cases"] });
+      toast.success("Case synced from Zoho", { id: t });
+    } catch (e) {
+      toast.error("Sync failed", { id: t, description: e instanceof Error ? e.message : "Unknown error" });
+    }
+  };
 
   const updateMutation = useMutation({
     mutationFn: ({ updates }: { updates: any }) => updateCase(id!, updates),
@@ -218,7 +232,7 @@ const CaseDetail = () => {
                 </span>
               </div>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-1.5 text-xs mt-2">
-                <HeaderField label="Provider" value={caseItem.provider_name} />
+                <HeaderField label="Provider" value={caseItem.Provider_group} />
                 <HeaderField label="Plan type" value={caseItem.plan_type} />
                 <HeaderField label="Policy ref" value={caseItem.plan_number} mono />
                 <HeaderField label="Owner" value={caseItem.owner_name ?? "—"} />
@@ -308,10 +322,17 @@ const CaseDetail = () => {
             </div>
           )}
           {(caseItem as any).zoho_task_id && (
-            <ZohoCrmTaskPanel
-              taskId={(caseItem as any).zoho_task_id}
-              deepLink={(caseItem as any).zoho_deep_link ?? undefined}
-            />
+            <div className="space-y-2">
+              <ZohoCrmTaskPanel
+                taskId={(caseItem as any).zoho_task_id}
+                deepLink={(caseItem as any).zoho_deep_link ?? undefined}
+              />
+              {(!caseItem.Provider_group || !(caseItem as any).plan_number) && (
+                <Button size="sm" variant="outline" onClick={syncFromZoho} className="text-xs">
+                  Sync provider &amp; policy ref from Zoho
+                </Button>
+              )}
+            </div>
           )}
 
           {planSupported && <StageComponent caseItem={caseItem as any} />}

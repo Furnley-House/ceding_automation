@@ -2,7 +2,10 @@ export interface CaseRow {
   id: string;
   case_ref: string;
   client_name: string;
-  provider_name: string;
+  Provider_group: string;
+  Plan_Number: string;
+  provider_phone_main?: string;
+  provider_phone_ceding?: string;
   provider_id?: string | null;
   plan_number: string;
   plan_type: string;

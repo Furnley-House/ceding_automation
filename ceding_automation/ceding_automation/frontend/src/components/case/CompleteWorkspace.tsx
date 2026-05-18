@@ -51,7 +51,7 @@ export function CompleteWorkspace({ caseItem }: Props) {
           {caseItem.client_name}
         </h3>
         <p className="text-sm text-muted-foreground mt-1">
-          {caseItem.provider_name} · {caseItem.plan_type} · {caseItem.plan_number}
+          {caseItem.Provider_group} · {caseItem.plan_type} · {caseItem.plan_number}
         </p>
         <p className="text-xs text-muted-foreground mt-3">
           Completed on <span className="font-semibold text-foreground">{completedDate}</span>
@@ -123,7 +123,7 @@ export function CompleteWorkspace({ caseItem }: Props) {
                         {c.client_name}
                       </p>
                       <p className="text-[11px] text-muted-foreground truncate">
-                        {c.provider_name} · {c.plan_type} ·{" "}
+                        {c.Provider_group} · {c.plan_type} ·{" "}
                         <span className="font-mono">{c.case_ref}</span>
                       </p>
                     </div>

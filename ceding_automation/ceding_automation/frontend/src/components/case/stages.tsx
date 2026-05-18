@@ -86,7 +86,7 @@ export function StageCaseDetails({ caseItem }: StageProps) {
     >
       <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
         <Detail label="Client name" value={caseItem.client_name} />
-        <Detail label="Provider" value={caseItem.provider_name} />
+        <Detail label="Provider" value={caseItem.Provider_group} />
         <Detail label="Plan type" value={caseItem.plan_type} />
         <Detail label="Policy reference" value={caseItem.plan_number} mono />
         <Detail label="Zoho CRM task" value={(caseItem as any).zoho_task_id ?? "—"} mono />
@@ -183,8 +183,10 @@ export function StageCallAssist({ caseItem }: StageProps) {
         caseId={caseItem.id}
         planType={caseItem.plan_type}
         clientName={caseItem.client_name}
-        providerName={caseItem.provider_name}
+        providerName={caseItem.Provider_group}
         planNumber={caseItem.plan_number}
+        providerPhoneMain={caseItem.provider_phone_main}
+        providerPhoneCeding={caseItem.provider_phone_ceding}
       />
     </StagePanel>
   );

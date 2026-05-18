@@ -52,7 +52,7 @@ const STATUS_LABEL: Record<string, string> = {
 
 export function SendLOAWorkspace({ caseItem }: Props) {
   const qc = useQueryClient();
-  const provider = useMemo(() => findProvider(caseItem.provider_name), [caseItem.provider_name]);
+  const provider = useMemo(() => findProvider(caseItem.Provider_group), [caseItem.Provider_group]);
   const planRef = (caseItem as any).plan_ref ?? caseItem.plan_number ?? null;
   const routing = useMemo(() => pickRoutingEmail(provider, planRef), [provider, planRef]);
 
@@ -82,7 +82,7 @@ export function SendLOAWorkspace({ caseItem }: Props) {
   });
 
   const subject = `Letter of Authority - ${caseItem.client_name} - ${caseItem.plan_number}`;
-  const initialBody = `Dear ${provider?.name ?? caseItem.provider_name} Team,
+  const initialBody = `Dear ${provider?.name ?? caseItem.Provider_group} Team,
 
 Please find attached a signed Letter of Authority for the following client:
 
@@ -98,7 +98,7 @@ If you require any further information to process this request, please reply to 
 Kind regards,
 ProviderHub on behalf of the client`;
 
-  const followUpBody = `Dear ${provider?.name ?? caseItem.provider_name} Team,
+  const followUpBody = `Dear ${provider?.name ?? caseItem.Provider_group} Team,
 
 I am following up on a Letter of Authority sent on behalf of ${caseItem.client_name} (Policy ref: ${caseItem.plan_number}, Case ref: ${caseItem.case_ref}).
 

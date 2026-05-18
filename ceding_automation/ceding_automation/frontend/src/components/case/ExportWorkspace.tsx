@@ -109,7 +109,7 @@ export function ExportWorkspace({ caseItem }: Props) {
     const summaryRows: (string | number)[][] = [
       ["Case reference", caseItem.case_ref],
       ["Client", caseItem.client_name],
-      ["Provider", caseItem.provider_name],
+      ["Provider", caseItem.Provider_group],
       ["Plan type", caseItem.plan_type],
       ["Plan number", caseItem.plan_number],
       ["Status", caseItem.status],

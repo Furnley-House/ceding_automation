@@ -1,6 +1,6 @@
 // backend/src/routes/cases.ts
 import { Router, Request, Response } from "express";
-import { PrismaClient, CaseStatus, PlanType } from "@prisma/client";
+import { PrismaClient, CaseStatus, PlanType, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { z } from "zod";
 import * as zoho from "../services/zohoCrm";
@@ -16,7 +16,11 @@ const CreateCaseSchema = z.object({
   planType: z.nativeEnum(PlanType),
   planSubType: z.string().optional(),
   policyRef: z.string().optional(),
+  planNumber: z.string().optional(),    // alias for policyRef
   providerId: z.string().optional(),
+  providerName: z.string().optional(),  // resolve to providerId if not given
+  zohoTaskId: z.string().optional(),
+  caseNotes: z.string().optional(),
   zohoCaseId: z.string().optional(),
 });
 
@@ -24,7 +28,21 @@ router.post("/", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Req
   const parsed = CreateCaseSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const { planType, ...data } = parsed.data;
+  const { planType, planSubType, planNumber, providerName, zohoTaskId, caseNotes: _caseNotes, ...data } = parsed.data;
+
+  // planNumber is an alias for policyRef
+  if (planNumber && !data.policyRef) data.policyRef = planNumber;
+
+  // Resolve providerName → providerId (auto-create bare record if needed)
+  if (!data.providerId && providerName) {
+    let provider = await prisma.provider.findFirst({
+      where: { name: { equals: providerName, mode: 'insensitive' } },
+    });
+    if (!provider) {
+      provider = await prisma.provider.create({ data: { name: providerName } });
+    }
+    data.providerId = provider.id;
+  }
 
   // Generate case ref
   const count = await prisma.case.count();
@@ -34,7 +52,9 @@ router.post("/", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Req
     data: {
       ...data,
       planType,
+      ...(planSubType ? { planSubType: planSubType as import('@prisma/client').PlanSubType } : {}),
       caseRef,
+      ...(zohoTaskId ? { zohoTaskId } : {}),
       createdById: req.user!.id,
       assignedToId: req.user!.id,
       status: CaseStatus.STAGE_1_LOA_PREP,
@@ -258,7 +278,7 @@ router.patch(
           action: "CASE_STATUS_CHANGED",
           newValue: String(data.status),
           source: "MANUAL",
-          metadata: body as Record<string, unknown>,
+          metadata: body as Prisma.InputJsonValue,
         },
       });
     } else {
@@ -268,7 +288,7 @@ router.patch(
           userId: req.user!.id,
           action: "CASE_UPDATED",
           source: "MANUAL",
-          metadata: body as Record<string, unknown>,
+          metadata: body as Prisma.InputJsonValue,
         },
       });
     }
