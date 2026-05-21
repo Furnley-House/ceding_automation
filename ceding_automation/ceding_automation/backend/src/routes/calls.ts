@@ -15,7 +15,9 @@ import {
   listCallRecordingsWithToken,
   transcribeRecordingWithToken,
   transcribeRecording,
+  transcribeAudioBuffer,
 } from "../services/ringcentral";
+import { uploadToWorkDrive, listWorkDriveFiles, downloadWorkDriveFile } from "../services/workdrive";
 import { generateCallScript, analyseTranscript } from "../services/aiCallAssist";
 
 const router = Router();
@@ -259,6 +261,126 @@ router.get(
       // Use 403 (not 401) so the frontend's global auth interceptor doesn't log the user out
       const httpStatus = (err as any)?.rcStatus === 403 || msg.includes("expired") || msg.includes("Unauthorized") ? 403 : 503;
       res.status(httpStatus).json({ error: msg });
+    }
+  }
+);
+
+// ── List MP3 recordings already saved in the WorkDrive folder ──────────────
+router.get(
+  "/:caseId/calls/workdrive-recordings",
+  requireAuth,
+  async (_req: Request, res: Response) => {
+    res.set("Cache-Control", "no-store");
+    try {
+      const files = await listWorkDriveFiles();
+      res.json({ files });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to list WorkDrive files";
+      console.error("[calls] workdrive list error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  }
+);
+
+// ── Stream a WorkDrive file's audio through the backend (for the play button) ──
+router.get(
+  "/:caseId/calls/workdrive-audio",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { fileId } = req.query as { fileId?: string };
+    if (!fileId) return res.status(400).json({ error: "fileId required" });
+    try {
+      const { buffer, contentType } = await downloadWorkDriveFile(fileId);
+      res.set("Content-Type", contentType);
+      res.set("Content-Disposition", "inline; filename=recording.mp3");
+      res.send(buffer);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to stream WorkDrive file";
+      console.error("[calls] workdrive-audio error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  }
+);
+
+// ── Transcribe a WorkDrive recording via Azure Whisper ────────────────────
+router.post(
+  "/:caseId/calls/workdrive-transcribe",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { fileId, filename } = req.body as { fileId?: string; filename?: string };
+    if (!fileId) return res.status(400).json({ error: "fileId required" });
+    try {
+      const { buffer } = await downloadWorkDriveFile(fileId);
+      const result = await transcribeAudioBuffer(buffer, filename ?? "recording.mp3");
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Transcription failed";
+      console.error("[calls] workdrive-transcribe error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  }
+);
+
+// ── Upload an RC recording to Zoho WorkDrive ──────────────────────────────
+router.post(
+  "/:caseId/calls/upload-recording-to-workdrive",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { contentUri, fileName, folderId, rcToken: userToken } = req.body as {
+      contentUri?: string;
+      fileName?: string;
+      folderId?: string;
+      rcToken?: string;
+    };
+    if (!contentUri || !fileName) {
+      return res.status(400).json({ error: "contentUri and fileName required" });
+    }
+    try {
+      // 1. Download MP3 from RC using server JWT (or user token if not configured)
+      let bearerToken: string;
+      if (isRingCentralConfigured()) {
+        bearerToken = await getAccessToken();
+      } else if (userToken) {
+        bearerToken = userToken;
+      } else {
+        return res.status(503).json({ error: "RC not configured" });
+      }
+      const audioResp = await axios.get(contentUri, {
+        headers: { Authorization: `Bearer ${bearerToken}` },
+        responseType: "arraybuffer",
+      });
+      const buffer = Buffer.from(audioResp.data as ArrayBuffer);
+
+      // 2. Upload to Zoho WorkDrive
+      const result = await uploadToWorkDrive(buffer, fileName, folderId, "audio/mpeg");
+
+      // 3. Audit log
+      await prisma.auditLog.create({
+        data: {
+          caseId: req.params.caseId,
+          userId: req.user!.id,
+          action: "WORKDRIVE_EXPORTED",
+          newValue: `${result.name} (${result.id})`,
+          metadata: { workdriveId: result.id, permalink: result.permalink, fileName },
+          source: "USER",
+        },
+      });
+
+      res.json({ success: true, file: result });
+    } catch (err: unknown) {
+      // Surface the actual Zoho/RC error body so the frontend toast shows something useful
+      const responseData = (err as any)?.response?.data;
+      const responseStatus = (err as any)?.response?.status;
+      const responseUrl = (err as any)?.config?.url;
+      const baseMsg = err instanceof Error ? err.message : "Upload failed";
+      const detail = typeof responseData === "string" ? responseData : JSON.stringify(responseData);
+      console.error("[calls] workdrive upload error:", { baseMsg, responseStatus, responseUrl, responseData });
+      res.status(500).json({
+        error: baseMsg,
+        zohoStatus: responseStatus,
+        zohoUrl: responseUrl,
+        zohoError: detail,
+      });
     }
   }
 );

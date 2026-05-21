@@ -25,6 +25,7 @@ import {
   WifiOff,
   Copy,
   Volume2,
+  CloudUpload,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -187,10 +188,24 @@ export function CallWorkspace({
   const [rcRecordings, setRcRecordings] = useState<RcRecording[]>([]);
   const [rcRecordingsLoading, setRcRecordingsLoading] = useState(false);
   const [recordingsPanelOpen, setRecordingsPanelOpen] = useState(false);
+  const [rcViewMode, setRcViewMode] = useState<"latest" | "all">("latest");
   const [fetchingTranscriptFor, setFetchingTranscriptFor] = useState<string | null>(null);
   const [manualSessionId, setManualSessionId] = useState("");
   const [rcToken, setRcToken] = useState(() => localStorage.getItem("rc-access-token") ?? "");
   const [rcTokenPanelOpen, setRcTokenPanelOpen] = useState(false);
+
+  // ── WorkDrive recordings (saved calls) ────────────────────────────────
+  interface WorkDriveFile {
+    id: string;
+    name: string;
+    sizeBytes?: number;
+    createdTime?: string;
+    permalink?: string;
+  }
+  const [wdFiles, setWdFiles] = useState<WorkDriveFile[]>([]);
+  const [wdLoading, setWdLoading] = useState(false);
+  const [wdPanelOpen, setWdPanelOpen] = useState(true);
+  const [wdTranscribingId, setWdTranscribingId] = useState<string | null>(null);
 
   // ── Analysis state ────────────────────────────────────────────────────
   const [analyzing, setAnalyzing] = useState(false);
@@ -544,7 +559,7 @@ export function CallWorkspace({
       } else {
         setRcRecordings(recordings);
         setRcTokenPanelOpen(false);
-        toast.success(`${recordings.length} recording${recordings.length === 1 ? "" : "s"} loaded`);
+        toast.success(rcViewMode === "latest" ? "Latest call loaded" : `${recordings.length} call${recordings.length === 1 ? "" : "s"} loaded`);
       }
     } catch (err: unknown) {
       const status = (err as any)?.response?.status;
@@ -558,6 +573,72 @@ export function CallWorkspace({
       }
     } finally {
       setRcRecordingsLoading(false);
+    }
+  };
+
+  // ── WorkDrive: list MP3s already saved in the folder ────────────────────
+  const fetchWorkDriveFiles = async () => {
+    setWdLoading(true);
+    try {
+      const res = await api.get(`/cases/${caseId}/calls/workdrive-recordings`);
+      const files = (res.data as { files: WorkDriveFile[] }).files ?? [];
+      // Show newest first
+      files.sort((a, b) => (b.createdTime ?? "").localeCompare(a.createdTime ?? ""));
+      setWdFiles(files);
+    } catch (err: unknown) {
+      toast.error("Failed to load WorkDrive files", { description: (err as any)?.response?.data?.error ?? (err as Error).message });
+    } finally {
+      setWdLoading(false);
+    }
+  };
+
+  // Auto-load WorkDrive files when the panel opens (no-op if already loaded)
+  useEffect(() => {
+    if (wdPanelOpen && wdFiles.length === 0 && !wdLoading) {
+      void fetchWorkDriveFiles();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wdPanelOpen]);
+
+  // ── Play a WorkDrive file ───────────────────────────────────────────────
+  const playWorkDriveFile = async (file: WorkDriveFile) => {
+    try {
+      const r = await api.get(`/cases/${caseId}/calls/workdrive-audio`, {
+        params: { fileId: file.id },
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(r.data as Blob);
+      const a = document.createElement("a");
+      a.href = url; a.target = "_blank"; a.rel = "noopener"; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch {
+      toast.error("Could not load audio");
+    }
+  };
+
+  // ── Transcribe a WorkDrive file ─────────────────────────────────────────
+  const transcribeWorkDriveFile = async (file: WorkDriveFile) => {
+    setWdTranscribingId(file.id);
+    const t = toast.loading("Transcribing with Azure Whisper…");
+    try {
+      const res = await api.post(`/cases/${caseId}/calls/workdrive-transcribe`, {
+        fileId: file.id,
+        filename: file.name,
+      });
+      const { transcript: text, error } = res.data as { transcript: string | null; error?: string };
+      if (text) {
+        setTranscript(text);
+        setPhase("ended");
+        toast.success("Transcript ready", { id: t, description: "Review and click Analyse." });
+      } else if (error?.includes("not configured")) {
+        toast.warning("Azure Whisper not configured", { id: t, description: "Ask admin to set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env." });
+      } else {
+        toast.warning("Transcription failed", { id: t, description: error ?? "Paste manually." });
+      }
+    } catch (err: unknown) {
+      toast.error("Transcription failed", { id: t, description: (err as any)?.response?.data?.error ?? (err as Error).message });
+    } finally {
+      setWdTranscribingId(null);
     }
   };
 
@@ -1198,22 +1279,26 @@ export function CallWorkspace({
           <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground flex items-center gap-1.5">
             <PhoneCall className="h-3.5 w-3.5 text-primary" />
             RC Recordings
-            {rcRecordings.length > 0 && (
-              <span className="ml-1 text-[10px] font-normal normal-case tracking-normal text-muted-foreground">
-                ({rcRecordings.length})
-              </span>
-            )}
+            <span className="ml-1 text-[10px] font-normal normal-case tracking-normal text-muted-foreground">
+              ({rcViewMode === "latest" ? "latest call" : `all calls${rcRecordings.length > 0 ? " · " + rcRecordings.length : ""}`})
+            </span>
           </h4>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+            <select
+              value={rcViewMode}
+              onChange={(e) => setRcViewMode(e.target.value as "latest" | "all")}
+              className="h-7 text-xs px-2 rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer"
+              title="Choose how many recordings to show"
+            >
+              <option value="latest">Latest call</option>
+              <option value="all">All calls</option>
+            </select>
             <Button
               size="sm"
               variant="outline"
               className="h-7 text-xs"
               disabled={rcRecordingsLoading}
-              onClick={(e) => {
-                e.stopPropagation();
-                void fetchRcRecordings();
-              }}
+              onClick={() => void fetchRcRecordings()}
             >
               {rcRecordingsLoading ? (
                 <Loader2 className="h-3 w-3 animate-spin mr-1" />
@@ -1223,7 +1308,8 @@ export function CallWorkspace({
               Load Recordings
             </Button>
             <ChevronRight
-              className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${recordingsPanelOpen ? "rotate-90" : ""}`}
+              className={`h-3.5 w-3.5 text-muted-foreground transition-transform cursor-pointer ${recordingsPanelOpen ? "rotate-90" : ""}`}
+              onClick={() => setRecordingsPanelOpen((v) => !v)}
             />
           </div>
         </div>
@@ -1258,7 +1344,7 @@ export function CallWorkspace({
             )}
 
             {/* Manual session ID fallback */}
-            <div className="space-y-1">
+            {/* <div className="space-y-1">
               <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Or fetch by session ID</p>
               <div className="flex gap-2 items-center">
                 <input
@@ -1288,7 +1374,7 @@ export function CallWorkspace({
                   Fetch transcript
                 </Button>
               </div>
-            </div>
+            </div> */}
 
             {rcRecordingsLoading && (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -1297,8 +1383,11 @@ export function CallWorkspace({
               </div>
             )}
             {rcRecordings.length > 0 && (
-              <ul className="space-y-1.5 max-h-[260px] overflow-y-auto">
-                {rcRecordings.map((rec) => {
+              <ul className={`space-y-1.5 ${rcViewMode === "all" ? "max-h-[320px] overflow-y-auto" : ""}`}>
+                <li className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold pb-0.5">
+                  {rcViewMode === "latest" ? "Most recent call" : `All calls (${rcRecordings.length})`}
+                </li>
+                {(rcViewMode === "latest" ? rcRecordings.slice(0, 1) : rcRecordings).map((rec) => {
                   const dt = new Date(rec.startTime);
                   const dateStr = dt.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
                   const timeStr = dt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
@@ -1349,6 +1438,46 @@ export function CallWorkspace({
                             <Volume2 className="h-3.5 w-3.5" />
                           </button>
                         )}
+                        {/* Save recording to Zoho WorkDrive */}
+                        {rec.contentUri && (rcConfigured || rcToken) && (
+                          <button
+                            type="button"
+                            title="Save recording to Zoho WorkDrive"
+                            onClick={async () => {
+                              const t = toast.loading("Uploading to WorkDrive…");
+                              try {
+                                // Build a human-readable filename: Provider_Client_YYYY-MM-DD_HH-MM.mp3
+                                const sanitize = (s: string) => (s || "").trim().replace(/[\s\/\\:*?"<>|]+/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
+                                const dt = new Date(rec.startTime || Date.now());
+                                const pad = (n: number) => String(n).padStart(2, "0");
+                                const datePart = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}_${pad(dt.getHours())}-${pad(dt.getMinutes())}`;
+                                const provider = sanitize(providerName) || "Provider";
+                                const client = sanitize(clientName) || "Client";
+                                const fileName = `${provider}_${client}_${datePart}.mp3`;
+                                const body = rcConfigured
+                                  ? { contentUri: rec.contentUri, fileName }
+                                  : { contentUri: rec.contentUri, fileName, rcToken: rcToken.trim() };
+                                const r = await api.post(`/cases/${caseId}/calls/upload-recording-to-workdrive`, body);
+                                const file = (r.data as { file?: { name: string; permalink?: string } }).file;
+                                toast.success("Saved to WorkDrive", {
+                                  id: t,
+                                  description: file?.permalink ? `${file.name} — open in WorkDrive` : file?.name,
+                                  action: file?.permalink ? { label: "Open", onClick: () => window.open(file.permalink, "_blank") } : undefined,
+                                });
+                              } catch (err: unknown) {
+                                const d = (err as any)?.response?.data ?? {};
+                                console.error("[workdrive upload error]", d);
+                                toast.error("WorkDrive upload failed", {
+                                  id: t,
+                                  description: `${d.zohoStatus ?? ""} ${d.zohoError ?? d.error ?? (err as Error).message}`.trim(),
+                                });
+                              }
+                            }}
+                            className="h-7 w-7 flex items-center justify-center rounded border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <CloudUpload className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                         <Button
                           size="sm"
                           variant="outline"
@@ -1363,6 +1492,112 @@ export function CallWorkspace({
                             <FileText className="h-3 w-3 mr-1" />
                           )}
                           {isFetching ? "Transcribing…" : "Transcribe"}
+                        </Button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── WorkDrive Recordings panel — calls already saved to Zoho WorkDrive ── */}
+      <div className="rounded-md border border-border bg-card overflow-hidden mt-3">
+        <div
+          className="px-3 py-2 border-b border-border bg-muted/40 flex items-center justify-between cursor-pointer"
+          onClick={() => setWdPanelOpen((v) => !v)}
+        >
+          <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground flex items-center gap-1.5">
+            <CloudUpload className="h-3.5 w-3.5 text-primary" />
+            WorkDrive Recordings
+            {wdFiles.length > 0 && (
+              <span className="ml-1 text-[10px] font-normal normal-case tracking-normal text-muted-foreground">
+                ({wdFiles.length})
+              </span>
+            )}
+          </h4>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={wdLoading}
+              onClick={(e) => {
+                e.stopPropagation();
+                void fetchWorkDriveFiles();
+              }}
+            >
+              {wdLoading ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <RefreshCw className="h-3 w-3 mr-1" />}
+              Refresh
+            </Button>
+            <ChevronRight className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${wdPanelOpen ? "rotate-90" : ""}`} />
+          </div>
+        </div>
+
+        {wdPanelOpen && (
+          <div className="p-3">
+            {wdLoading && wdFiles.length === 0 && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                Loading saved recordings from WorkDrive…
+              </div>
+            )}
+            {!wdLoading && wdFiles.length === 0 && (
+              <p className="text-xs text-muted-foreground">No recordings saved yet. Click ☁ on an RC recording to save it here.</p>
+            )}
+            {wdFiles.length > 0 && (
+              <ul className="space-y-1.5 max-h-[320px] overflow-y-auto">
+                {wdFiles.map((file) => {
+                  const dt = file.createdTime ? new Date(file.createdTime) : null;
+                  const dateStr = dt ? dt.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "";
+                  const timeStr = dt ? dt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
+                  const sizeKb = file.sizeBytes ? `${Math.round(file.sizeBytes / 1024)} KB` : "";
+                  const isTranscribing = wdTranscribingId === file.id;
+                  return (
+                    <li
+                      key={file.id}
+                      className="flex items-center justify-between gap-3 px-3 py-2 rounded-md border border-border bg-background hover:border-primary/30 transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Phone className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-foreground truncate" title={file.name}>{file.name.replace(/\.mp3$/i, "")}</p>
+                          <p className="text-[10px] text-muted-foreground">
+                            {[dateStr, timeStr, sizeKb].filter(Boolean).join(" · ")}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          title="Play recording"
+                          onClick={() => void playWorkDriveFile(file)}
+                          className="h-7 w-7 flex items-center justify-center rounded border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          <Volume2 className="h-3.5 w-3.5" />
+                        </button>
+                        {file.permalink && (
+                          <button
+                            type="button"
+                            title="Open in WorkDrive"
+                            onClick={() => window.open(file.permalink, "_blank")}
+                            className="h-7 w-7 flex items-center justify-center rounded border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <CloudUpload className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          disabled={isTranscribing}
+                          onClick={() => void transcribeWorkDriveFile(file)}
+                          title="Transcribe with Azure Whisper"
+                        >
+                          {isTranscribing ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <FileText className="h-3 w-3 mr-1" />}
+                          {isTranscribing ? "Transcribing…" : "Transcribe"}
                         </Button>
                       </div>
                     </li>
