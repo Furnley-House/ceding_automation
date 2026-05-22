@@ -107,10 +107,10 @@ router.get(
     if (typeof caseId === "string" && caseId) where.caseId = caseId;
     if (typeof userId === "string" && userId) where.userId = userId;
     if (typeof from === "string" && from) {
-      where.createdAt = { ...(where.createdAt ?? {}), gte: new Date(from) };
+      where.createdAt = { ...((where.createdAt ?? {}) as Prisma.DateTimeFilter), gte: new Date(from) };
     }
     if (typeof to === "string" && to) {
-      where.createdAt = { ...(where.createdAt ?? {}), lte: new Date(to) };
+      where.createdAt = { ...((where.createdAt ?? {}) as Prisma.DateTimeFilter), lte: new Date(to) };
     }
     if (typeof search === "string" && search.trim()) {
       const q = search.trim();

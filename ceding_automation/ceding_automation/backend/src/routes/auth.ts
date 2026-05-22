@@ -28,7 +28,7 @@ router.post("/login", async (req: Request, res: Response) => {
   }
 
   const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, {
-    expiresIn: process.env.JWT_EXPIRES_IN || "8h",
+    expiresIn: (process.env.JWT_EXPIRES_IN || "8h") as jwt.SignOptions["expiresIn"],
   });
 
   res.json({ token, user });
@@ -196,7 +196,7 @@ router.get("/azure/callback", async (req: Request, res: Response) => {
 
     // Issue our own JWT
     const appToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, {
-      expiresIn: process.env.JWT_EXPIRES_IN ?? "8h",
+      expiresIn: (process.env.JWT_EXPIRES_IN ?? "8h") as jwt.SignOptions["expiresIn"],
     });
 
     // Redirect to frontend callback page with all the info it needs

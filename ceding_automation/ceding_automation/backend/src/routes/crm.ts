@@ -1,6 +1,6 @@
 // backend/src/routes/crm.ts
 import { Router, Request, Response } from 'express';
-import { PrismaClient, CaseStatus, PlanType } from '@prisma/client';
+import { PrismaClient, CaseStatus, PlanType, Prisma } from '@prisma/client';
 import { requireAuth } from '../middleware/auth';
 import * as zoho from '../services/zohoCrm';
 import { mapZohoTaskToCase } from '../services/zohoCrm';
@@ -217,7 +217,7 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
         action: 'CASE_CREATED',
         source: 'SYSTEM',
         newValue: `Imported from Zoho task ${taskId}`,
-        metadata: { zohoTaskId: taskId, mapping, ownerResolution, assignedAppUserId },
+        metadata: { zohoTaskId: taskId, mapping, ownerResolution, assignedAppUserId } as unknown as Prisma.InputJsonValue,
       },
     });
 

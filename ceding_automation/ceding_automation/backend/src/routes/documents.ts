@@ -129,7 +129,7 @@ router.delete(
           originalName: doc.originalName,
           status: doc.status,
           pageCount: doc.pageCount,
-          uploadedAt: doc.createdAt,
+          uploadedAt: doc.uploadedAt,
         },
       },
     });

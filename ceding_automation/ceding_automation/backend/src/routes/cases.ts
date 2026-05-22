@@ -636,7 +636,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
         sync: "zoho",
         zohoTaskId: caseRecord.zohoTaskId,
         changes,
-      },
+      } as Prisma.InputJsonValue,
     },
   });
 
