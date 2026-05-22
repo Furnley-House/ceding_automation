@@ -8,7 +8,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 
 import { caseRoutes } from "./routes/cases";
-import { documentRoutes } from "./routes/documents";
+import { documentRoutes, documentInternalRoutes } from "./routes/documents";
 import { checklistRoutes } from "./routes/checklist";
 import { fundLineRoutes } from "./routes/fundLines";
 import { providerRoutes } from "./routes/providers";
@@ -19,6 +19,7 @@ import { authRoutes } from "./routes/auth";
 import { notificationRoutes } from "./routes/notifications";
 import { crmRoutes } from "./routes/crm";
 import { callRoutes } from "./routes/calls";
+import { startPoller } from "./services/aiBffPoller";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -66,6 +67,8 @@ app.use("/api/audit", auditRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/crm", crmRoutes);
 app.use("/api/cases", callRoutes);
+// Internal BFF write-back endpoints (X-Internal-Key auth, no human users).
+app.use("/api/documents", documentInternalRoutes);
 
 // ── 404 handler ──────────────────────────────────────────
 app.use((_req, res) => {
@@ -80,6 +83,9 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 
 app.listen(PORT, () => {
   console.log(`🚀 Ceding Automation API running on port ${PORT}`);
+  // Background poller is a safety net for missed BFF write-backs.
+  // No-op when AI_VIA_BFF !== "true" or NODE_ENV === "test".
+  startPoller();
 });
 
 export default app;

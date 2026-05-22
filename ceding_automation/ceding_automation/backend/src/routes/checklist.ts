@@ -1,7 +1,10 @@
 // backend/src/routes/checklist.ts
 import { Router, Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
+import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireInternalKey } from "../middleware/internalKey";
+import { applyFieldExtraction } from "../services/aiBffApply";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -458,5 +461,91 @@ function generateQuestion(fieldName: string, fieldType: string): string {
   return questions[fieldName.toLowerCase().replace(/ /g, "_")] ||
     `Could you confirm the ${fieldName} for the policy?`;
 }
+
+// ── BFF write-back: single field ──────────────────────────
+// Called by the BFF (NOT by the frontend). Uses X-Internal-Key auth.
+// Contract: docs/ai-integration-design.md §4(a). The actual apply logic
+// lives in services/aiBffApply.ts so the poller uses the same path.
+const aiFieldWriteBackSchema = z.object({
+  job_id: z.string().regex(/^bff-[0-9a-f]{8}$/),
+  field_key: z.string().min(1),
+  value: z.union([z.string(), z.number(), z.null()]),
+  raw_value: z.string().nullable().optional(),
+  confidence: z.enum(["HIGH", "MEDIUM", "LOW", "MISSING"]),
+  source_page: z.number().int().positive().nullable().optional(),
+  source_quote: z.string().max(2000).nullable().optional(),
+  reasoning: z.string().max(2000).nullable().optional(),
+  document_id: z.string().min(1),
+});
+
+router.patch(
+  "/:caseId/checklist/:fieldId/ai-extract",
+  requireInternalKey,
+  async (req: Request, res: Response) => {
+    const parse = aiFieldWriteBackSchema.safeParse(req.body);
+    if (!parse.success) {
+      return res
+        .status(400)
+        .json({ error: "Invalid payload", details: parse.error.flatten() });
+    }
+    const body = parse.data;
+
+    // Confirm the fieldId actually belongs to the case in the URL (defends
+    // against a BFF mis-routing or a stale write-back hitting the wrong case).
+    const field = await prisma.checklistField.findFirst({
+      where: { id: req.params.fieldId, caseId: req.params.caseId },
+      include: { template: true },
+    });
+    if (!field) {
+      return res
+        .status(404)
+        .json({ error: "Field not found for this case" });
+    }
+
+    const result = await applyFieldExtraction({
+      caseId: req.params.caseId,
+      fieldKey: field.template.fieldKey,
+      data: {
+        fieldKey: body.field_key,
+        value: body.value,
+        rawValue: body.raw_value ?? null,
+        confidence: body.confidence,
+        sourcePage: body.source_page ?? null,
+        sourceQuote: body.source_quote ?? null,
+        reasoning: body.reasoning ?? null,
+      },
+      jobId: body.job_id,
+      documentId: body.document_id,
+    });
+
+    if (result.outcome === "preserved") {
+      return res.json({ ok: true, fieldId: field.id, skipped: "preserved" });
+    }
+    if (result.outcome === "no-overwrite-missing") {
+      return res.json({
+        ok: true,
+        fieldId: field.id,
+        skipped: "no-overwrite-with-missing",
+      });
+    }
+    if (result.outcome === "field-not-found") {
+      return res.status(404).json({ error: "Field not found" });
+    }
+
+    // applied or conflict — re-read for the response so the BFF sees the
+    // post-state (helpful for its own telemetry).
+    const updated = await prisma.checklistField.findUnique({
+      where: { id: field.id },
+      select: { id: true, confidence: true, hasConflict: true },
+    });
+    return res.json({
+      ok: true,
+      fieldId: updated?.id,
+      confidence: updated?.confidence,
+      hasConflict: updated?.hasConflict ?? false,
+      outcome: result.outcome,
+    });
+  }
+);
 
 export { router as checklistRoutes };
