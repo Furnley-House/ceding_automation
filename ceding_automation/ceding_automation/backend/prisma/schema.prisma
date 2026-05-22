@@ -289,11 +289,26 @@ model Document {
   extractionModel String? // e.g. "azure-gpt-4o"
   extractionMs    Int? // Processing time in ms
 
+  // ── BFF integration ──────────────────────────────────────
+  // Populated when AI_VIA_BFF=true; existing rows have NULL for all.
+  aiJobId           String? // BFF identifier "bff-<8-char-hex>"
+  aiJobStatus       String? // "queued" | "processing" | "completed" | "failed"
+  aiJobStage        String? // "stage1" | "stage2" | "stage3" | "stage4" | "done"
+  aiJobProgress     Int? // 0-100
+  aiJobSubmittedAt  DateTime?
+  aiJobCompletedAt  DateTime? // idempotency guard — set once by whichever path settles first
+  aiJobLastPolledAt DateTime? // cadence control for the background poller
+  aiJobError        String?
+  aiJobCostUsd      Decimal? @db.Decimal(10, 6) // from BFF llm_call_meta.total_cost_usd
+  aiJobTokens       Int? // from BFF llm_call_meta.total_tokens
+
   // Relations
   checklistFields ChecklistField[]    @relation("FieldSourceDocument")
   fundLines       ChecklistFundLine[] @relation("FundLineSourceDocument")
 
   @@index([caseId])
+  @@index([aiJobStatus, aiJobSubmittedAt]) // poller candidate scan
+  @@index([aiJobId]) // write-back lookups
   @@map("documents")
 }
 
@@ -368,6 +383,13 @@ model ChecklistField {
   // Transcript source
   fromTranscript Boolean @default(false)
   transcriptId   String?
+
+  // ── BFF integration ──────────────────────────────────────
+  // aiJobId traces which BFF job last produced this value; survives re-extraction
+  // overwriting Document.aiJobId. aiExtractedAt is distinct from updatedAt, which
+  // also ticks on manual edits and approvals.
+  aiJobId       String?
+  aiExtractedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -9,6 +9,23 @@ const prisma = new PrismaClient();
 async function main() {
   console.log("🌱 Seeding database...");
 
+  // ── SYSTEM USER (BFF write-back attribution) ────────
+  // Audit-log rows written by the BFF integration cite this synthetic user.
+  // Fixed ID so middleware/internalKey.ts can reference it without a lookup.
+  // Role=ADMIN is the narrowest role that passes any requireRole check; the
+  // user is never authenticated as a human (no email login, no SSO match).
+  await prisma.user.upsert({
+    where: { id: "system-ai-bff" },
+    update: {},
+    create: {
+      id: "system-ai-bff",
+      email: "ai-system@furnleyhouse.internal",
+      name: "AI Extraction (system)",
+      role: "ADMIN",
+      status: "ACTIVE",
+    },
+  });
+
   // ── DEMO USERS (one per role) ───────────────────────
   const demoUsers = [
     { email: "admin@furnleyhouse.co.uk", name: "Nicki Foster", role: UserRole.ADMIN },
