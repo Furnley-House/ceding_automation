@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertTriangle, CircleDashed, ListChecks, ThumbsUp } from "lucide-react";
 import { ChecklistField, type ChecklistFieldState, type Confidence } from "./ChecklistField";
 import { getTemplate, groupBySection, type ChecklistFieldDef } from "@/lib/checklistTemplates";
@@ -12,19 +12,37 @@ interface Props {
   caseId: string;
   /** When provided, fields render a 📄 button that calls back with source info */
   onJumpToSource?: (sourcePage: number | null, fieldLabel: string, evidenceSource: string | null) => void;
+  /**
+   * Bumped by an external signal (e.g. AI extraction completing) to force a
+   * checklist refetch without remounting the panel. Increment any number
+   * (1, 2, 3, …) to trigger one refresh.
+   */
+  refreshSignal?: number;
 }
 
 /**
  * DB-backed checklist. Reads from `checklist_fields`, seeds from the plan-type
  * template on first open, persists every edit and writes audit-log entries.
  */
-export function ChecklistPanel({ planType, caseId, onJumpToSource }: Props) {
+export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal }: Props) {
   const template = useMemo(() => getTemplate(planType), [planType]);
   const { canEditChecklist, canApprove, isAdviser } = useRole();
-  const { rows, byKey, loading, updateField, approveAllFilled } = useChecklistFields({
+  const { rows, byKey, loading, refresh, updateField, approveAllFilled } = useChecklistFields({
     caseId,
     template,
   });
+
+  // Re-fetch when an external signal arrives (e.g. BFF extraction completed).
+  // Skip the first run so we don't double up with useChecklistFields' own
+  // mount-time load.
+  const firstSignalRef = useRef(true);
+  useEffect(() => {
+    if (firstSignalRef.current) {
+      firstSignalRef.current = false;
+      return;
+    }
+    refresh();
+  }, [refreshSignal, refresh]);
 
   type FieldFilter = "all" | "high" | "review" | "missing" | "approved";
   const [filter, setFilter] = useState<FieldFilter>("all");

@@ -1,14 +1,26 @@
-import { useEffect, useMemo, useState } from "react";
-import { useDocuments, getSignedUrl, type DocumentRow } from "@/hooks/useDocuments";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useDocuments, getSignedUrl } from "@/hooks/useDocuments";
+import { useExtractionStatus, type ExtractionStatus } from "@/hooks/useExtractionStatus";
 import { DocumentList } from "./DocumentList";
 import { PdfViewer } from "./PdfViewer";
 import { ChecklistPanel } from "./ChecklistPanel";
-import { Sparkles } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Loader2, Sparkles, CircleAlert, RotateCcw } from "lucide-react";
+import { api } from "@/lib/api";
+import { toast } from "sonner";
 
 interface Props {
   caseId: string;
   planType: string;
 }
+
+const STAGE_LABEL: Record<string, string> = {
+  stage1: "Reading PDF",
+  stage2: "Detecting provider",
+  stage3: "Mapping fields",
+  stage4: "Extracting values",
+  done: "Finalising",
+};
 
 /**
  * Stage 3 — side-by-side workspace.
@@ -16,12 +28,21 @@ interface Props {
  * Right: live checklist with field-to-page jump.
  */
 export function ExtractionWorkspace({ caseId, planType }: Props) {
-  const { documents, loading, removeDocument } = useDocuments(caseId);
+  const {
+    documents,
+    loading,
+    refresh: refreshDocuments,
+    removeDocument,
+  } = useDocuments(caseId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [jumpRequest, setJumpRequest] = useState<{ page: number; banner: string; nonce: number } | null>(
     null,
   );
+  // Counter bumped when extraction completes — passed to ChecklistPanel to
+  // trigger a refetch so newly-extracted fields show up without a manual reload.
+  const [checklistRefreshSignal, setChecklistRefreshSignal] = useState(0);
+  const [retrying, setRetrying] = useState(false);
 
   // Auto-select the first document
   useEffect(() => {
@@ -50,6 +71,22 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     [documents, selectedId],
   );
 
+  const handleExtractionComplete = useCallback(() => {
+    // Tell the checklist panel to refetch (new field values), and refresh the
+    // document list so its row status flips from PROCESSING → EXTRACTED.
+    setChecklistRefreshSignal((n) => n + 1);
+    refreshDocuments();
+  }, [refreshDocuments]);
+
+  // Only poll for the selected document. If the selected doc isn't actively
+  // being processed, the hook returns the empty status and skips polling.
+  const selectedStatus = ((selectedDoc as { status?: string } | null)?.status) ?? null;
+  const extractionStatus: ExtractionStatus = useExtractionStatus(
+    caseId,
+    selectedStatus === "PROCESSING" ? selectedId : null,
+    handleExtractionComplete,
+  );
+
   const handleJumpToSource = (sourcePage: number | null, fieldLabel: string, evidenceSource: string | null) => {
     if (!sourcePage) return;
     // If the field cites a different document, switch to it
@@ -64,12 +101,43 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     setJumpRequest({ page: sourcePage, banner: fieldLabel, nonce: Date.now() });
   };
 
+  const handleRetry = async () => {
+    if (!selectedId) return;
+    setRetrying(true);
+    try {
+      await api.post(`/cases/${caseId}/documents/${selectedId}/extract`);
+      toast.success("Extraction restarted", {
+        description: "AI is reading your document again. Watch the progress bar.",
+      });
+      refreshDocuments();
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { error?: string } }; message?: string };
+      toast.error("Retry failed", {
+        description: err.response?.data?.error ?? err.message ?? "Please try again",
+      });
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  // ── Banner content for the selected document's extraction state ─────────
+  // We render a banner when the selected doc is mid-extraction or in a
+  // terminal state we still want to call out (failed / just-completed).
+  const banner = renderExtractionBanner(
+    selectedStatus,
+    extractionStatus,
+    retrying,
+    handleRetry,
+  );
+
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Sparkles className="h-3.5 w-3.5 text-teal" />
         Click 📄 next to any field on the right to jump the PDF to its source page.
       </div>
+
+      {banner}
 
       <div className="grid lg:grid-cols-2 gap-4">
         {/* Left: documents + viewer */}
@@ -103,9 +171,100 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
 
         {/* Right: checklist (DB-backed) */}
         <div className="lg:h-[700px] overflow-auto">
-          <ChecklistPanel planType={planType} caseId={caseId} onJumpToSource={handleJumpToSource} />
+          <ChecklistPanel
+            planType={planType}
+            caseId={caseId}
+            onJumpToSource={handleJumpToSource}
+            refreshSignal={checklistRefreshSignal}
+          />
         </div>
       </div>
     </div>
   );
+}
+
+function renderExtractionBanner(
+  documentStatus: string | null,
+  extraction: ExtractionStatus,
+  retrying: boolean,
+  onRetry: () => void,
+) {
+  // No selection → nothing.
+  if (!documentStatus) return null;
+
+  // Failed → red banner with retry. Trust the live status if available,
+  // otherwise fall back to the row-level ERROR state.
+  if (extraction.status === "failed" || documentStatus === "ERROR") {
+    return (
+      <div className="flex items-start gap-3 rounded-md border border-destructive/30 bg-destructive/10 p-3">
+        <CircleAlert className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-semibold text-destructive">Extraction failed</p>
+          {extraction.error && (
+            <p className="text-[11px] text-destructive/90 mt-0.5 break-words">
+              {extraction.error}
+            </p>
+          )}
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onRetry}
+          disabled={retrying}
+          className="h-7 gap-1"
+        >
+          {retrying ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <RotateCcw className="h-3 w-3" />
+          )}
+          Retry
+        </Button>
+      </div>
+    );
+  }
+
+  // Active extraction (live BFF status) → progress bar + stage text.
+  if (documentStatus === "PROCESSING") {
+    const stageMatch = extraction.stage?.match(/^stage(\d)$/);
+    const stageNum = stageMatch ? stageMatch[1] : null;
+    const stageLabel = extraction.stage
+      ? (STAGE_LABEL[extraction.stage] ?? extraction.stage)
+      : null;
+
+    const text =
+      extraction.status === "queued"
+        ? "Submitted to AI — waiting for pickup…"
+        : stageLabel
+          ? stageNum
+            ? `${stageLabel} (stage ${stageNum}/4)`
+            : stageLabel
+          : "Extracting…";
+
+    const pct = typeof extraction.progressPct === "number" ? extraction.progressPct : null;
+
+    return (
+      <div className="rounded-md border border-info/30 bg-info/10 p-3">
+        <div className="flex items-center gap-3">
+          <Loader2 className="h-4 w-4 text-info animate-spin shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-foreground">{text}</p>
+            {pct !== null && (
+              <div className="mt-1.5 h-1 bg-background rounded overflow-hidden">
+                <div
+                  className="h-full bg-info transition-all"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            )}
+          </div>
+          {pct !== null && (
+            <span className="text-[11px] font-semibold text-info shrink-0">{pct}%</span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return null;
 }

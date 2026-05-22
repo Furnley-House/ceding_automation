@@ -15,6 +15,7 @@ import type { DocumentRow } from "@/hooks/useDocuments";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { useExtractionStatus } from "@/hooks/useExtractionStatus";
 
 interface Props {
   documents: DocumentRow[];
@@ -149,20 +150,21 @@ export function DocumentList({
                   {fileName}
                 </p>
                 <div className="flex items-center gap-2 mt-0.5">
-                  <span
-                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold ${meta.cls}`}
-                  >
-                    {rawStatus === "EXTRACTED" && (
-                      <CheckCircle2 className="h-2.5 w-2.5" />
-                    )}
-                    {rawStatus === "ERROR" && (
-                      <CircleAlert className="h-2.5 w-2.5" />
-                    )}
-                    {rawStatus === "PROCESSING" && (
-                      <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                    )}
-                    {meta.label}
-                  </span>
+                  {rawStatus === "PROCESSING" ? (
+                    <ExtractingStatusBadge caseId={caseId} documentId={d.id} />
+                  ) : (
+                    <span
+                      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold ${meta.cls}`}
+                    >
+                      {rawStatus === "EXTRACTED" && (
+                        <CheckCircle2 className="h-2.5 w-2.5" />
+                      )}
+                      {rawStatus === "ERROR" && (
+                        <CircleAlert className="h-2.5 w-2.5" />
+                      )}
+                      {meta.label}
+                    </span>
+                  )}
                 </div>
                 {errorMsg && (
                   <p className="text-[10px] text-destructive mt-0.5 truncate">
@@ -211,5 +213,50 @@ export function DocumentList({
         );
       })}
     </ul>
+  );
+}
+
+const STAGE_LABEL: Record<string, string> = {
+  stage1: "Reading PDF",
+  stage2: "Detecting provider",
+  stage3: "Mapping fields",
+  stage4: "Extracting values",
+  done: "Finalising",
+};
+
+/**
+ * Per-row badge for PROCESSING documents. Polls /ai-status (3s interval)
+ * to surface BFF stage + progress. One poller per processing row — fine
+ * for typical case loads (1–3 docs); for >5 concurrent processing docs the
+ * polling load becomes noticeable. Acceptable for v1.
+ */
+function ExtractingStatusBadge({
+  caseId,
+  documentId,
+}: {
+  caseId: string;
+  documentId: string;
+}) {
+  const status = useExtractionStatus(caseId, documentId);
+  const stageLabel = status.stage ? STAGE_LABEL[status.stage] ?? status.stage : null;
+  const stageMatch = status.stage?.match(/^stage(\d)$/);
+  const stageNum = stageMatch ? stageMatch[1] : null;
+  const text =
+    status.status === "queued"
+      ? "Waiting in queue…"
+      : stageLabel
+        ? stageNum
+          ? `${stageLabel} (${stageNum}/4)`
+          : stageLabel
+        : "Extracting…";
+
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-500/15 text-blue-600">
+      <Loader2 className="h-2.5 w-2.5 animate-spin" />
+      {text}
+      {typeof status.progressPct === "number" && status.progressPct > 0 && (
+        <span className="ml-0.5 opacity-80">· {status.progressPct}%</span>
+      )}
+    </span>
   );
 }
