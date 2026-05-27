@@ -198,9 +198,14 @@ async function submitOrTrigger(docId: string, caseId: string, userId: string): P
       planType: aiBff.mapPlanTypeToBff(caseRecord.planType),
       providerName: caseRecord.provider?.name,
       policyRef: caseRecord.policyRef ?? undefined,
+      clientName: caseRecord.clientName,
+      zohoTaskId: caseRecord.zohoTaskId ?? undefined,
       checklistFields: caseRecord.checklistFields.map((f) => ({
         fieldKey: f.template.fieldKey,
-        required: f.template.isRequired,
+        fieldName: f.template.fieldName,
+        fieldType: f.template.fieldType,
+        isRequired: f.template.isRequired,
+        dropdownOptions: f.template.dropdownOptions ?? undefined,
       })),
     });
 

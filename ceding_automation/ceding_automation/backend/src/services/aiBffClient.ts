@@ -81,7 +81,7 @@ function mapAxiosError(jobId: string | undefined, err: unknown): never {
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-export type BffPlanType = "ISA" | "GIA" | "Pension" | "Bond";
+export type BffPlanType = "ISA" | "GIA" | "PENSION" | "BOND";
 export type BffConfidence = "HIGH" | "MEDIUM" | "LOW" | "MISSING";
 export type BffJobState = "queued" | "processing" | "completed" | "failed";
 export type BffStage = "stage1" | "stage2" | "stage3" | "stage4" | "done";
@@ -93,7 +93,15 @@ export interface SubmitExtractionInput {
   planType: BffPlanType;
   providerName?: string;
   policyRef?: string;
-  checklistFields: Array<{ fieldKey: string; required: boolean }>;
+  clientName?: string;
+  zohoTaskId?: string;
+  checklistFields: Array<{
+    fieldKey: string;
+    fieldName: string;
+    fieldType: string;
+    isRequired: boolean;
+    dropdownOptions?: string[];
+  }>;
 }
 
 export interface SubmitExtractionResult {
@@ -157,9 +165,9 @@ export function mapPlanTypeToBff(planType: PlanType): BffPlanType {
     case "GIA":
       return "GIA";
     case "PENSION":
-      return "Pension";
+      return "PENSION";
     case "BOND":
-      return "Bond";
+      return "BOND";
     case "FINAL_SALARY":
     case "PROTECTION":
       throw new Error(
@@ -185,9 +193,14 @@ export async function submitExtractionJob(
       plan_type: input.planType,
       provider_name: input.providerName,
       policy_ref: input.policyRef,
+      client_name: input.clientName,
+      zoho_task_id: input.zohoTaskId,
       checklist_fields: input.checklistFields.map((f) => ({
         field_key: f.fieldKey,
-        required: f.required,
+        field_name: f.fieldName,
+        field_type: f.fieldType,
+        is_required: f.isRequired,
+        dropdown_options: f.dropdownOptions,
       })),
     });
     return {
