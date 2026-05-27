@@ -490,16 +490,33 @@ router.patch(
     }
     const body = parse.data;
 
-    // Confirm the fieldId actually belongs to the case in the URL (defends
-    // against a BFF mis-routing or a stale write-back hitting the wrong case).
+    // NOTE (per docs/monday-execution-plan.md D3):
+    // For /ai-extract only, :fieldId is the template.fieldKey
+    // (e.g. "plan_number"), NOT ChecklistField.id UUID. Stage 4
+    // of the BFF pipeline outputs each field keyed by field_key,
+    // so the BFF passes that as the URL param. Other routes in
+    // this file still use UUID-based lookup.
     const field = await prisma.checklistField.findFirst({
-      where: { id: req.params.fieldId, caseId: req.params.caseId },
+      where: {
+        caseId: req.params.caseId,
+        template: { fieldKey: req.params.fieldId },
+      },
       include: { template: true },
     });
     if (!field) {
       return res
         .status(404)
         .json({ error: "Field not found for this case" });
+    }
+
+    // Defense-in-depth: BFF must send the same field_key in URL and body.
+    // Catches BFF bugs where URL routing and payload construction diverge.
+    if (body.field_key !== req.params.fieldId) {
+      return res.status(400).json({
+        error: "field_key mismatch between URL and body",
+        urlFieldKey: req.params.fieldId,
+        bodyFieldKey: body.field_key,
+      });
     }
 
     const result = await applyFieldExtraction({
