@@ -467,7 +467,7 @@ function generateQuestion(fieldName: string, fieldType: string): string {
 // Contract: docs/ai-integration-design.md §4(a). The actual apply logic
 // lives in services/aiBffApply.ts so the poller uses the same path.
 const aiFieldWriteBackSchema = z.object({
-  job_id: z.string().regex(/^bff-[0-9a-f]{8}$/),
+  job_id: z.string().regex(/^bff-[0-9a-f]{8,16}$/),
   field_key: z.string().min(1),
   value: z.union([z.string(), z.number(), z.null()]),
   raw_value: z.string().nullable().optional(),

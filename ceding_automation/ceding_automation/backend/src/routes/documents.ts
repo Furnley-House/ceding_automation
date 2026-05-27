@@ -446,7 +446,7 @@ router.get(
 // Mounted at /api/documents/:documentId. Called by the BFF only.
 // Contract: docs/ai-integration-design.md §4(b).
 const aiDocWriteBackSchema = z.object({
-  job_id: z.string().regex(/^bff-[0-9a-f]{8}$/),
+  job_id: z.string().regex(/^bff-[0-9a-f]{8,16}$/),
   status: z.enum(["queued", "processing", "completed", "failed"]),
   stage: z
     .enum(["stage1", "stage2", "stage3", "stage4", "done"])
