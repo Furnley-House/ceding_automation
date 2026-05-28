@@ -22,6 +22,11 @@ import { callRoutes } from "./routes/calls";
 import { startPoller } from "./services/aiBffPoller";
 
 const app = express();
+
+// Trust the Container Apps ingress proxy (one hop) so req.ip reflects
+// the real client IP, not the proxy IP. Needed for express-rate-limit
+// to work per-client rather than per-proxy.
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3001;
 
 // ── Security middleware ──────────────────────────────────
