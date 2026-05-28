@@ -44,10 +44,14 @@ app.use(limiter);
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ── Local file uploads (dev fallback when Azure Storage not configured) ───
-const uploadsDir = path.resolve(__dirname, "../uploads");
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-app.use("/uploads", express.static(uploadsDir));
+// Local uploads fallback — only when Azure Blob Storage isn't configured.
+// In production (Azure), AZURE_STORAGE_ACCOUNT_NAME is always set, so this
+// block is skipped and we don't need a writable disk location.
+if (!process.env.AZURE_STORAGE_ACCOUNT_NAME) {
+  const uploadsDir = path.resolve(__dirname, "../uploads");
+  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+  app.use("/uploads", express.static(uploadsDir));
+}
 
 // ── Health check ─────────────────────────────────────────
 app.get("/health", (_req, res) => {
