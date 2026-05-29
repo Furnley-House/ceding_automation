@@ -328,6 +328,7 @@ model ChecklistTemplate {
   displayOrder    Int
   isActive        Boolean  @default(true)
   conditionalNote String? // Tooltip / guidance for CA team
+  metadata        Json?   // v1.1 canonical extras: typical_values, normalize_per, allows_defer_to_source, defer_examples, auto_extract_hint, parent_field, accepts_non_applicable_markers, columns, section_order
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

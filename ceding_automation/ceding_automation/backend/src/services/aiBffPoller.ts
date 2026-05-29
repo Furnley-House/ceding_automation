@@ -116,10 +116,15 @@ async function pollOne(documentId: string, jobId: string): Promise<void> {
     });
 
     if (status.status === "completed") {
-      // Fetch full result and run through the shared apply path. Idempotent
-      // via aiJobCompletedAt check inside applyExtractionResult.
-      const result = await aiBff.getJobResult(jobId);
-      await applyExtractionResult(documentId, result);
+      // Field data already arrived via BFF write-back PATCH. Settle the doc
+      // here as the safety-net path; idempotency guard mirrors the failed branch.
+      await prisma.document.updateMany({
+        where: { id: documentId, aiJobCompletedAt: null },
+        data: {
+          status: "EXTRACTED",
+          aiJobCompletedAt: new Date(),
+        },
+      });
     } else if (status.status === "failed") {
       // BFF says failed — settle the document here. The write-back path may
       // have already done this; the idempotency guard in PATCH covers that.
