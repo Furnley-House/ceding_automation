@@ -215,7 +215,10 @@ async function submitOrTrigger(docId: string, caseId: string, userId: string): P
         status: "PROCESSING",
         aiJobId: submission.jobId,
         aiJobStatus: submission.status,
-        aiJobSubmittedAt: new Date(submission.submittedAt),
+        // Use local clock — aiJobSubmittedAt represents WHEN WE SUBMITTED,
+        // not the BFF's clock. BFF's submitted_at field may be missing or
+        // unparseable; either way, we know now is the right time.
+        aiJobSubmittedAt: new Date(),
         // Clear terminal-state fields in case this is a re-extraction.
         aiJobCompletedAt: null,
         aiJobError: null,
