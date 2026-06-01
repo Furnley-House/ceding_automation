@@ -7,6 +7,7 @@
 
 import { PrismaClient, Prisma } from "@prisma/client";
 import type { BffExtractedField, BffJobResult } from "./aiBffClient";
+import { compareFieldValues } from "../utils/compareFieldValues";
 
 const prisma = new PrismaClient();
 const SYSTEM_USER_ID = "system-ai-bff";
@@ -34,6 +35,11 @@ export async function applyFieldExtraction(args: {
   jobId: string;
   documentId: string;
   userId?: string;
+  /** Canonical provider name passed from the caller (poller has BFF's
+   *  detectedProvider.canonical; the PATCH path doesn't have it). When set,
+   *  compareFieldValues uses it to treat alias variants of provider_name as
+   *  equivalent rather than CONFLICT. */
+  providerCanonical?: string;
 }): Promise<ApplyFieldResult> {
   const userId = args.userId ?? SYSTEM_USER_ID;
 
@@ -58,7 +64,19 @@ export async function applyFieldExtraction(args: {
   const rawValueStr = args.data.rawValue ?? newValueStr;
 
   // (3) Conflict path — existing value differs from new value.
-  if (field.value !== null && field.value !== newValueStr) {
+  // Uses compareFieldValues so semantically-equivalent values (e.g.
+  // "Aviva" vs "Aviva Life & Pensions UK Limited", "£10,558.60" vs "10558.6")
+  // don't trigger CONFLICT.
+  const isDifferent =
+    field.value !== null &&
+    compareFieldValues(
+      field.value,
+      newValueStr,
+      field.template.fieldType,
+      field.template.fieldKey,
+      { providerCanonical: args.providerCanonical },
+    ) === "different";
+  if (isDifferent) {
     await prisma.checklistField.update({
       where: { id: field.id },
       data: {
@@ -159,6 +177,10 @@ export async function applyExtractionResult(
   // (each field write is itself idempotent via the preservation/value guards).
   if (doc.aiJobCompletedAt) return { outcome: "already-complete" };
 
+  // BFF gives us a canonicalised provider name when its detector is
+  // confident. Plumb it through so provider_name conflicts collapse on alias.
+  const providerCanonical = result.response.detectedProvider?.canonical || undefined;
+
   for (const field of result.response.fields) {
     await applyFieldExtraction({
       caseId: doc.caseId,
@@ -166,6 +188,7 @@ export async function applyExtractionResult(
       data: field,
       jobId: result.jobId,
       documentId,
+      providerCanonical,
     });
   }
 

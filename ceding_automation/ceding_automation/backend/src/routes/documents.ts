@@ -8,6 +8,7 @@ import { requireInternalKey } from "../middleware/internalKey";
 import { uploadToAzureBlob, generateSasUrl } from "../services/storage";
 import { extractDocumentWithAI } from "../services/aiExtraction";
 import * as aiBff from "../services/aiBffClient";
+import { compareFieldValues } from "../utils/compareFieldValues";
 
 const router = Router();
 // Internal router for PATCH /api/documents/:documentId — mounted at /api/documents
@@ -287,8 +288,18 @@ async function triggerExtraction(docId: string, caseId: string, userId: string) 
       );
       if (!field) continue;
 
-      // Check for conflict with existing value
-      if (field.value && field.value !== result.value) {
+      // Check for conflict with existing value. Routes through
+      // compareFieldValues so semantically-equivalent values (currency
+      // formatting, date format, none-aliases, etc.) don't raise CONFLICT.
+      const isConflict =
+        !!field.value &&
+        compareFieldValues(
+          field.value,
+          result.value,
+          field.template.fieldType,
+          field.template.fieldKey,
+        ) === "different";
+      if (isConflict) {
         await prisma.checklistField.update({
           where: { id: field.id },
           data: {
