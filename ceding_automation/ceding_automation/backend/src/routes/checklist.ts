@@ -501,7 +501,14 @@ router.patch(
         caseId: req.params.caseId,
         template: { fieldKey: req.params.fieldId },
       },
-      include: { template: true },
+      include: {
+        template: true,
+        // Pull the case's canonical provider so we can plumb it into
+        // compareFieldValues via applyFieldExtraction. Only used for
+        // provider_name alias collapsing. No extra round-trip vs the
+        // existing query — same join.
+        case: { select: { provider: { select: { name: true } } } },
+      },
     });
     if (!field) {
       return res
@@ -533,6 +540,10 @@ router.patch(
       },
       jobId: body.job_id,
       documentId: body.document_id,
+      // PATCH body doesn't carry detected_provider; fall back to the case's
+      // registry-known provider name (canonical by construction since the
+      // Provider table is the source of truth).
+      providerCanonical: field.case?.provider?.name ?? undefined,
     });
 
     if (result.outcome === "preserved") {
