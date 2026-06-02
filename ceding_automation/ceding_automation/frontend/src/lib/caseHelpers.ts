@@ -73,13 +73,18 @@ export const STATUS_STYLES: Record<string, string> = {
   ceding_in_progress: "bg-primary/15 text-primary",
 };
 
+/**
+ * Plan-type dropdown options. `value` matches the backend Prisma `PlanType`
+ * enum (PENSION / ISA / GIA / …); `label` is the user-facing display string.
+ * Form submissions must send `value`, not `label`.
+ */
 export const PLAN_TYPES = [
-  "ISA",
-  "GIA",
-  "Personal Pension",
+  { label: "ISA", value: "ISA" },
+  { label: "GIA", value: "GIA" },
+  { label: "Personal Pension", value: "PENSION" },
 ] as const;
 
-export type PlanType = (typeof PLAN_TYPES)[number];
+export type PlanType = (typeof PLAN_TYPES)[number]["value"];
 
 export type Rag = "red" | "amber" | "green";
 

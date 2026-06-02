@@ -111,7 +111,7 @@ const Cases = () => {
   const [form, setForm] = useState({
     client_name: "",
     Provider_group: "",
-    plan_type: "Personal Pension",
+    plan_type: "PENSION",
     plan_number: "",
     zoho_task_id: "",
     case_notes: "",
@@ -124,7 +124,7 @@ const Cases = () => {
     onSuccess: (newCase) => {
       qc.invalidateQueries({ queryKey: ["cases"] });
       setDialogOpen(false);
-      setForm({ client_name: "", Provider_group: "", plan_type: "Personal Pension", plan_number: "", zoho_task_id: "", case_notes: "" });
+      setForm({ client_name: "", Provider_group: "", plan_type: "PENSION", plan_number: "", zoho_task_id: "", case_notes: "" });
       toast.success("Case created", { description: `${newCase.case_ref} — ${newCase.client_name}` });
       navigate(`/cases/${newCase.id}`);
     },
@@ -251,8 +251,8 @@ const Cases = () => {
                       </SelectTrigger>
                       <SelectContent>
                         {PLAN_TYPES.map((t) => (
-                          <SelectItem key={t} value={t}>
-                            {t}
+                          <SelectItem key={t.value} value={t.value}>
+                            {t.label}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -307,8 +307,8 @@ const Cases = () => {
         <FilterSelect value={planFilter} onChange={setPlanFilter} placeholder="Plan type">
           <SelectItem value="all">All plan types</SelectItem>
           {PLAN_TYPES.map((p) => (
-            <SelectItem key={p} value={p}>
-              {p}
+            <SelectItem key={p.value} value={p.value}>
+              {p.label}
             </SelectItem>
           ))}
         </FilterSelect>
