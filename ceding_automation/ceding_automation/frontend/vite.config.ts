@@ -12,7 +12,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://localhost:3001", changeOrigin: true },
+      // Local dev proxies /api/* to staging backend. Bypasses CORS because
+      // the browser sees same-origin localhost:5173. Revert this target to
+      // http://localhost:3001 when working against a local backend.
+      "/api": {
+        target: "https://ca-cedingai-backend-staging.delightfulpond-8e29b388.uksouth.azurecontainerapps.io",
+        changeOrigin: true,
+        secure: true,
+      },
     },
   },
 });
