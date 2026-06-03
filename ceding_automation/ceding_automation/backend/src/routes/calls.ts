@@ -111,8 +111,6 @@ router.post(
           caseId: req.params.caseId,
           scriptContent: script as object,
           missingFieldIds: fieldIds.map((f) => f.id),
-          providerPhone: (req.body.providerPhone as string | undefined) ?? null,
-          providerDept: "Ceding / Transfers",
         },
       });
 

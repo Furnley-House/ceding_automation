@@ -17,6 +17,8 @@ export interface CaseRow {
   rag?: string | null;
   owner_name?: string | null;
   owner_id?: string | null;
+  paraplanner_id?: string | null;
+  paraplanner_name?: string | null;
   current_value?: string | null;
   transfer_value?: string | null;
   case_notes?: string | null;
@@ -78,10 +80,12 @@ export const STATUS_STYLES: Record<string, string> = {
  * enum (PENSION / ISA / GIA / …); `label` is the user-facing display string.
  * Form submissions must send `value`, not `label`.
  */
+// Phase 1 supports three plan types: Pension, ISA, GIA. "Personal Pension"
+// is a *sub-type* (handled separately via PlanSubType), not a plan type.
 export const PLAN_TYPES = [
+  { label: "Pension", value: "PENSION" },
   { label: "ISA", value: "ISA" },
   { label: "GIA", value: "GIA" },
-  { label: "Personal Pension", value: "PENSION" },
 ] as const;
 
 export type PlanType = (typeof PLAN_TYPES)[number]["value"];

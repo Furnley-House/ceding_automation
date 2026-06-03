@@ -68,9 +68,9 @@ const STATUS_TO_STAGE: Record<string, number> = {
   STAGE_6_DOCUMENT_UPLOAD: 6,
   STAGE_7_MISSING_INFO: 7,
   STAGE_8_VERIFY_CHECKLIST: 8,
-  STAGE_9_ADVISER_REVIEW: 9,
+  STAGE_9_ADVISER_REVIEW: 8,
   STAGE_10_COMPLETE: 10,
-  IN_REVIEW: 9,
+  IN_REVIEW: 8,
   APPROVED: 9,
   ON_HOLD: 1,
   CANCELLED: 1,
@@ -81,6 +81,7 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
   const provider = c.provider as Record<string, unknown> | null | undefined;
   const assignedTo = c.assigned_to as Record<string, unknown> | null | undefined;
   const createdBy = c.created_by as Record<string, unknown> | null | undefined;
+  const paraplanner = c.paraplanner as Record<string, unknown> | null | undefined;
   const rawStatus = (c.status as string | undefined) ?? "";
   const upperStatus = rawStatus.toUpperCase();
   const uiStatus = STATUS_MAP[upperStatus] ?? rawStatus.toLowerCase();
@@ -97,13 +98,19 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
     if (!stagesCompleted.includes(10)) stagesCompleted.push(10);
   }
 
-  // The CA-team ownership check (e.g. CaseDetail / Cases list) reads `owner_name`.
+  // The CA-team ownership check (e.g. CaseDetail / Cases list) reads `owner_name`/`owner_id`.
   // Treat the assigned user as the "owner"; fall back to the creator so a freshly
   // imported case is never orphaned.
   const ownerName =
     (assignedTo?.name as string | undefined) ??
     (createdBy?.name as string | undefined) ??
     "";
+  const ownerId =
+    (assignedTo?.id as string | undefined) ??
+    (c.assigned_to_id as string | undefined) ??
+    (createdBy?.id as string | undefined) ??
+    (c.created_by_id as string | undefined) ??
+    null;
   return {
     ...c,
     backend_status: rawStatus,       // keep original for API calls
@@ -111,12 +118,18 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
     current_stage: currentStage,
     stages_completed: stagesCompleted,
     Provider_group: provider?.name ?? "",
+    // snake_case alias used by Dashboard / Cases list / MyInbox — without
+    // this, every row was being bucketed as "Unknown" on the provider donut.
+    provider_name: provider?.name ?? "",
     Plan_Number: c.policy_ref ?? c.policy_reference ?? "",
     plan_number: c.policy_ref ?? c.policy_reference ?? "",
     provider_phone_main: (provider?.phone_main as string) ?? "",
     provider_phone_ceding: (provider?.phone_ceding_dept as string) ?? "",
     assigned_to_name: assignedTo?.name ?? "",
     owner_name: ownerName,
+    owner_id: ownerId,
+    paraplanner_id: (paraplanner?.id as string | undefined) ?? (c.paral_planner_id as string | undefined) ?? null,
+    paraplanner_name: (paraplanner?.name as string | undefined) ?? null,
   };
 }
 

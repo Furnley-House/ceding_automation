@@ -39,6 +39,18 @@ export const casesApi = {
     api.post(`/cases/${id}/assign-paraplanner`, { paralPlannerId, note }),
   logChase: (id: string, method: string, notes?: string) =>
     api.post(`/cases/${id}/chase`, { method, notes }),
+  /**
+   * Stage 9 one-shot export: posts the generated XLSX as multipart, gets
+   * WorkDrive metadata + Zoho update result back.
+   */
+  completeExport: (id: string, blob: Blob, fileName: string) => {
+    const form = new FormData();
+    form.append("file", blob, fileName);
+    form.append("fileName", fileName);
+    return api.post(`/cases/${id}/complete-export`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
 };
 
 // ── Documents ────────────────────────────────────────────
@@ -60,6 +72,10 @@ export const documentsApi = {
 // ── Checklist ────────────────────────────────────────────
 export const checklistApi = {
   get: (caseId: string) => api.get(`/cases/${caseId}/checklist`),
+  seedField: (
+    caseId: string,
+    payload: { fieldKey: string; label?: string; section?: string; value?: string | null },
+  ) => api.post(`/cases/${caseId}/checklist/seed`, payload),
   editField: (caseId: string, fieldId: string, value: string) =>
     api.patch(`/cases/${caseId}/checklist/${fieldId}`, { value }),
   resolveConflict: (caseId: string, fieldId: string, chosenValue: string) =>
@@ -70,10 +86,17 @@ export const checklistApi = {
     api.post(`/cases/${caseId}/checklist/${fieldId}/request-review`, { comment }),
   approveAll: (caseId: string) =>
     api.post(`/cases/${caseId}/checklist/approve-all`),
+  fillTestData: (caseId: string) =>
+    api.post(`/cases/${caseId}/checklist/fill-test-data`),
   generateCallScript: (caseId: string) =>
     api.post(`/cases/${caseId}/call-script`),
   uploadTranscript: (caseId: string, text: string, source?: string) =>
     api.post(`/cases/${caseId}/transcript`, { text, source }),
+};
+
+// ── Fund Lines ───────────────────────────────────────────
+export const fundLinesApi = {
+  list: (caseId: string) => api.get(`/cases/${caseId}/fund-lines`),
 };
 
 // ── Providers ────────────────────────────────────────────

@@ -164,7 +164,7 @@ export function StageAIExtraction({ caseItem }: StageProps) {
       num={4}
       icon={Cpu}
       title="Extract & Fill Gaps"
-      description="Side-by-side viewer — Gemini reads each PDF, populates the checklist, and links every value to its source page. Fill any remaining gaps inline."
+      description=""
     >
       <ExtractionWorkspace caseId={caseItem.id} planType={caseItem.plan_type} />
     </StagePanel>

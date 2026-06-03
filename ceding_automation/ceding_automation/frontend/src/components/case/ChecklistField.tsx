@@ -10,6 +10,7 @@ import {
   RotateCcw,
   ThumbsUp,
   Sparkles,
+  AlertTriangle,
 } from "lucide-react";
 import type { ChecklistFieldDef } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
@@ -21,7 +22,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 
-export type Confidence = "HIGH" | "MEDIUM" | "LOW" | "MISSING";
+// Must mirror backend Prisma enum `ConfidenceLevel`. CONFLICT is set by the
+// AI extractor when two source documents disagree on a field value.
+export type Confidence = "HIGH" | "MEDIUM" | "LOW" | "MISSING" | "CONFLICT";
 export type FieldStatus = "missing" | "pending" | "approved" | "review_requested";
 
 export interface ChecklistFieldState {
@@ -49,6 +52,7 @@ const CONF_META: Record<Confidence, { label: string; icon: React.ElementType; cl
   MEDIUM: { label: "Medium confidence", icon: CircleHelp, cls: "bg-warning/15 text-warning border-warning/30" },
   LOW: { label: "Low confidence", icon: CircleAlert, cls: "bg-overdue/15 text-overdue border-overdue/30" },
   MISSING: { label: "Missing", icon: CircleDashed, cls: "bg-muted text-muted-foreground border-border" },
+  CONFLICT: { label: "Conflicting sources", icon: AlertTriangle, cls: "bg-overdue/15 text-overdue border-overdue/40" },
 };
 
 export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) {
@@ -61,7 +65,10 @@ export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) 
 
   useEffect(() => setLocalValue(state.value ?? ""), [state.value]);
 
-  const conf = CONF_META[state.confidence];
+  // Fall back to MISSING if the backend returns an unmapped enum value.
+  // Without this guard, the whole Extract & Fill Gaps stage white-screens
+  // because `conf.icon` would throw on undefined.
+  const conf = CONF_META[state.confidence] ?? CONF_META.MISSING;
   const ConfIcon = conf.icon;
   const isApproved = state.status === "approved";
   const isReviewRequested = state.status === "review_requested";
@@ -246,7 +253,12 @@ export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) 
               </span>
             )}
 
-            {onJumpToSource && state.evidenceRef && (
+            {onJumpToSource && (
+              // The parent (ChecklistPanel) only wires this callback when a
+              // source page exists, so reaching here means we have something
+              // to scroll to. The tooltip carries the optional `evidenceRef`
+              // metadata when it's available; the button itself is gated on
+              // the click handler alone.
               <TooltipProvider delayDuration={200}>
                 <Tooltip>
                   <TooltipTrigger asChild>

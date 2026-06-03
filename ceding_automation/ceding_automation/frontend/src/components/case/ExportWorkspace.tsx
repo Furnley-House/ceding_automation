@@ -9,15 +9,13 @@ import {
   ShieldCheck,
   AlertTriangle,
   ExternalLink,
-  Sparkles,
 } from "lucide-react";
 import { toast } from "sonner";
-import { auditApi } from "@/lib/api";
+import { auditApi, casesApi, fundLinesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { useChecklistFields } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import type { CaseRow } from "@/lib/caseHelpers";
 
 interface AuditRow {
@@ -123,6 +121,71 @@ export function ExportWorkspace({ caseItem }: Props) {
       ["Exported at", new Date().toLocaleString("en-GB")],
     ];
 
+    // ---- Fund Details sheet ----
+    // Multi-row sub-table (per-fund breakdown). Headers mirror the in-app
+    // FundDetailsTable so the spreadsheet matches what the CA / paraplanner
+    // saw on screen. Totals row appended at the bottom.
+    interface FundLineRow {
+      fundName: string;
+      isinSedolCiti: string | null;
+      numberOfUnits: string | null;
+      pricePerUnit: string | null;
+      value: string | null;
+      fundCharge: string | null;
+      isWithProfits: boolean;
+      status: string;
+      confidence: string;
+      sourcePageNumber: number | null;
+      updatedAt: string | null;
+    }
+    let fundLines: FundLineRow[] = [];
+    let fundTotalValue = "0";
+    try {
+      const res = await fundLinesApi.list(caseItem.id);
+      const data = res.data as {
+        rows?: FundLineRow[];
+        summary?: { totalValue?: string };
+      };
+      fundLines = data.rows ?? [];
+      fundTotalValue = data.summary?.totalValue ?? "0";
+    } catch {
+      // fund lines unavailable — sheet still rendered with header only
+    }
+    const fundRows: (string | number)[][] = [
+      [
+        "Fund Name",
+        "ISIN / Sedol",
+        "Units",
+        "Price",
+        "Value (£)",
+        "Charge (%)",
+        "With-profits",
+        "Status",
+        "Confidence",
+        "Source page",
+        "Last updated",
+      ],
+    ];
+    fundLines.forEach((f) => {
+      fundRows.push([
+        f.fundName,
+        f.isinSedolCiti ?? "",
+        f.numberOfUnits ?? "",
+        f.pricePerUnit ?? "",
+        f.value ?? "",
+        f.fundCharge ?? "",
+        f.isWithProfits ? "Yes" : "No",
+        f.status,
+        f.confidence,
+        f.sourcePageNumber ?? "",
+        formatTs(f.updatedAt ?? null),
+      ]);
+    });
+    if (fundLines.length > 0) {
+      fundRows.push([]); // blank separator row
+      fundRows.push(["", "", "", "TOTAL", fundTotalValue, "", "", "", "", "", ""]);
+    }
+
     // ---- Audit sheet ----
     let auditList: AuditRow[] = [];
     try {
@@ -168,6 +231,11 @@ export function ExportWorkspace({ caseItem }: Props) {
       { wch: 24 }, { wch: 32 }, { wch: 36 }, { wch: 14 },
       { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 30 }, { wch: 18 },
     ];
+    const fundSheet = XLSX.utils.aoa_to_sheet(fundRows);
+    fundSheet["!cols"] = [
+      { wch: 32 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 14 },
+      { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 18 },
+    ];
     const auditSheet = XLSX.utils.aoa_to_sheet(auditRows);
     auditSheet["!cols"] = [
       { wch: 18 }, { wch: 28 }, { wch: 16 }, { wch: 12 },
@@ -175,60 +243,66 @@ export function ExportWorkspace({ caseItem }: Props) {
     ];
     XLSX.utils.book_append_sheet(wb, summarySheet, "Summary");
     XLSX.utils.book_append_sheet(wb, checklistSheet, "Checklist");
+    XLSX.utils.book_append_sheet(wb, fundSheet, "Fund Details");
     XLSX.utils.book_append_sheet(wb, auditSheet, "Audit Trail");
     return wb;
   };
 
   const fileName = `${caseItem.case_ref}_${caseItem.client_name.replace(/\s+/g, "_")}_ceding.xlsx`;
 
-  const handleDownload = async () => {
+  // One-shot Stage 9 action:
+  //   1. Build the XLSX in the browser.
+  //   2. Trigger a local download.
+  //   3. POST the same workbook bytes to the backend → WorkDrive upload + Zoho Plans PATCH.
+  // Each leg succeeds or fails independently; the toast surfaces partials.
+  const handleCompleteExport = async () => {
     setExporting(true);
+    setUploading(true);
     try {
       const wb = await buildWorkbook();
+
+      // 1. Local download
       XLSX.writeFile(wb, fileName);
-      setLastExportAt(new Date().toISOString());
-      toast.success("Excel file downloaded", { description: fileName });
-      // Audit. Server-side write so the actor is the JWT subject and can't be
-      // spoofed. Failure here is non-blocking — the user got their file.
-      try {
-        await auditApi.logExport(caseItem.id, {
-          action: "CHECKLIST_EXPORTED",
-          fileName,
-          notes: `${stats.approved}/${stats.total} fields approved at export time`,
-        });
-      } catch (auditErr) {
-        console.warn("Failed to log CHECKLIST_EXPORTED audit:", auditErr);
+
+      // 2. Build a Blob from the same workbook (writeFile doesn't return bytes)
+      const arrayBuf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+      const blob = new Blob([arrayBuf], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+
+      // 3. Backend does WorkDrive + Zoho in one call
+      const res = await casesApi.completeExport(caseItem.id, blob, fileName);
+      const data = res.data as {
+        workdrive?: { id: string; permalink?: string } | null;
+        workdriveError?: string | null;
+        zohoUpdate?: { ok: boolean; fieldsUpdated: number };
+        zohoError?: string | null;
+        exportedAt: string;
+      };
+
+      setLastExportAt(data.exportedAt);
+      if (data.workdrive?.permalink) {
+        setWorkdriveLink(data.workdrive.permalink);
+      }
+
+      // Build a precise multi-line toast so the CA sees exactly what worked.
+      const lines: string[] = [`Downloaded ${fileName}`];
+      if (data.workdrive) lines.push("Uploaded to WorkDrive ✓");
+      else if (data.workdriveError) lines.push(`WorkDrive upload failed: ${data.workdriveError}`);
+      if (data.zohoUpdate?.ok) lines.push(`Updated ${data.zohoUpdate.fieldsUpdated} fields in Zoho CRM ✓`);
+      else if (data.zohoError) lines.push(`Zoho update failed: ${data.zohoError}`);
+
+      const allOk = !!data.workdrive && !!data.zohoUpdate?.ok;
+      if (allOk) {
+        toast.success("Complete export finished", { description: lines.join("\n") });
+      } else {
+        toast.warning("Export finished with warnings", { description: lines.join("\n") });
       }
     } catch (err) {
       console.error(err);
       toast.error("Export failed", { description: err instanceof Error ? err.message : "Unknown error" });
     } finally {
       setExporting(false);
-    }
-  };
-
-  const handleWorkDriveUpload = async () => {
-    setUploading(true);
-    try {
-      // Stub: in production this would POST to a Zoho WorkDrive edge function.
-      await new Promise((r) => setTimeout(r, 1200));
-      const stubLink = `https://workdrive.zoho.com/file/stub-${caseItem.case_ref.toLowerCase()}`;
-      setWorkdriveLink(stubLink);
-      toast.success("Uploaded to WorkDrive", { description: "CA team notified" });
-      try {
-        await auditApi.logExport(caseItem.id, {
-          action: "WORKDRIVE_EXPORTED",
-          fileName,
-          destination: stubLink,
-          notes: "Uploaded to WorkDrive (Client / Deal WIP)",
-        });
-      } catch (auditErr) {
-        console.warn("Failed to log WORKDRIVE_EXPORTED audit:", auditErr);
-      }
-    } catch (err) {
-      console.error(err);
-      toast.error("Upload failed", { description: err instanceof Error ? err.message : "Unknown error" });
-    } finally {
       setUploading(false);
     }
   };
@@ -294,65 +368,59 @@ export function ExportWorkspace({ caseItem }: Props) {
           </li>
           <li className="flex items-center gap-2">
             <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+            <span className="font-semibold text-foreground">Fund Details</span> — per-fund table (name, ISIN, units, price, value, charge) with total
+          </li>
+          <li className="flex items-center gap-2">
+            <CheckCircle2 className="h-3.5 w-3.5 text-success" />
             <span className="font-semibold text-foreground">Audit Trail</span> — full immutable history (extractions, edits, calls, approvals)
           </li>
         </ul>
         <p className="text-[10px] text-muted-foreground italic mt-3 font-mono">{fileName}</p>
       </div>
 
-      {/* Actions */}
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="rounded-md border border-border bg-card p-4 flex flex-col">
-          <div className="flex items-center gap-2 mb-2">
-            <Download className="h-4 w-4 text-teal" />
-            <h4 className="text-sm font-bold text-foreground">Download .xlsx</h4>
-          </div>
-          <p className="text-xs text-muted-foreground mb-4 flex-1">
-            Generates the workbook in your browser and saves it to your Downloads folder.
-          </p>
-          <Button onClick={handleDownload} disabled={exporting} className="w-full gap-2">
-            {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-            {exporting ? "Generating…" : "Download Excel"}
-          </Button>
-          {lastExportAt && (
-            <p className="text-[10px] text-muted-foreground mt-2 text-center">
-              Last download: {formatTs(lastExportAt)}
-            </p>
-          )}
+      {/* Single complete-export action */}
+      <div className="rounded-md border border-border bg-card p-4">
+        <div className="flex items-center gap-2 mb-2">
+          <Cloud className="h-4 w-4 text-teal" />
+          <h4 className="text-sm font-bold text-foreground">Complete export</h4>
         </div>
-
-        <div className="rounded-md border border-border bg-card p-4 flex flex-col">
-          <div className="flex items-center gap-2 mb-2">
-            <Cloud className="h-4 w-4 text-teal" />
-            <h4 className="text-sm font-bold text-foreground">Push to Zoho WorkDrive</h4>
-            <Badge variant="outline" className="text-[9px] uppercase tracking-wider ml-auto">
-              <Sparkles className="h-2.5 w-2.5 mr-1" /> Stub
-            </Badge>
-          </div>
-          <p className="text-xs text-muted-foreground mb-4 flex-1">
-            Production: posts the workbook to the case's WorkDrive folder via the Zoho API and notifies the CA team.
+        <p className="text-xs text-muted-foreground mb-3">
+          One click does all three: downloads the .xlsx to your Downloads folder, uploads the
+          same workbook to the case's Zoho WorkDrive folder, and writes the final field values
+          back to the Zoho CRM Plans record.
+        </p>
+        <ul className="text-[11px] text-muted-foreground space-y-1 mb-4 pl-4 list-disc">
+          <li>Local download · <span className="font-mono">{fileName}</span></li>
+          <li>WorkDrive upload to the configured ceding folder</li>
+          <li>Zoho Plans PATCH (Provider, Policy_Ref, Valuation, Plan_Status, …)</li>
+        </ul>
+        <Button
+          onClick={handleCompleteExport}
+          disabled={exporting || uploading}
+          className="w-full gap-2"
+        >
+          {(exporting || uploading) ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Download className="h-4 w-4" />
+          )}
+          {exporting || uploading ? "Exporting…" : "Complete export"}
+        </Button>
+        {lastExportAt && (
+          <p className="text-[10px] text-muted-foreground mt-2 text-center">
+            Last export: {formatTs(lastExportAt)}
           </p>
-          <Button
-            onClick={handleWorkDriveUpload}
-            disabled={uploading}
-            variant="outline"
-            className="w-full gap-2"
+        )}
+        {workdriveLink && (
+          <a
+            href={workdriveLink}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[10px] text-teal hover:underline mt-2 text-center inline-flex items-center justify-center gap-1 w-full"
           >
-            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cloud className="h-4 w-4" />}
-            {uploading ? "Uploading…" : "Upload to WorkDrive"}
-          </Button>
-          {workdriveLink && (
-            <a
-              href={workdriveLink}
-              target="_blank"
-              rel="noreferrer"
-              className="text-[10px] text-teal hover:underline mt-2 text-center inline-flex items-center justify-center gap-1"
-            >
-              <ExternalLink className="h-3 w-3" />
-              {workdriveLink}
-            </a>
-          )}
-        </div>
+            <ExternalLink className="h-3 w-3" /> Open in WorkDrive
+          </a>
+        )}
       </div>
     </div>
   );

@@ -18,7 +18,6 @@ import Admin from "./pages/Admin";
 import Presentation from "./pages/Presentation";
 import LOAWorkflow from "./pages/LOAWorkflow";
 import AuditTrail from "./pages/AuditTrail";
-import MyInbox from "./pages/MyInbox";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -51,14 +50,6 @@ const App = () => (
                 >
                   <Route path="/dashboard" element={<Dashboard />} />
                   <Route path="/cases" element={<Cases />} />
-                  <Route
-                    path="/inbox"
-                    element={
-                      <RoleGuard allow={["paraplanner", "adviser", "admin"]}>
-                        <MyInbox />
-                      </RoleGuard>
-                    }
-                  />
                   <Route path="/cases/:id" element={<CaseDetail />} />
                   <Route path="/providers" element={<ProviderDirectory />} />
                   <Route

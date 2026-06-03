@@ -51,7 +51,15 @@ async function getAccessToken(): Promise<string> {
 
 export function buildAuthorizeUrl(redirectUri: string): string {
   const params = new URLSearchParams({
-    scope: 'ZohoCRM.modules.tasks.ALL,ZohoCRM.settings.fields.READ,ZohoCRM.users.READ,WorkDrive.files.ALL,WorkDrive.team.READ',
+    // Scopes:
+    //   - modules.ALL  → read/write any module incl. the custom Plans module
+    //     (used by complete-export to PATCH plan records)
+    //   - contacts.READ → resolve the paraplanner from the linked Contact
+    //   - tasks.ALL → existing CRM-task import flow
+    //   - settings.fields.READ / users.READ → admin lookups
+    //   - WorkDrive.* → upload exports + recordings to the ceding folder
+    scope:
+      'ZohoCRM.modules.ALL,ZohoCRM.modules.tasks.ALL,ZohoCRM.modules.contacts.READ,ZohoCRM.settings.fields.READ,ZohoCRM.users.READ,WorkDrive.files.ALL,WorkDrive.team.READ',
     client_id: process.env.ZOHO_CLIENT_ID!,
     response_type: 'code',
     access_type: 'offline',
@@ -97,6 +105,118 @@ export async function getTask(taskId: string): Promise<unknown> {
   return res.json();
 }
 
+export async function getContact(contactId: string): Promise<unknown> {
+  const token = await getAccessToken();
+  const res = await fetch(`${apiBase()}/Contacts/${contactId}`, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Zoho Contacts/${contactId} returned ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
+// ── Contact record access ───────────────────────────────────
+// Pull the full Contact record from CRM. The Contact is the source of
+// truth for "who owns this client" — Plan records inherit user-lookup
+// fields from here. We expose the raw record so callers can extract
+// whatever fields they need; helpers below do the common extractions.
+export async function getContactRecord(
+  contactZohoId: string,
+): Promise<Record<string, unknown> | null> {
+  const raw = (await getContact(contactZohoId)) as { data?: unknown[] };
+  return Array.isArray(raw?.data) ? (raw.data[0] as Record<string, unknown>) : null;
+}
+
+// Extract a single-user-lookup value (e.g. Contact.Paraplanner) from a
+// Contact record. Zoho returns these as `{ id, name, email }`. We return
+// in the same shape — `id` is always a Zoho User id (real, valid, can be
+// reused for any User Lookup field on any module).
+export interface ZohoUserRef {
+  id: string;
+  name?: string;
+  email?: string;
+}
+
+function readUserRef(contact: Record<string, unknown>, fieldKey: string): ZohoUserRef | null {
+  const v = contact[fieldKey];
+  if (!v || typeof v !== 'object') return null;
+  const obj = v as Record<string, unknown>;
+  const id = typeof obj.id === 'string' ? obj.id : undefined;
+  if (!id) return null;
+  return {
+    id,
+    name: typeof obj.name === 'string' ? obj.name : undefined,
+    email: typeof obj.email === 'string' ? obj.email : undefined,
+  };
+}
+
+// Extract a multi-user-lookup value (e.g. Contact.Client_Owners). Returns
+// the array verbatim so it can be passed straight into the Plans PATCH.
+function readMultiUserRefs(contact: Record<string, unknown>, fieldKey: string): ZohoUserRef[] {
+  const v = contact[fieldKey];
+  if (!Array.isArray(v)) return [];
+  const out: ZohoUserRef[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    const id = typeof obj.id === 'string' ? obj.id : undefined;
+    if (!id) continue;
+    out.push({
+      id,
+      name: typeof obj.name === 'string' ? obj.name : undefined,
+      email: typeof obj.email === 'string' ? obj.email : undefined,
+    });
+  }
+  return out;
+}
+
+// One-stop extractor for the user-lookup fields we want to push to Plans.
+// All field names are env-configurable so the same code works against any
+// Furnley House Zoho org without redeploy.
+export interface ContactUserFields {
+  clientOwners: ZohoUserRef[];     // Plans.Client_Owners ← Contact.Client_Owners
+  paraplanner: ZohoUserRef | null;  // single user — used to derive Client_Owners if multi-select empty
+  owner: ZohoUserRef | null;        // Plans.Owner ← Contact.Owner (CRM record-owner)
+}
+
+export function extractContactUserFields(
+  contact: Record<string, unknown>,
+): ContactUserFields {
+  const clientOwnersField = process.env.ZOHO_CONTACT_FIELD_CLIENT_OWNERS ?? 'Client_Owners';
+  const paraplannerField =
+    process.env.ZOHO_CONTACT_FIELD_PARAPLANNER ?? 'Paraplanner';
+  const ownerField = process.env.ZOHO_CONTACT_FIELD_OWNER ?? 'Owner';
+
+  return {
+    clientOwners: readMultiUserRefs(contact, clientOwnersField),
+    paraplanner: readUserRef(contact, paraplannerField),
+    owner: readUserRef(contact, ownerField),
+  };
+}
+
+// ── Back-compat ─────────────────────────────────────────────
+// Kept so the CRM import flow (which uses this to match a Zoho paraplanner
+// to an app user at task-import time) doesn't have to change. New code
+// should use getContactRecord + extractContactUserFields instead.
+export interface ContactParaplanner {
+  name?: string;
+  email?: string;
+  zohoUserId?: string;
+}
+
+export async function lookupParaplannerFromContact(
+  contactZohoId: string,
+): Promise<ContactParaplanner | null> {
+  const contact = await getContactRecord(contactZohoId);
+  if (!contact) return null;
+  const fields = extractContactUserFields(contact);
+  // Prefer multi-select Client_Owners[0], fall back to single Paraplanner.
+  const ref = fields.clientOwners[0] ?? fields.paraplanner;
+  if (!ref) return null;
+  return { name: ref.name, email: ref.email, zohoUserId: ref.id };
+}
+
 export async function updateTask(
   taskId: string,
   fields: Record<string, unknown>
@@ -126,6 +246,171 @@ export async function createTask(fields: Record<string, unknown>): Promise<unkno
   return res.json();
 }
 
+// ── Custom Plans module updates ─────────────────────────────
+// The Furnley House CRM has a custom module that stores per-plan details
+// (provider, policy ref, valuation, retirement age, etc.). When the CA team
+// finishes the ceding flow we PATCH that record so the CRM is the source
+// of truth. Module API name is configurable via env (defaults to "Plans").
+function planModuleName(): string {
+  return process.env.ZOHO_PLAN_MODULE ?? 'Plans';
+}
+
+export async function updatePlanRecord(
+  planRecordId: string,
+  fields: Record<string, unknown>,
+): Promise<unknown> {
+  const token = await getAccessToken();
+  const url = `${apiBase()}/${planModuleName()}/${encodeURIComponent(planRecordId)}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ data: [{ id: planRecordId, ...fields }] }),
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`Zoho ${planModuleName()}/${planRecordId} PUT failed (${res.status}): ${body}`);
+  }
+  try {
+    return JSON.parse(body);
+  } catch {
+    return { raw: body };
+  }
+}
+
+// Search the Plans module for a record whose Policy_Ref matches. Used when
+// the case row has no zohoCaseId yet — so the very first export can still
+// find the right CRM record without needing the user to re-import the task.
+// Returns the Zoho record id of the unique match, or null when there is no
+// match / multiple matches (caller decides what to do).
+export async function findPlanRecordByPolicyRef(
+  policyRef: string,
+): Promise<{ id: string; record: Record<string, unknown> } | null> {
+  if (!policyRef || !policyRef.trim()) return null;
+  const token = await getAccessToken();
+  const criteria = `(Policy_Ref:equals:${policyRef.trim()})`;
+  const url = `${apiBase()}/${planModuleName()}/search?criteria=${encodeURIComponent(criteria)}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  if (res.status === 204) return null; // Zoho convention: no match
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`Zoho ${planModuleName()} search failed (${res.status}): ${body}`);
+  }
+  const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
+  const matches = parsed.data ?? [];
+  if (matches.length !== 1) return null; // ambiguous or no match → require manual resolution
+  const rec = matches[0];
+  return { id: rec.id as string, record: rec };
+}
+
+// Providers custom module — same pattern as Plans. Searches by the standard
+// `Name` field (override via ZOHO_PROVIDER_NAME_FIELD if your module uses a
+// different label). Module API name defaults to "Providers", override via
+// ZOHO_PROVIDER_MODULE.
+function providerModuleName(): string {
+  return process.env.ZOHO_PROVIDER_MODULE ?? 'Providers';
+}
+function providerNameField(): string {
+  return process.env.ZOHO_PROVIDER_NAME_FIELD ?? 'Name';
+}
+
+export async function findProviderRecordByName(
+  providerName: string,
+): Promise<{ id: string; record: Record<string, unknown> } | null> {
+  if (!providerName || !providerName.trim()) return null;
+  const token = await getAccessToken();
+  const trimmed = providerName.trim();
+  const headers = { Authorization: `Zoho-oauthtoken ${token}` };
+
+  // 1. Exact match first — the cheapest, most precise.
+  const searchOnce = async (criteria: string) => {
+    const url = `${apiBase()}/${providerModuleName()}/search?criteria=${encodeURIComponent(criteria)}`;
+    const res = await fetch(url, { headers });
+    if (res.status === 204) return [] as Array<Record<string, unknown>>;
+    const body = await res.text();
+    if (!res.ok) {
+      throw new Error(`Zoho ${providerModuleName()} search failed (${res.status}): ${body}`);
+    }
+    return (JSON.parse(body) as { data?: Array<Record<string, unknown>> }).data ?? [];
+  };
+
+  const exact = await searchOnce(`(${providerNameField()}:equals:${trimmed})`);
+  if (exact.length === 1) return { id: exact[0].id as string, record: exact[0] };
+  // Multiple exact matches: ambiguous → fail rather than guess.
+  if (exact.length > 1) return null;
+
+  // 2. No exact match — try starts_with so "Aviva" finds "Aviva Life & Pensions".
+  const partial = await searchOnce(`(${providerNameField()}:starts_with:${trimmed})`);
+  if (partial.length === 1) return { id: partial[0].id as string, record: partial[0] };
+
+  // 3. Still ambiguous or empty — give up to avoid guessing.
+  return null;
+}
+
+// ── Users — email → Zoho user id resolution ─────────────────
+// Zoho doesn't expose a /users/search endpoint, so we list all users once
+// and cache the email→id map in-process for an hour. Used by the export
+// flow to pass `{id}` (not `{email}`) for Owner / Client_Owners lookups,
+// which is the most reliable form.
+interface ZohoUser {
+  id: string;
+  email?: string;
+  full_name?: string;
+  status?: string;
+}
+let userCache: { byEmail: Map<string, ZohoUser>; expiresAt: number } | null = null;
+const USER_CACHE_TTL_MS = 60 * 60 * 1000;
+
+async function loadUserCache(): Promise<Map<string, ZohoUser>> {
+  if (userCache && Date.now() < userCache.expiresAt) return userCache.byEmail;
+  const token = await getAccessToken();
+  const url = `${apiBase()}/users?type=AllUsers&per_page=200`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Zoho users list failed (${res.status}): ${await res.text()}`);
+  }
+  const body = (await res.json()) as { users?: ZohoUser[] };
+  const byEmail = new Map<string, ZohoUser>();
+  for (const u of body.users ?? []) {
+    if (u.email) byEmail.set(u.email.toLowerCase(), u);
+  }
+  userCache = { byEmail, expiresAt: Date.now() + USER_CACHE_TTL_MS };
+  return byEmail;
+}
+
+export async function findZohoUserByEmail(email: string | null | undefined): Promise<ZohoUser | null> {
+  if (!email) return null;
+  try {
+    const map = await loadUserCache();
+    return map.get(email.toLowerCase()) ?? null;
+  } catch {
+    return null; // never block the export on user lookup
+  }
+}
+
+// Sometimes a Contact's User Lookup field gives us only `{id, name}` —
+// the email is omitted. We need the email to match / auto-provision an
+// app user, so we go back to the /users list (cached) and find the
+// matching user by id. Same store as findZohoUserByEmail.
+export async function findZohoUserById(id: string | null | undefined): Promise<ZohoUser | null> {
+  if (!id) return null;
+  try {
+    const map = await loadUserCache();
+    for (const u of map.values()) {
+      if (u.id === id) return u;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Zoho task → Case field mapping
 // ─────────────────────────────────────────────────────────────
@@ -146,7 +431,6 @@ export interface MappedCase {
   clientName: string;
   clientZohoId?: string;
   planType: PlanType;
-  planSubType?: string;
   policyRef?: string;
   providerName?: string;
   zohoCaseId?: string;
@@ -202,7 +486,6 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
   const providerField = env.ZOHO_TASK_FIELD_PROVIDER;
   const planTypeField = env.ZOHO_TASK_FIELD_PLAN_TYPE;
   const policyRefField = env.ZOHO_TASK_FIELD_POLICY_REF;
-  const planSubTypeField = env.ZOHO_TASK_FIELD_PLAN_SUBTYPE;
   const deepLinkField = env.ZOHO_TASK_FIELD_DEEP_LINK;
 
   // Client name — try custom field, then linked Contact (Who_Id), then linked Deal (What_Id), then Subject
@@ -230,10 +513,6 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
     pickString(task, ['Subject']);
   const planType = inferPlanType(planTypeRaw);
 
-  const planSubType =
-    (planSubTypeField && pickString(task, [planSubTypeField])) ||
-    pickString(task, ['Plan_Sub_Type', 'Sub_Plan_Type']);
-
   const policyRef =
     (policyRefField && pickString(task, [policyRefField])) ||
     pickString(task, ['Policy_Number', 'Policy_Ref', 'Plan_Number', 'Plan_Reference']);
@@ -258,7 +537,6 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
     clientName,
     clientZohoId,
     planType,
-    planSubType,
     policyRef,
     providerName,
     zohoCaseId,

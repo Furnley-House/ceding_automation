@@ -4,7 +4,13 @@ import { PrismaClient, CaseStatus, PlanType, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { z } from "zod";
 import * as zoho from "../services/zohoCrm";
-import { mapZohoTaskToCase } from "../services/zohoCrm";
+import {
+  mapZohoTaskToCase,
+  getContactRecord,
+  extractContactUserFields,
+  findProviderRecordByName,
+  findZohoUserById,
+} from "../services/zohoCrm";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -14,7 +20,6 @@ const CreateCaseSchema = z.object({
   clientName: z.string().min(1),
   clientZohoId: z.string().optional(),
   planType: z.nativeEnum(PlanType),
-  planSubType: z.string().optional(),
   policyRef: z.string().optional(),
   planNumber: z.string().optional(),    // alias for policyRef
   providerId: z.string().optional(),
@@ -28,7 +33,7 @@ router.post("/", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Req
   const parsed = CreateCaseSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const { planType, planSubType, planNumber, providerName, zohoTaskId, caseNotes: _caseNotes, ...data } = parsed.data;
+  const { planType, planNumber, providerName, zohoTaskId, caseNotes: _caseNotes, ...data } = parsed.data;
 
   // planNumber is an alias for policyRef
   if (planNumber && !data.policyRef) data.policyRef = planNumber;
@@ -52,7 +57,6 @@ router.post("/", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Req
     data: {
       ...data,
       planType,
-      ...(planSubType ? { planSubType: planSubType as import('@prisma/client').PlanSubType } : {}),
       caseRef,
       ...(zohoTaskId ? { zohoTaskId } : {}),
       createdById: req.user!.id,
@@ -188,6 +192,98 @@ const UI_STATUS_TO_PRISMA: Record<string, CaseStatus> = {
   complete: CaseStatus.STAGE_10_COMPLETE,
 };
 
+// Statuses that mean "the case is sitting with the paraplanner for review".
+// Both the PATCH /:id (stepper) and PATCH /:id/status (Send-for-approval
+// button) routes need the same behaviour when we enter this state:
+//   - ensure a paraplanner is linked (auto-assign first active one if not)
+//   - notify them so the case lands in their inbox
+function isAwaitingReview(s: CaseStatus | undefined | null): boolean {
+  return s === CaseStatus.IN_REVIEW || s === CaseStatus.STAGE_9_ADVISER_REVIEW;
+}
+
+// Returns the paraplanner id that should own the review. If the case
+// already has one, keep it. Otherwise pick the first active PARAPLANNER
+// user (Emma Clarke in the demo seed) and patch the update payload to
+// connect them.
+async function ensureParaplannerForReview(
+  caseId: string,
+  data: Prisma.CaseUpdateInput,
+): Promise<string | null> {
+  const current = await prisma.case.findUnique({
+    where: { id: caseId },
+    select: { paralPlannerId: true },
+  });
+  if (current?.paralPlannerId) return current.paralPlannerId;
+  const pp = await prisma.user.findFirst({
+    where: { role: "PARAPLANNER", status: "ACTIVE" },
+    orderBy: { createdAt: "asc" },
+  });
+  if (!pp) return null;
+  data.paraplanner = { connect: { id: pp.id } };
+  return pp.id;
+}
+
+// Skip if the same (user, case, title) was already notified in the recent
+// past — both the stepper and the status route can fire side effects in
+// quick succession; without this the bell collects ×3 / ×4 dupes per case.
+const NOTIFICATION_DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 min
+
+async function maybeCreateNotification(args: {
+  userId: string;
+  caseId: string;
+  title: string;
+  message: string;
+  deepLink: string;
+}): Promise<"created" | "deduped"> {
+  const cutoff = new Date(Date.now() - NOTIFICATION_DEDUP_WINDOW_MS);
+  const existing = await prisma.notification.findFirst({
+    where: {
+      userId: args.userId,
+      caseId: args.caseId,
+      title: args.title,
+      createdAt: { gte: cutoff },
+    },
+    select: { id: true },
+  });
+  if (existing) return "deduped";
+  await prisma.notification.create({
+    data: {
+      userId: args.userId,
+      caseId: args.caseId,
+      title: args.title,
+      message: args.message,
+      deepLink: args.deepLink,
+    },
+  });
+  return "created";
+}
+
+async function notifyParaplannerReady(
+  paraplannerId: string,
+  c: { id: string; clientName: string; caseRef: string },
+): Promise<void> {
+  await maybeCreateNotification({
+    userId: paraplannerId,
+    caseId: c.id,
+    title: "Case ready for review",
+    message: `${c.clientName} · ${c.caseRef} is ready for approval.`,
+    deepLink: `/cases/${c.id}`,
+  });
+}
+
+async function notifyCaseApproved(
+  caTeamUserId: string,
+  c: { id: string; clientName: string; caseRef: string },
+): Promise<void> {
+  await maybeCreateNotification({
+    userId: caTeamUserId,
+    caseId: c.id,
+    title: "Case approved",
+    message: `${c.clientName} · ${c.caseRef} signed off — ready to export.`,
+    deepLink: `/cases/${c.id}`,
+  });
+}
+
 router.patch(
   "/:id",
   requireAuth,
@@ -198,12 +294,27 @@ router.patch(
     const data: Record<string, unknown> = {};
 
     // current_stage  →  status
+    // Don't auto-downgrade a case that's already with the paraplanner or
+    // approved: the CA might be jumping back to Stage 4/5 to fix or re-call
+    // a returned field, and we don't want to wipe out IN_REVIEW / APPROVED.
     if (typeof body.currentStage === "number") {
       const stage = body.currentStage as number;
-      if (STAGE_TO_STATUS[stage]) {
-        data.status = STAGE_TO_STATUS[stage];
-        if (stage === 9) data.readyForReviewAt = new Date();
-        if (stage === 10) data.completedAt = new Date();
+      const targetStatus = STAGE_TO_STATUS[stage];
+      if (targetStatus) {
+        const currentCase = await prisma.case.findUnique({
+          where: { id: req.params.id },
+          select: { status: true },
+        });
+        const locked =
+          currentCase?.status === CaseStatus.IN_REVIEW ||
+          currentCase?.status === CaseStatus.STAGE_9_ADVISER_REVIEW ||
+          currentCase?.status === CaseStatus.APPROVED ||
+          currentCase?.status === CaseStatus.STAGE_10_COMPLETE;
+        if (!locked) {
+          data.status = targetStatus;
+          if (stage === 9) data.readyForReviewAt = new Date();
+          if (stage === 10) data.completedAt = new Date();
+        }
       }
     }
 
@@ -256,6 +367,17 @@ router.patch(
       return res.json(current);
     }
 
+    // Same handoff side-effects as PATCH /:id/status, so navigating via the
+    // stepper doesn't skip paraplanner assignment + notification.
+    const nextStatus = data.status as CaseStatus | undefined;
+    let paraplannerToNotify: string | null = null;
+    if (isAwaitingReview(nextStatus)) {
+      paraplannerToNotify = await ensureParaplannerForReview(
+        req.params.id,
+        data as Prisma.CaseUpdateInput,
+      );
+    }
+
     let updated;
     try {
       updated = await prisma.case.update({
@@ -267,6 +389,13 @@ router.patch(
       const e = err as { code?: string; message?: string };
       if (e.code === "P2025") return res.status(404).json({ error: "Case not found" });
       return res.status(500).json({ error: e.message ?? "Update failed" });
+    }
+
+    if (paraplannerToNotify) {
+      await notifyParaplannerReady(paraplannerToNotify, updated);
+    }
+    if (nextStatus === CaseStatus.APPROVED && updated.assignedToId) {
+      await notifyCaseApproved(updated.assignedToId, updated);
     }
 
     // Audit log (only if status changed — avoid spam for trivial edits)
@@ -298,19 +427,48 @@ router.patch(
 );
 
 // ── Update Case Stage ────────────────────────────────────
-router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Request, res: Response) => {
-  const { status, onHoldReason } = req.body;
+router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER", "ADVISER"]), async (req: Request, res: Response) => {
+  const { status: rawStatus, onHoldReason } = req.body;
+
+  // Normalise: accept both the Prisma enum literal ("IN_REVIEW") and the
+  // UI-side lowercase form ("in_review", "approved", ...).
+  let status: CaseStatus | undefined;
+  if (typeof rawStatus === "string") {
+    const upper = rawStatus.toUpperCase();
+    if ((Object.values(CaseStatus) as string[]).includes(upper)) {
+      status = upper as CaseStatus;
+    } else if (UI_STATUS_TO_PRISMA[rawStatus]) {
+      status = UI_STATUS_TO_PRISMA[rawStatus];
+    }
+  }
+  if (!status) {
+    return res.status(400).json({ error: `Invalid status: ${rawStatus}` });
+  }
+
+  const data: Prisma.CaseUpdateInput = {
+    status,
+    onHoldReason: status === "ON_HOLD" ? onHoldReason : null,
+    readyForReviewAt: isAwaitingReview(status) ? new Date() : undefined,
+    approvedAt: status === "APPROVED" ? new Date() : undefined,
+    completedAt: status === "STAGE_10_COMPLETE" ? new Date() : undefined,
+  };
+
+  let paraplannerToNotify: string | null = null;
+  if (isAwaitingReview(status)) {
+    paraplannerToNotify = await ensureParaplannerForReview(req.params.id, data);
+  }
 
   const updated = await prisma.case.update({
     where: { id: req.params.id },
-    data: {
-      status,
-      onHoldReason: status === "ON_HOLD" ? onHoldReason : null,
-      readyForReviewAt: status === "STAGE_9_ADVISER_REVIEW" ? new Date() : undefined,
-      approvedAt: status === "APPROVED" ? new Date() : undefined,
-      completedAt: status === "STAGE_10_COMPLETE" ? new Date() : undefined,
-    },
+    data,
   });
+
+  if (paraplannerToNotify) {
+    await notifyParaplannerReady(paraplannerToNotify, updated);
+  }
+  if (status === "APPROVED" && updated.assignedToId) {
+    await notifyCaseApproved(updated.assignedToId, updated);
+  }
 
   await prisma.auditLog.create({
     data: {
@@ -566,9 +724,135 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
     }
   }
 
+  // 3c. Resolve paraplanner from the linked Contact record.
+  //
+  // The CRM Contact is the source of truth for who's assigned to the
+  // client. We read its Paraplanner / Client_Owners field, match the
+  // resulting Zoho user email to an app user (auto-creating if missing,
+  // same policy as the Task owner above), and re-link the case.
+  //
+  // Use the freshly-mapped clientZohoId if Zoho returned one (the link
+  // may have just been added), otherwise fall back to the stored DB row.
+  const effectiveClientZohoId = mapping.clientZohoId ?? caseRecord.clientZohoId ?? null;
+
+  let resolvedParaplannerId: string | null = caseRecord.paralPlannerId;
+  let resolvedParaplannerName: string | null = null;
+  let paraplannerSyncNote: string | null = null;
+
+  // Cached Zoho IDs — set during sync, used at export time.
+  let cachedZohoOwnerId: string | null = null;
+  let cachedZohoClientOwnerIds: string[] = [];
+  let cachedZohoParaplannerId: string | null = null;
+
+  if (effectiveClientZohoId) {
+    try {
+      const contact = await getContactRecord(effectiveClientZohoId);
+      if (!contact) {
+        paraplannerSyncNote = `Contact ${effectiveClientZohoId} not found in CRM.`;
+      } else {
+        const fields = extractContactUserFields(contact);
+
+        // Snapshot the raw Zoho IDs straight off the Contact — these are
+        // what we'll send back to Plans at export time. No re-fetch needed.
+        cachedZohoOwnerId = fields.owner?.id ?? null;
+        cachedZohoClientOwnerIds = fields.clientOwners.map((u) => u.id);
+        cachedZohoParaplannerId = fields.paraplanner?.id ?? null;
+
+        // Prefer single Paraplanner field; fall back to first Client_Owners entry.
+        let ref = fields.paraplanner ?? fields.clientOwners[0] ?? null;
+
+        // The Contact's User Lookup often returns `{id, name}` without
+        // `email`. Enrich from /users/{id} so the local-user match /
+        // auto-create has the email it needs.
+        if (ref && !ref.email && ref.id) {
+          const full = await findZohoUserById(ref.id);
+          if (full) {
+            ref = {
+              id: ref.id,
+              name: ref.name ?? full.full_name,
+              email: full.email,
+            };
+          }
+        }
+
+        if (!ref) {
+          paraplannerSyncNote = "No Paraplanner or Client_Owners on Contact.";
+        } else if (ref.email) {
+          const lower = ref.email.toLowerCase();
+          const existing = await prisma.user.findUnique({ where: { email: lower } });
+          if (existing && existing.status === "ACTIVE") {
+            resolvedParaplannerId = existing.id;
+            resolvedParaplannerName = existing.name;
+          } else if (existing && existing.status === "INACTIVE") {
+            resolvedParaplannerId = null;
+            resolvedParaplannerName = null;
+            paraplannerSyncNote = `Matched user ${lower} is inactive — unassigning.`;
+          } else {
+            // Auto-provision the paraplanner so the case can be linked
+            // immediately. Same policy as owner auto-create.
+            const created = await prisma.user.create({
+              data: {
+                email: lower,
+                name: ref.name?.trim() || lower.split("@")[0],
+                role: "PARAPLANNER",
+                status: "ACTIVE",
+              },
+            });
+            resolvedParaplannerId = created.id;
+            resolvedParaplannerName = created.name;
+          }
+        } else if (ref.name) {
+          // No email on the Contact field — try a name-only match (no
+          // auto-create, same policy as owner).
+          const byName = await prisma.user.findFirst({
+            where: {
+              name: { equals: ref.name, mode: "insensitive" },
+              role: "PARAPLANNER",
+              status: "ACTIVE",
+            },
+          });
+          if (byName) {
+            resolvedParaplannerId = byName.id;
+            resolvedParaplannerName = byName.name;
+          } else {
+            paraplannerSyncNote = `Paraplanner "${ref.name}" not found in app users (no email on Contact to auto-create).`;
+          }
+        }
+      }
+    } catch (err) {
+      paraplannerSyncNote = `Contact fetch failed: ${(err as Error).message}`;
+    }
+  }
+
+  // 3d. Resolve Provider Zoho record id by searching the Providers module
+  //     by name. Stored on the case so export skips the search.
+  let cachedZohoProviderId: string | null = null;
+  let providerSyncNote: string | null = null;
+  const effectiveProviderName =
+    mapping.providerName ?? caseRecord.provider?.name ?? null;
+  if (effectiveProviderName) {
+    try {
+      const hit = await findProviderRecordByName(effectiveProviderName);
+      if (hit) cachedZohoProviderId = hit.id;
+      else providerSyncNote = `No unique Providers record for name="${effectiveProviderName}"`;
+    } catch (err) {
+      providerSyncNote = `Providers search failed: ${(err as Error).message}`;
+    }
+  }
+
   // 4. Diff
   const updates: Record<string, unknown> = {};
   const changes: { field: string; from: unknown; to: unknown }[] = [];
+
+  // Always stamp the cached Zoho IDs — even if no value changed, we want
+  // the audit trail to record when the cache was refreshed.
+  updates.zohoOwnerId = cachedZohoOwnerId;
+  updates.zohoClientOwnerIds = cachedZohoClientOwnerIds;
+  updates.zohoParaplannerId = cachedZohoParaplannerId;
+  updates.zohoProviderRecordId = cachedZohoProviderId;
+  updates.zohoSyncedAt = new Date();
+  // We deliberately do NOT push these into `changes[]` — they're internal
+  // bookkeeping. Real CRM diffs (clientName, paraplanner, …) still appear.
 
   const considerChange = (
     field: string,
@@ -606,22 +890,26 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
       to: resolvedAssignedName,
     });
   }
-
-  if (Object.keys(updates).length === 0) {
-    return res.json({
-      synced: true,
-      changed: false,
-      changes: [],
-      case: caseRecord,
+  if (resolvedParaplannerId !== caseRecord.paralPlannerId) {
+    updates.paralPlannerId = resolvedParaplannerId;
+    changes.push({
+      field: "paraplanner",
+      // We don't have the previous paraplanner name handy here; the audit
+      // metadata below still captures the full transition.
+      from: caseRecord.paralPlannerId,
+      to: resolvedParaplannerName ?? resolvedParaplannerId,
     });
   }
 
-  // 5. Apply updates
+  // We always have at least the cached Zoho IDs in `updates`, so always
+  // apply. `changed` for the response reflects real CRM-data changes only
+  // (the cache refresh is internal bookkeeping).
   const updated = await prisma.case.update({
     where: { id },
     data: updates,
     include: { provider: true, assignedTo: true, createdBy: true },
   });
+  const changedRealData = changes.length > 0;
 
   // 6. Audit (one summary entry per sync — no enum value for "ZOHO sync",
   // so we use CASE_UPDATED + source SYSTEM and stash the diff in metadata).
@@ -636,11 +924,32 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
         sync: "zoho",
         zohoTaskId: caseRecord.zohoTaskId,
         changes,
+        paraplannerSyncNote,
+        providerSyncNote,
+        cachedZohoIds: {
+          zohoOwnerId: cachedZohoOwnerId,
+          zohoClientOwnerIds: cachedZohoClientOwnerIds,
+          zohoParaplannerId: cachedZohoParaplannerId,
+          zohoProviderRecordId: cachedZohoProviderId,
+        },
       } as Prisma.InputJsonValue,
     },
   });
 
-  res.json({ synced: true, changed: true, changes, case: updated });
+  res.json({
+    synced: true,
+    changed: changedRealData,
+    changes,
+    paraplannerSyncNote,
+    providerSyncNote,
+    cachedZohoIds: {
+      zohoOwnerId: cachedZohoOwnerId,
+      zohoClientOwnerIds: cachedZohoClientOwnerIds,
+      zohoParaplannerId: cachedZohoParaplannerId,
+      zohoProviderRecordId: cachedZohoProviderId,
+    },
+    case: updated,
+  });
 });
 
 export { router as caseRoutes };

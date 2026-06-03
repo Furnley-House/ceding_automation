@@ -19,6 +19,7 @@ import { authRoutes } from "./routes/auth";
 import { notificationRoutes } from "./routes/notifications";
 import { crmRoutes } from "./routes/crm";
 import { callRoutes } from "./routes/calls";
+import { exportRoutes } from "./routes/export";
 import { startPoller } from "./services/aiBffPoller";
 
 const app = express();
@@ -76,6 +77,7 @@ app.use("/api/audit", auditRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/crm", crmRoutes);
 app.use("/api/cases", callRoutes);
+app.use("/api/cases", exportRoutes);
 // Internal BFF write-back endpoints (X-Internal-Key auth, no human users).
 app.use("/api/documents", documentInternalRoutes);
 

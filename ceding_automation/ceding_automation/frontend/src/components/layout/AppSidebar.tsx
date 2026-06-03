@@ -5,7 +5,6 @@ import {
   Building2,
   ShieldCheck,
   History,
-  Inbox,
   CheckCircle2,
   Circle,
 } from "lucide-react";
@@ -31,9 +30,12 @@ export function AppSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
     enabled: !!activeCaseId,
   });
 
+  // "My Inbox" removed — no role actually used it (CA never had one,
+  // paraplanner/adviser/admin work from /cases directly). The /inbox route
+  // and MyInbox page have been unwired in App.tsx; the page file is left
+  // in place for now in case it's revived later.
   const navItems = [
     { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, show: true },
-    { title: "My Inbox", url: "/inbox", icon: Inbox, show: isParaplanner || isAdviser || isAdmin },
     { title: "Cases", url: "/cases", icon: Briefcase, show: true },
     { title: "Provider Directory", url: "/providers", icon: Building2, show: true },
     { title: "Audit Trail", url: "/audit", icon: History, show: isAdmin || isAdviser || isParaplanner },

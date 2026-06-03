@@ -25,7 +25,6 @@ const ProviderCreateSchema = z.object({
   postalAddress: z.string().trim().optional().nullable(),
   loaFormat: z.nativeEnum(LOAFormat).optional(),
   isOnOrigo: z.boolean().optional(),
-  acceptedSigType: z.string().trim().optional().nullable(),
   planTypePrefixes: z.array(z.string().trim().min(1)).optional(),
   notes: z.string().trim().optional().nullable(),
   isActive: z.boolean().optional(),

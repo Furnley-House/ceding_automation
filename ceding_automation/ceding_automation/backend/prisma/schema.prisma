@@ -35,22 +35,6 @@ enum PlanType {
   PROTECTION
 }
 
-enum PlanSubType {
-  PERSONAL_PENSION
-  SIPP
-  STAKEHOLDER
-  WORKPLACE
-  GROUP_PENSION
-  SECTION_32
-  OCCUPATIONAL_DC
-  IPP
-  ISA_STOCKS_SHARES
-  ISA_CASH
-  GIA
-  BOND_INVESTMENT
-  BOND_OFFSHORE
-}
-
 enum CaseStatus {
   DRAFT
   STAGE_1_LOA_PREP
@@ -181,7 +165,6 @@ model Provider {
   postalAddress    String?
   loaFormat        LOAFormat @default(EITHER)
   isOnOrigo        Boolean   @default(false)
-  acceptedSigType  String? // "Electronic", "Wet", "Either"
   planTypePrefixes String[] // e.g. ["PP", "ISA", "DC"]
   notes            String?
   isActive         Boolean   @default(true)
@@ -210,7 +193,6 @@ model Case {
 
   // Plan details
   planType      PlanType
-  planSubType   PlanSubType?
   policyRef     String?
   planStartDate DateTime?
 
@@ -244,6 +226,17 @@ model Case {
   // WorkDrive
   workDriveExportPath String?
   workDriveExportedAt DateTime?
+
+  // ── Cached Zoho IDs ───────────────────────────────────────
+  // Populated by sync-from-zoho, consumed by complete-export. Storing
+  // them keeps the export deterministic and avoids the "id seems to be
+  // invalid" errors that come from race conditions or stale Contact
+  // field types. Run another sync to refresh.
+  zohoOwnerId          String?   // Plan.Owner ← Contact.Owner (single user)
+  zohoClientOwnerIds   String[]  // Plan.Client_Owners ← Contact.Client_Owners (multi-user)
+  zohoParaplannerId    String?   // Single paraplanner user id (fallback / convenience)
+  zohoProviderRecordId String?   // Plan.Provider ← Providers-module record id
+  zohoSyncedAt         DateTime? // When the cached IDs above were last refreshed
 
   // Relations
   documents       Document[]
@@ -413,8 +406,6 @@ model CallScript {
   generatedAt     DateTime @default(now())
   scriptContent   Json // Structured script: {greeting, questions: [{field, question, answerSpace}]}
   missingFieldIds String[] // ChecklistField IDs this script targets
-  providerPhone   String?
-  providerDept    String?
 
   @@index([caseId])
   @@map("call_scripts")

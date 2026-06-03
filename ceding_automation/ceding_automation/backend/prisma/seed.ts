@@ -233,7 +233,6 @@ async function main() {
     postalAddress?: string;
     loaFormat?: "EITHER" | "ELECTRONIC" | "WET_SIGNATURE";
     isOnOrigo?: boolean;
-    acceptedSigType?: string;
     planTypePrefixes?: string[];
     notes?: string;
   };
@@ -355,7 +354,6 @@ async function main() {
       postalAddress: "Aviva, PO Box 520, Norwich, NR1 3WG",
       isOnOrigo: true,
       loaFormat: "EITHER",
-      acceptedSigType: "Either",
       planTypePrefixes: ["AV", "PP", "ISA", "GS", "TK", "DD", "PW", "B"],
       notes: "Multiple numbers: GPP 0345 602 9221, Personal 0800 953 1777, Advised Platform 0800 068 2170, Protection 0800 285 1098. Ceding email for GPP: NGP.questions@dgaviva.com; Aviva Protection: bpamail@aviva.com",
     },
@@ -510,7 +508,6 @@ async function main() {
       postalAddress: "Royal London House, Alderley Park, Congleton Road, Nether Alderley, Macclesfield, SK10 4EL",
       isOnOrigo: true,
       loaFormat: "EITHER",
-      acceptedSigType: "Either",
       planTypePrefixes: ["RL"],
       notes: "Transfers: pensiontransfers@royallondon.com / 0345 605 7777, 5th floor Churchgate House, 56 Oxford Street, Manchester M1 6EU. Protection: 0345 6094 500 / protectionhelp@royallondon.com",
     },
@@ -529,7 +526,6 @@ async function main() {
       postalAddress: "Scottish Widows Ltd, 69 Morrison Street, Edinburgh, EH3 1HL",
       isOnOrigo: true,
       loaFormat: "EITHER",
-      acceptedSigType: "Either",
       planTypePrefixes: ["SW", "DC", "ISA"],
     },
     {
@@ -539,7 +535,6 @@ async function main() {
       postalAddress: "Standard Life, 1 George Street, Edinburgh, EH2 2LL",
       isOnOrigo: true,
       loaFormat: "EITHER",
-      acceptedSigType: "Either",
       planTypePrefixes: ["SL", "SIPP", "EL"],
       notes: "Elevate platform now under abrdn brand (see Aberdeen (Elevate)). Elevate contact: 0345 300 4177 / Elevate_enquiries@abrdn.com / abrdn Elevate, PO Box 6891, Basingstoke, RG24 4SN",
     },
@@ -822,7 +817,6 @@ async function main() {
         postalAddress: p.postalAddress ?? undefined,
         isOnOrigo: p.isOnOrigo ?? false,
         loaFormat: p.loaFormat ?? undefined,
-        acceptedSigType: p.acceptedSigType ?? undefined,
         planTypePrefixes: p.planTypePrefixes ?? undefined,
         notes: p.notes ?? undefined,
       },
@@ -835,7 +829,6 @@ async function main() {
         postalAddress: p.postalAddress,
         isOnOrigo: p.isOnOrigo ?? false,
         loaFormat: p.loaFormat ?? "EITHER",
-        acceptedSigType: p.acceptedSigType,
         planTypePrefixes: p.planTypePrefixes ?? [],
         notes: p.notes,
       },

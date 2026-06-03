@@ -116,8 +116,40 @@ async function pollOne(documentId: string, jobId: string): Promise<void> {
     });
 
     if (status.status === "completed") {
-      // Field data already arrived via BFF write-back PATCH. Settle the doc
-      // here as the safety-net path; idempotency guard mirrors the failed branch.
+      // Two paths can deliver the field data:
+      //   1. BFF write-back PATCH /api/documents/:id  (push, primary)
+      //   2. This poller pulling GET /result          (pull, fallback)
+      //
+      // In production both paths are reachable and write-back usually wins.
+      // In localhost dev the BFF on Azure can't reach localhost:3001, so
+      // write-back never lands — we MUST pull the result here, otherwise
+      // the doc would settle to EXTRACTED with no checklist fields.
+      //
+      // applyExtractionResult is idempotent (aiJobCompletedAt guard inside)
+      // so calling it after a successful write-back is safe.
+      try {
+        const result = await aiBff.getJobResult(jobId);
+        const outcome = await applyExtractionResult(documentId, result);
+        if (outcome.outcome === "applied") {
+          console.log(
+            `[ai-poller] applied result for doc=${documentId} job=${jobId}`
+          );
+        }
+      } catch (resultErr) {
+        console.error(
+          `[ai-poller] getJobResult/applyExtractionResult failed for doc=${documentId} job=${jobId}:`,
+          resultErr
+        );
+        // Still settle the doc status so the UI doesn't spin forever — the
+        // field data can be re-pulled by a manual retry. We don't mark it
+        // complete though, so the next tick will try again.
+      }
+
+      // Belt-and-braces: if applyExtractionResult was already run by the
+      // write-back path it set aiJobCompletedAt, so this updateMany is a
+      // no-op. If applyExtractionResult failed above, this still flips the
+      // surface status so the spinner stops — the retry button in the UI
+      // can re-trigger extraction.
       await prisma.document.updateMany({
         where: { id: documentId, aiJobCompletedAt: null },
         data: {

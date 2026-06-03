@@ -6,6 +6,7 @@ import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useChecklistFields, type ChecklistRow } from "@/hooks/useChecklistFields";
+import { FundDetailsTable } from "./FundDetailsTable";
 
 interface Props {
   planType: string;
@@ -64,7 +65,9 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
     const r = byKey.get(key);
     const conf = (r?.confidence ?? "MISSING").toUpperCase();
     if (filter === "high") return conf === "HIGH";
-    if (filter === "review") return conf === "MEDIUM" || conf === "LOW";
+    // CONFLICT belongs in the review bucket — two sources disagreed, the
+    // user needs to pick the right value.
+    if (filter === "review") return conf === "MEDIUM" || conf === "LOW" || conf === "CONFLICT";
     if (filter === "missing") return conf === "MISSING";
     if (filter === "approved") return r?.status === "approved";
     return true;
@@ -86,7 +89,9 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
       const conf = (r?.confidence ?? "MISSING").toUpperCase();
       if (conf === "HIGH") counts.high++;
       else if (conf === "MEDIUM") counts.medium++;
-      else if (conf === "LOW") counts.low++;
+      // CONFLICT is treated like LOW for stats: it's a field that needs a
+      // human decision before it can be approved.
+      else if (conf === "LOW" || conf === "CONFLICT") counts.low++;
       else counts.missing++;
       if (r?.status === "approved") counts.approved++;
       if (r?.status === "review_requested") counts.review++;
@@ -272,6 +277,10 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
           ))
         )}
       </div>
+
+      {/* Fund Details — sub-table. Filter ignores scalar-field filters above
+          since this section doesn't share their state (High/Missing/etc.). */}
+      <FundDetailsTable caseId={caseId} readOnly={!canEditChecklist} />
 
       {loading && (
         <p className="text-[10px] text-muted-foreground text-center pt-2">Loading checklist…</p>

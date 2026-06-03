@@ -5,6 +5,7 @@ import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { requireInternalKey } from "../middleware/internalKey";
 import { applyFieldExtraction } from "../services/aiBffApply";
+import { mirrorChecklistToCase } from "../services/caseFieldMirror";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -114,6 +115,11 @@ router.post(
       update: {}, // leave existing data untouched
     });
 
+    // If the seed carried a value, mirror it to the Case row.
+    if (value) {
+      await mirrorChecklistToCase(req.params.caseId, template.fieldKey, value);
+    }
+
     // Return the field with template fields flattened so the frontend can use
     // field.fieldKey / field.label / field.section directly (after snake_keys).
     res.status(201).json({
@@ -168,6 +174,10 @@ router.patch(
         source: "MANUAL",
       },
     });
+
+    // Propagate provider_name / plan_number / start_date to the Case row
+    // so the header and dashboard reflect the latest value immediately.
+    await mirrorChecklistToCase(req.params.caseId, field.template.fieldKey, value);
 
     res.json(updated);
   }
@@ -313,6 +323,105 @@ router.post(
   }
 );
 
+// ── Bulk-fill missing fields with dummy test data ─────────
+// Testing-only helper. Walks every active template for the case's plan
+// type, and for any field with no value (whether the DB row exists or
+// not) writes a type-aware placeholder so the end-to-end approval flow
+// can be tested without scrubbing 33+ real fields.
+router.post(
+  "/:caseId/checklist/fill-test-data",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const caseRecord = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      select: { id: true, planType: true },
+    });
+    if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+    const templates = await prisma.checklistTemplate.findMany({
+      where: { planType: caseRecord.planType, isActive: true },
+    });
+    const existing = await prisma.checklistField.findMany({
+      where: { caseId: caseRecord.id },
+      select: { id: true, templateId: true, value: true },
+    });
+    const existingByTemplateId = new Map(existing.map((f) => [f.templateId, f]));
+
+    const dummyFor = (t: { fieldType: string; fieldName: string; dropdownOptions: string[] }) => {
+      switch ((t.fieldType || "").toLowerCase()) {
+        case "number":
+          return "42";
+        case "currency":
+          return "£100.00";
+        case "percent":
+        case "percentage":
+          return "0.75%";
+        case "yesno":
+        case "yes_no":
+          return "Yes";
+        case "date":
+          return "01/01/2025";
+        case "select":
+        case "dropdown":
+          return t.dropdownOptions?.[0] ?? "Option 1";
+        case "url":
+          return "https://example.com";
+        default:
+          return `Test ${t.fieldName}`;
+      }
+    };
+
+    let filled = 0;
+    for (const tpl of templates) {
+      const value = dummyFor(tpl);
+      const found = existingByTemplateId.get(tpl.id);
+      if (found && found.value) continue; // already has a real value — skip
+      if (found) {
+        await prisma.checklistField.update({
+          where: { id: found.id },
+          data: {
+            value,
+            confidence: "HIGH",
+            status: "MANUALLY_OVERRIDDEN",
+            isManuallyOverridden: true,
+            manualEditedById: req.user!.id,
+            manualEditedAt: new Date(),
+          },
+        });
+      } else {
+        await prisma.checklistField.create({
+          data: {
+            caseId: caseRecord.id,
+            templateId: tpl.id,
+            value,
+            confidence: "HIGH",
+            status: "MANUALLY_OVERRIDDEN",
+            isManuallyOverridden: true,
+            manualEditedById: req.user!.id,
+            manualEditedAt: new Date(),
+          },
+        });
+      }
+      // Mirror to Case columns (provider / policy ref / start date).
+      await mirrorChecklistToCase(caseRecord.id, tpl.fieldKey, value);
+      filled++;
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        caseId: caseRecord.id,
+        userId: req.user!.id,
+        action: "CASE_UPDATED",
+        source: "MANUAL",
+        newValue: `Filled ${filled} field${filled === 1 ? "" : "s"} with test data`,
+      },
+    });
+
+    res.json({ message: `Filled ${filled} field${filled === 1 ? "" : "s"} with test data`, filled });
+  },
+);
+
 // ── Bulk approve all fields ───────────────────────────────
 router.post(
   "/:caseId/checklist/approve-all",
@@ -385,8 +494,9 @@ router.post(
         caseId: req.params.caseId,
         scriptContent: script,
         missingFieldIds: missingFields.map((f) => f.id),
-        providerPhone: caseRecord.provider?.phoneCedingDept,
-        providerDept: "Ceding / Transfers",
+        // Provider phone/dept now live inside scriptContent (the JSON above)
+        // instead of as separate columns — read live from case.provider in
+        // the UI if you need the current value, else from the snapshot.
       },
     });
 

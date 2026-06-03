@@ -24,22 +24,9 @@ import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
 
 // ────────────────────────────────────────────────────────────
-// MOCK / placeholder values — clearly marked so they're trivial
-// to swap for real backend data later. See response notes for the
-// full data-gap list.
+// Constants
 // ────────────────────────────────────────────────────────────
 const BASELINE_MIN_PER_CASE = 195; // FR-01 KPI: ~195 min baseline before automation
-const MOCK_AI_CONFIDENCE_TREND = "▲ 3 pts"; // MOCK — needs historical snapshots
-const MOCK_PHASE_MEDIANS = [
-  // MOCK — needs audit_log aggregation by CASE_STATUS_CHANGED transitions
-  { label: "1 · LOA prep", minutes: 3.2, color: "#63B1BC", widthPct: 18 },
-  { label: "2 · AI extract", minutes: 1.1, color: "#426DA9", widthPct: 8 },
-  { label: "3 · Call Assist", minutes: 4.4, color: "#8C4799", widthPct: 28 },
-  { label: "4 · Apply findings", minutes: 2.0, color: "#FFB81C", widthPct: 14 },
-  { label: "5 · Hand off", minutes: 0.6, color: "#CB333B", widthPct: 5 },
-];
-const MOCK_PROVIDER_RESPONSE_DAYS = 1.2; // MOCK — needs LOA-sent → first-doc median
-const MOCK_PROVIDER_RESPONSE_DELTA = "▼ 0.4d slower (Aviva)";
 
 // ────────────────────────────────────────────────────────────
 // Helpers
@@ -180,22 +167,17 @@ const Dashboard = () => {
     let active = 0,
       doneWeek = 0,
       inReview = 0,
-      onHold = 0,
       doneMonth = 0,
       adviserCreated = 0;
 
     let totalCompletedMinutes = 0,
       completedSamples = 0;
 
-    let confidenceSum = 0,
-      confidenceSamples = 0;
-
     for (const c of cases) {
       const status = (c.status ?? "").toLowerCase();
       const updated = c.updated_at ? new Date(c.updated_at) : null;
       if (!["complete", "approved"].includes(status)) active++;
       if (status === "in_review") inReview++;
-      if (status === "on_hold") onHold++;
       if (status === "complete" && updated && updated >= monday) doneWeek++;
       if (status === "complete" && updated && updated >= startOfMonth) doneMonth++;
 
@@ -218,12 +200,6 @@ const Dashboard = () => {
         }
       }
 
-      const conf = typeof c.confidence_score === "number" ? c.confidence_score : null;
-      if (conf !== null) {
-        confidenceSum += conf;
-        confidenceSamples++;
-      }
-
       const createdBy = c.created_by as { role?: string } | undefined;
       if (createdBy?.role === "ADVISER") adviserCreated++;
     }
@@ -235,20 +211,13 @@ const Dashboard = () => {
         ? Math.max(0, Math.round(BASELINE_MIN_PER_CASE - avgProcessingMin))
         : null;
 
-    const aiConfidence =
-      confidenceSamples > 0
-        ? Math.round((confidenceSum / confidenceSamples) * 100) / 100
-        : null;
-
     return {
       active,
       doneWeek,
       inReview,
-      onHold,
       doneMonth,
       adviserCreated,
       timeSavedMin,
-      aiConfidence,
       totalCases: cases.length,
     };
   }, [cases]);
@@ -274,8 +243,11 @@ const Dashboard = () => {
       for (const c of cases) {
         const created = c.created_at ? new Date(c.created_at) : null;
         if (created && created >= start && created < end) opened++;
-        const sr = c.sr_prepared_at ? new Date(c.sr_prepared_at) : null;
-        if (sr && sr >= start && sr < end) delivered++;
+        // "Delivered" = ceding workflow finished. We use ceding_complete_date
+        // (set when the case reaches Stage 10). sr_prepared_at was reserved
+        // for the adviser-side SR handoff but is not written today.
+        const done = c.ceding_complete_date ? new Date(c.ceding_complete_date) : null;
+        if (done && done >= start && done < end) delivered++;
       }
       buckets.push({ label, opened, delivered });
     }
@@ -346,14 +318,46 @@ const Dashboard = () => {
         const alreadyPrepared = Boolean(top.sr_prepared_at);
         const srReady =
           !caseClosed && !alreadyPrepared && completed === 8;
+
+        // Stronger signal: ALL of this client's cases are ceding-complete /
+        // approved. At that point ceding is fully handed off to the adviser
+        // for the Suitability Report. We surface a separate "Prepare for SR"
+        // CTA that deep-links into the client's CRM record (where the
+        // adviser will draft the SR). The CRM URL template is derived from
+        // any case's zoho_deep_link by swapping the path to /tab/Contacts;
+        // the exact CRM page can be tweaked later by the user.
+        const allClientCasesComplete =
+          items.length > 0 &&
+          items.every((it) =>
+            ["complete", "approved"].includes((it.status ?? "").toLowerCase()),
+          );
+
+        let srCrmUrl: string | null = null;
+        if (allClientCasesComplete) {
+          // Try to build a Contacts URL from any deep link we have, falling
+          // back to the bare CRM origin if we can't parse it.
+          const anyDeepLink = items.find((it) => it.zoho_deep_link)?.zoho_deep_link;
+          const clientZohoId = items.find((it) => it.client_zoho_id)?.client_zoho_id;
+          if (clientZohoId && anyDeepLink) {
+            // Sample link: https://crmsandbox.zoho.eu/crm/transactionsandbox/tab/Tasks/621...
+            // Swap the trailing "/tab/Tasks/<id>" segment to "/tab/Contacts/<clientId>".
+            srCrmUrl = anyDeepLink.replace(/\/tab\/[^/]+\/[^/?#]+/, `/tab/Contacts/${clientZohoId}`);
+          } else if (clientZohoId) {
+            srCrmUrl = `https://crm.zoho.eu/crm/tab/Contacts/${clientZohoId}`;
+          }
+        }
+
         return {
           name,
           top,
+          items,
           completed,
           totalStages,
           progressPct,
           tasksLeft,
           srReady,
+          allClientCasesComplete,
+          srCrmUrl,
           updatedRelative: timeAgo(top.updated_at ?? top.created_at),
         };
       })
@@ -397,11 +401,10 @@ const Dashboard = () => {
       .sort((a, b) => b.active - a.active)
       .slice(0, 4);
     const max = Math.max(...arr.map((a) => a.active), 6);
-    return arr.map((a) => ({
-      ...a,
-      pct: Math.round((a.active / max) * 100),
-      over: a.pct > 85,
-    }));
+    return arr.map((a) => {
+      const pct = Math.round((a.active / max) * 100);
+      return { ...a, pct, over: pct > 85 };
+    });
   }, [rawCases]);
 
   // ────────────────────────────────────────────────────────
@@ -450,14 +453,21 @@ const Dashboard = () => {
             <p className="text-sm leading-relaxed text-white/60 max-w-[520px]">
               {topCase ? (
                 <>
-                  {topCase.srReady ? (
+                  {topCase.allClientCasesComplete ? (
+                    <>
+                      <strong className="text-white/85 font-semibold">{topCase.name}</strong>'s
+                      ceding is complete — all {topCase.items.length} case
+                      {topCase.items.length === 1 ? "" : "s"} signed off. Ready for the
+                      adviser to draft the Suitability Report.
+                    </>
+                  ) : topCase.srReady ? (
                     <>
                       <strong className="text-white/85 font-semibold">{topCase.name}</strong>'s
                       {topCase.top.provider_name ? ` ${topCase.top.provider_name}` : ""}
                       {topCase.top.plan_type ? ` ${topCase.top.plan_type}` : ""} case is ready
                       for SR pack. All upstream tasks are complete.
                     </>
-                  ) : topCase.tasksLeft <= 1 ? (
+                  ) : topCase.tasksLeft === 1 ? (
                     <>
                       <strong className="text-white/85 font-semibold">{topCase.name}</strong>'s
                       {topCase.top.provider_name ? ` ${topCase.top.provider_name}` : ""}
@@ -480,7 +490,20 @@ const Dashboard = () => {
           </div>
           <div className="flex gap-2 shrink-0">
             {topCase ? (
-              topCase.srReady ? (
+              topCase.allClientCasesComplete && topCase.srCrmUrl ? (
+                // All cases for this client are signed off → hand off to
+                // adviser in CRM. Same destination as the Prepare-SR link
+                // in the Caseload widget.
+                <a
+                  href={topCase.srCrmUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[#8C4799] to-[#a76ab2] text-white hover:from-[#9b5fa6] hover:to-[#b87fc2] border-0 h-10 px-5 font-semibold shadow-[0_0_0_4px_rgba(140,71,153,0.18)] text-sm"
+                >
+                  <FileCheck2 className="h-4 w-4" />
+                  Prepare SR for {topCase.name.split(" ")[0]}
+                </a>
+              ) : topCase.srReady ? (
                 <Button
                   onClick={() =>
                     navigate(`/cases/${topCase.top.id}`, {
@@ -513,8 +536,11 @@ const Dashboard = () => {
         </div>
       </section>
 
-      {/* ── KPI TILES ────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+      {/* ── KPI TILES ──────────────────────────────────────────
+          Removed:
+          - "On hold"        — backend supports ON_HOLD, but no UI sets it
+          - "AI confidence"  — confidence_score is never written to the DB */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiTile
           tone="teal"
           label="Active"
@@ -547,15 +573,6 @@ const Dashboard = () => {
           index={2}
         />
         <KpiTile
-          tone="gold"
-          label="On hold"
-          value={stats.onHold}
-          sub={stats.onHold === 0 ? "all clear" : "review reason"}
-          icon={<AlertTriangle className="h-4 w-4" />}
-          onClick={() => navigate("/cases?status=on_hold")}
-          index={3}
-        />
-        <KpiTile
           tone="navy"
           label="Time saved"
           value={stats.timeSavedMin ?? "—"}
@@ -563,21 +580,15 @@ const Dashboard = () => {
           sub="avg/case vs baseline"
           delta={stats.timeSavedMin !== null ? `baseline ${BASELINE_MIN_PER_CASE}m` : "needs completed cases"}
           icon={<Clock className="h-4 w-4" />}
-          index={4}
-        />
-        <KpiTile
-          tone="violet"
-          label="AI confidence"
-          value={stats.aiConfidence ?? "—"}
-          suffix={stats.aiConfidence !== null ? "%" : undefined}
-          sub={`${cases.length} cases · ${MOCK_AI_CONFIDENCE_TREND}`}
-          icon={<Sparkles className="h-4 w-4" />}
-          index={5}
+          index={3}
         />
       </div>
 
-      {/* ── CHARTS ROW ───────────────────────────────────────── */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1.7fr_1fr_1fr] gap-3.5">
+      {/* ── CHARTS ROW ─────────────────────────────────────────
+          Removed "Phase medians" — was driven entirely by MOCK constants
+          and no audit-log aggregation backs it. Bring it back once we
+          record CASE_STATUS_CHANGED timestamps consistently. */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1.7fr_1fr] gap-3.5">
         {/* Caseflow */}
         <ChartCard
           eyebrow="Caseflow"
@@ -586,7 +597,7 @@ const Dashboard = () => {
           legend={
             <>
               <LegendDot color="#63B1BC" /> Cases opened
-              <LegendDot color="#8C4799" /> SR delivered
+              <LegendDot color="#8C4799" /> Ceding completed
             </>
           }
         >
@@ -613,25 +624,6 @@ const Dashboard = () => {
           )}
         </ChartCard>
 
-        {/* Phase medians */}
-        <ChartCard eyebrow="Throughput" title="Median time per phase">
-          <div className="flex flex-col gap-3 flex-1 justify-center">
-            {MOCK_PHASE_MEDIANS.map((p) => (
-              <div key={p.label}>
-                <div className="flex justify-between text-xs text-foreground/70 mb-1.5">
-                  <strong className="font-bold">{p.label}</strong>
-                  <span className="text-muted-foreground">{p.minutes} min</span>
-                </div>
-                <div className="h-2 rounded-full bg-muted overflow-hidden">
-                  <div
-                    className="h-full rounded-full transition-all duration-700"
-                    style={{ width: `${p.widthPct}%`, background: p.color }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        </ChartCard>
       </div>
 
       {/* ── TWO-COL: cases-by-client + activity / right rail ─── */}
@@ -689,7 +681,11 @@ const Dashboard = () => {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-sm font-semibold tracking-tight truncate">{c.name}</span>
-                          {c.srReady ? (
+                          {c.allClientCasesComplete ? (
+                            <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gradient-to-r from-[#8C4799] to-[#a76ab2] text-white">
+                              All ceding done · Prepare SR
+                            </span>
+                          ) : c.srReady ? (
                             <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gradient-to-r from-[#8C4799] to-[#a76ab2] text-white">
                               Ready for SR
                             </span>
@@ -736,43 +732,59 @@ const Dashboard = () => {
                           <span>{c.progressPct}%</span>
                         </div>
                       </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (c.srReady) {
-                            // Jump straight into Stage 9 (Export / SR pack).
-                            navigate(`/cases/${c.top.id}`, {
-                              state: { goToStage: 9 },
-                            });
-                          } else {
-                            navigate(`/cases/${c.top.id}`);
-                          }
-                        }}
-                        className={`h-8 px-3 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-colors ${
-                          c.srReady
-                            ? "bg-gradient-to-r from-[#7a3d87] to-[#8C4799] text-white hover:from-[#8C4799] hover:to-[#a76ab2] shadow-[0_0_0_4px_rgba(140,71,153,0.18)]"
-                            : isReady
-                              ? "bg-teal text-primary hover:bg-teal/90 shadow-[0_0_0_4px_rgba(99,177,188,0.16)]"
-                              : "bg-primary text-primary-foreground hover:bg-primary/90"
-                        }`}
-                      >
-                        {c.srReady ? (
-                          <>
-                            <FileCheck2 className="h-3 w-3" />
-                            Prepare SR
-                          </>
-                        ) : isReady ? (
-                          <>
-                            Resume
-                            <ArrowRight className="h-3 w-3" />
-                          </>
-                        ) : (
-                          <>
-                            Open
-                            <ArrowRight className="h-3 w-3" />
-                          </>
-                        )}
-                      </button>
+                      {c.allClientCasesComplete && c.srCrmUrl ? (
+                        // All cases done → open the client's CRM record in a
+                        // new tab so the adviser can draft the Suitability
+                        // Report. URL is built off any case's zoho_deep_link;
+                        // user can adjust the exact CRM page later.
+                        <a
+                          href={c.srCrmUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="h-8 px-3 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-colors bg-gradient-to-r from-[#7a3d87] to-[#8C4799] text-white hover:from-[#8C4799] hover:to-[#a76ab2] shadow-[0_0_0_4px_rgba(140,71,153,0.18)]"
+                        >
+                          <FileCheck2 className="h-3 w-3" />
+                          Prepare SR
+                        </a>
+                      ) : (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (c.srReady) {
+                              navigate(`/cases/${c.top.id}`, {
+                                state: { goToStage: 9 },
+                              });
+                            } else {
+                              navigate(`/cases/${c.top.id}`);
+                            }
+                          }}
+                          className={`h-8 px-3 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                            c.srReady
+                              ? "bg-gradient-to-r from-[#7a3d87] to-[#8C4799] text-white hover:from-[#8C4799] hover:to-[#a76ab2] shadow-[0_0_0_4px_rgba(140,71,153,0.18)]"
+                              : isReady
+                                ? "bg-teal text-primary hover:bg-teal/90 shadow-[0_0_0_4px_rgba(99,177,188,0.16)]"
+                                : "bg-primary text-primary-foreground hover:bg-primary/90"
+                          }`}
+                        >
+                          {c.srReady ? (
+                            <>
+                              <FileCheck2 className="h-3 w-3" />
+                              Prepare SR
+                            </>
+                          ) : isReady ? (
+                            <>
+                              Resume
+                              <ArrowRight className="h-3 w-3" />
+                            </>
+                          ) : (
+                            <>
+                              Open
+                              <ArrowRight className="h-3 w-3" />
+                            </>
+                          )}
+                        </button>
+                      )}
                     </li>
                   );
                 })}
@@ -887,14 +899,6 @@ const Dashboard = () => {
           >
             <div className="px-5 pb-4 pt-1 space-y-3">
               <InsightRow
-                tone="coral"
-                num={MOCK_PROVIDER_RESPONSE_DAYS}
-                suffix="d"
-                label="Median provider response"
-                delta={MOCK_PROVIDER_RESPONSE_DELTA}
-                deltaTone="down"
-              />
-              <InsightRow
                 tone="blue"
                 num={stats.doneMonth}
                 label="Cases closed this month"
@@ -987,6 +991,7 @@ const Dashboard = () => {
 interface CaseLite {
   id: string;
   client_name?: string;
+  client_zoho_id?: string;
   provider_name?: string;
   plan_type?: string;
   plan_number?: string;
@@ -1001,6 +1006,7 @@ interface CaseLite {
   current_stage?: number;
   zoho_ceding_status?: string;
   zoho_task_id?: string;
+  zoho_deep_link?: string;
   created_by?: { role?: string };
   assigned_to?: { role?: string };
 }

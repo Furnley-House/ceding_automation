@@ -34,6 +34,54 @@ function camelKeys(v: unknown): unknown {
   return v;
 }
 
+// The backend serialises the Prisma model fields directly: it emits
+// `sourcePageNumber`, `sourceQuote`, `sourceSection`, and `sourceDocument`
+// (with `originalName`). After snakeKeys those land as `source_page_number`,
+// `source_quote`, `source_section`, `source_document.original_name` — but
+// the rest of the UI was written against an older shape that expected
+// `source_page`, `evidence_source`, `evidence_ref`. This adapter bridges
+// the two so the "Source" jump-to-page button on each checklist field
+// actually has the data it needs.
+function adoptEvidenceFields(row: ChecklistRow): ChecklistRow {
+  const r = row as ChecklistRow & {
+    source_page_number?: number | null;
+    source_section?: string | null;
+    source_quote?: string | null;
+    source_document?: { original_name?: string | null; filename?: string | null } | null;
+  };
+  const sourcePage = r.source_page ?? r.source_page_number ?? null;
+  const sourceDocName =
+    r.source_document?.original_name ?? r.source_document?.filename ?? null;
+  // Compose a human-readable reference for the tooltip — "Page 3, Cash Value"
+  // when both are present, just "Page 3" otherwise. Fall back to the raw
+  // quote if no page exists.
+  const ref = sourcePage
+    ? `Page ${sourcePage}${r.source_section ? `, ${r.source_section}` : ""}`
+    : r.source_section ?? r.source_quote ?? null;
+  // The paraplanner's "Request review" comment is persisted on
+  // ChecklistField.reviewComment (→ snake-keyed to `review_comment`). The
+  // rest of the UI was written to read `notes` for any field-level comment,
+  // so surface review_comment there when no manual note is present.
+  const notes = r.notes ?? (r as ChecklistRow & { review_comment?: string | null }).review_comment ?? null;
+  // Backend FieldStatus enum is uppercase (APPROVED, REVIEW_REQUESTED, …)
+  // but the entire UI compares against lowercase ("approved", …). snakeKeys
+  // only renames keys, not values — so without this every approval looked
+  // like it had no effect.
+  const status = typeof r.status === "string" ? r.status.toLowerCase() : r.status;
+  return {
+    ...r,
+    source_page: sourcePage,
+    evidence_source: r.evidence_source ?? sourceDocName,
+    evidence_ref: r.evidence_ref ?? ref,
+    notes,
+    status,
+  };
+}
+function normaliseRows(raw: unknown): ChecklistRow[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((r) => adoptEvidenceFields(snakeKeys(r) as ChecklistRow));
+}
+
 export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
   const { role, userName } = useRole();
   const [rows, setRows] = useState<ChecklistRow[]>([]);
@@ -44,7 +92,7 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
     try {
       const res = await api.get(`/cases/${caseId}/checklist`);
       const raw = res.data as { fields?: unknown[]; [k: string]: unknown };
-      setRows((snakeKeys(raw.fields ?? raw) as ChecklistRow[]) ?? []);
+      setRows(normaliseRows(raw.fields ?? raw));
     } catch (err) {
       console.error("useChecklistFields refresh error", err);
     } finally {
@@ -61,7 +109,7 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
       try {
         const res = await api.get(`/cases/${caseId}/checklist`);
         const raw = res.data as { fields?: unknown[]; [k: string]: unknown };
-        if (!cancelled) setRows((snakeKeys(raw.fields ?? raw) as ChecklistRow[]) ?? []);
+        if (!cancelled) setRows(normaliseRows(raw.fields ?? raw));
       } catch (err) {
         console.error("useChecklistFields load error", err);
       } finally {
@@ -96,7 +144,7 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
           status: "missing",
         }));
         // Seed returns the created/found row
-        const seeded = (snakeKeys(seedRes.data) as ChecklistRow);
+        const seeded = adoptEvidenceFields(snakeKeys(seedRes.data) as ChecklistRow);
         existing = seeded;
         setRows((prev) => {
           const without = prev.filter((r) => r.field_key !== fieldKey);

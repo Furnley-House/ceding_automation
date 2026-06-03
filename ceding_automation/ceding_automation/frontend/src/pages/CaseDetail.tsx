@@ -1,7 +1,7 @@
 import { useParams, useNavigate, Link, useLocation } from "react-router-dom";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, AlertTriangle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, AlertTriangle, ExternalLink, RefreshCw } from "lucide-react";
 import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho } from "@/services/api";
 import { CEDING_STAGES, STATUS_LABELS, STATUS_STYLES, RAG_STYLES, calculateRag } from "@/lib/caseHelpers";
 import { isSupportedPlanType, SUPPORTED_PLAN_TYPES } from "@/lib/checklistTemplates";
@@ -20,7 +20,6 @@ import {
   StageExport,
   StageComplete,
 } from "@/components/case/stages";
-import { ZohoCrmTaskPanel } from "@/components/case/ZohoCrmTaskPanel";
 
 const CaseDetail = () => {
   const { id } = useParams();
@@ -92,17 +91,43 @@ const CaseDetail = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, zohoTaskId]);
 
-  // Handle stage navigation from sidebar sub-nav
+  // Handle stage navigation from sidebar sub-nav / MyInbox / inline links.
+  // We park the requested target in a ref and clear the location state;
+  // the viewStage effect below picks it up on the next render.
+  const pendingGoToStage = useRef<number | null>(null);
   useEffect(() => {
     const target = (location.state as any)?.goToStage;
     if (target && typeof target === "number") {
-      updateMutation.mutate({
-        updates: { current_stage: target, last_activity_at: new Date().toISOString() },
-      });
+      pendingGoToStage.current = target;
       navigate(location.pathname, { replace: true, state: {} });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.state]);
+
+  // Local view-state for which stage to render. Stepper clicks update only
+  // this — they don't PATCH `current_stage` to the backend, which would
+  // otherwise clobber status (e.g. IN_REVIEW → STAGE_5_CHASING when a CA
+  // hops to Call Assist to chase a returned field). The local override
+  // re-syncs whenever the backend status changes, but a pending
+  // location.state.goToStage always wins (deep-link / sidebar nav intent).
+  //
+  // Declared above the early returns so the hook order stays stable across
+  // loading / loaded / not-found render passes.
+  const rawStage: number = (caseItem as any)?.current_stage ?? 1;
+  let computedStage: number = Math.min(10, Math.max(1, rawStage));
+  if (caseItem?.status === "in_review") {
+    if (role === "ca_team") computedStage = 6;
+    else if (role === "paraplanner" || role === "adviser") computedStage = 8;
+  }
+  const [viewStage, setViewStage] = useState<number>(computedStage);
+  useEffect(() => {
+    if (pendingGoToStage.current !== null) {
+      setViewStage(pendingGoToStage.current);
+      pendingGoToStage.current = null;
+    } else {
+      setViewStage(computedStage);
+    }
+  }, [computedStage]);
 
   if (isLoading) {
     return (
@@ -144,9 +169,10 @@ const CaseDetail = () => {
     );
   }
 
-  // Clamp to valid range — flow has 10 stages.
-  const rawStage: number = (caseItem as any).current_stage ?? 1;
-  const currentStage: number = Math.min(10, Math.max(1, rawStage));
+  // viewStage / computedStage are declared above the early returns to keep
+  // the hook order stable. After this point caseItem is guaranteed loaded.
+  const currentStage = viewStage;
+
   const stagesCompleted: number[] = ((caseItem as any).stages_completed ?? []).filter(
     (n: number) => n >= 1 && n <= 10,
   );
@@ -170,12 +196,16 @@ const CaseDetail = () => {
       });
       return;
     }
-    updateMutation.mutate({ updates: { current_stage: n, last_activity_at: new Date().toISOString() } });
+    setViewStage(n);
   };
 
   const completeAndNext = () => {
     const newCompleted = Array.from(new Set([...stagesCompleted, currentStage])).sort((a, b) => a - b);
     const next = Math.min(currentStage + 1, 10);
+    // Advance the view stage locally first — the backend may legitimately
+    // refuse the implicit status change (e.g. case is already IN_REVIEW or
+    // COMPLETE) and we don't want the UI to freeze on the current stage.
+    setViewStage(next);
     const updates: any = {
       current_stage: next,
       stages_completed: newCompleted,
@@ -230,6 +260,31 @@ const CaseDetail = () => {
                 <span className="font-mono text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground">
                   {caseItem.case_ref}
                 </span>
+                <div className="ml-auto flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      syncedRef.current = null; // force the sync to run again
+                      syncMutation.mutate();
+                    }}
+                    disabled={syncMutation.isPending || !zohoTaskId}
+                    title="Pull the latest task + linked Contact (paraplanner, owner, …) from Zoho CRM"
+                    className="inline-flex items-center gap-1 text-xs text-teal hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${syncMutation.isPending ? "animate-spin" : ""}`} />
+                    {syncMutation.isPending ? "Refreshing…" : "Refresh from Zoho"}
+                  </button>
+                  {(caseItem as any).zoho_deep_link && (
+                    <a
+                      href={(caseItem as any).zoho_deep_link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-xs text-teal hover:underline"
+                    >
+                      View in Zoho <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                </div>
               </div>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-1.5 text-xs mt-2">
                 <HeaderField label="Provider" value={caseItem.Provider_group} />
@@ -321,19 +376,12 @@ const CaseDetail = () => {
               </div>
             </div>
           )}
-          {(caseItem as any).zoho_task_id && (
-            <div className="space-y-2">
-              <ZohoCrmTaskPanel
-                taskId={(caseItem as any).zoho_task_id}
-                deepLink={(caseItem as any).zoho_deep_link ?? undefined}
-              />
-              {(!caseItem.Provider_group || !(caseItem as any).plan_number) && (
-                <Button size="sm" variant="outline" onClick={syncFromZoho} className="text-xs">
-                  Sync provider &amp; policy ref from Zoho
-                </Button>
-              )}
-            </div>
-          )}
+          {(caseItem as any).zoho_task_id &&
+            (!caseItem.Provider_group || !(caseItem as any).plan_number) && (
+              <Button size="sm" variant="outline" onClick={syncFromZoho} className="text-xs">
+                Sync provider &amp; policy ref from Zoho
+              </Button>
+            )}
 
           {planSupported && <StageComponent caseItem={caseItem as any} />}
 

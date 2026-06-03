@@ -8,6 +8,7 @@
 import { PrismaClient, Prisma } from "@prisma/client";
 import type { BffExtractedField, BffJobResult } from "./aiBffClient";
 import { compareFieldValues } from "../utils/compareFieldValues";
+import { mirrorChecklistToCase } from "./caseFieldMirror";
 
 const prisma = new PrismaClient();
 const SYSTEM_USER_ID = "system-ai-bff";
@@ -157,6 +158,9 @@ export async function applyFieldExtraction(args: {
       } as Prisma.InputJsonValue,
     },
   });
+  // Propagate this field's value to the Case row (provider, policy_ref,
+  // plan_start_date). Fail-soft — checklist write already succeeded.
+  await mirrorChecklistToCase(args.caseId, field.template.fieldKey, newValueStr);
   return { outcome: "applied", fieldId: field.id };
 }
 
@@ -190,6 +194,56 @@ export async function applyExtractionResult(
       documentId,
       providerCanonical,
     });
+  }
+
+  // ── Fund Details table ─────────────────────────────────────
+  // BFF returns a `fund_lines` array alongside the scalar fields. Previous
+  // versions silently dropped these; we now persist them in ChecklistFundLine.
+  // Strategy: REPLACE existing AI-extracted rows for this document, keep
+  // manual rows untouched (status === MANUALLY_ENTERED / OVERRIDDEN).
+  if (Array.isArray(result.response.fundLines) && result.response.fundLines.length > 0) {
+    const caseRow = await prisma.case.findUnique({
+      where: { id: doc.caseId },
+      select: { id: true, planType: true },
+    });
+    if (caseRow) {
+      // Delete prior AI rows for this document so re-extraction doesn't pile up.
+      await prisma.checklistFundLine.deleteMany({
+        where: {
+          caseId: caseRow.id,
+          sourceDocumentId: documentId,
+          status: { in: ["AI_EXTRACTED"] },
+        },
+      });
+      await prisma.checklistFundLine.createMany({
+        data: result.response.fundLines.map((f, idx) => ({
+          caseId: caseRow.id,
+          planType: caseRow.planType,
+          fundName: f.fundName || `Fund ${idx + 1}`,
+          numberOfUnits: f.units != null ? new Prisma.Decimal(f.units) : null,
+          pricePerUnit: f.price != null ? new Prisma.Decimal(f.price) : null,
+          value: f.value != null ? new Prisma.Decimal(f.value) : null,
+          sourceDocumentId: documentId,
+          displayOrder: idx,
+          status: "AI_EXTRACTED",
+          confidence: "HIGH",
+        })),
+      });
+      await prisma.auditLog.create({
+        data: {
+          caseId: caseRow.id,
+          userId: SYSTEM_USER_ID,
+          action: "FUND_LINE_ADDED",
+          source: "AI",
+          newValue: `${result.response.fundLines.length} fund rows extracted`,
+          metadata: {
+            jobId: result.jobId,
+            documentId,
+            count: result.response.fundLines.length,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    }
   }
 
   const submittedAt = doc.aiJobSubmittedAt ?? doc.uploadedAt;

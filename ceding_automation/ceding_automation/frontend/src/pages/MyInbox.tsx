@@ -18,18 +18,24 @@ const MyInbox = () => {
   );
 
   const { data: cases = [], isLoading } = useQuery({
-    queryKey: ["my-inbox", me.user_id],
+    queryKey: ["my-inbox", userName],
     queryFn: async () => {
       const res = await api.get("/cases");
-      const all = (res.data as CaseRow[]) ?? [];
-      // Filter to cases where owner matches this user
+      // Backend returns { cases, total, page, limit }
+      const raw = res.data as { cases?: CaseRow[] };
+      const all = (raw.cases ?? (Array.isArray(res.data) ? (res.data as CaseRow[]) : [])) ?? [];
+      // Show cases where the signed-in paraplanner is the assigned reviewer.
+      // The backend /cases endpoint already filters to cases involving the
+      // authenticated user (createdBy / assignedTo / paralPlanner) for
+      // non-admin roles, so a name match is enough to narrow to "mine".
       return all
-        .filter((c) => c.owner_id === me.user_id)
+        .filter((c) => (c.paraplanner_name ?? "").trim() === (userName ?? "").trim())
         .sort((a, b) =>
           new Date(b.last_activity_at ?? b.created_at ?? 0).getTime() -
           new Date(a.last_activity_at ?? a.created_at ?? 0).getTime()
         );
     },
+    enabled: !!userName,
   });
 
   // Tasks not implemented in backend — return empty so due-date logic is a no-op
@@ -145,7 +151,7 @@ const MyInbox = () => {
                   </div>
 
                   <Button asChild size="sm" className="gap-1 shrink-0">
-                    <Link to={`/cases/${c.id}?stage=9`}>
+                    <Link to={`/cases/${c.id}`} state={{ goToStage: 8 }}>
                       Start review <ChevronRight className="h-3.5 w-3.5" />
                     </Link>
                   </Button>

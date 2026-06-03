@@ -3,7 +3,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient, CaseStatus, PlanType, Prisma } from '@prisma/client';
 import { requireAuth } from '../middleware/auth';
 import * as zoho from '../services/zohoCrm';
-import { mapZohoTaskToCase } from '../services/zohoCrm';
+import { mapZohoTaskToCase, lookupParaplannerFromContact } from '../services/zohoCrm';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -131,6 +131,60 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
       }
     }
 
+    // 4b. Resolve the paraplanner from the linked Contact (client) record.
+    //     For UAT: the Contact has a custom "Paraplanner" field — we read it,
+    //     match the value to an active app user (by email then by name).
+    //     For testing: when the Contact has no paraplanner set OR the lookup
+    //     fails (e.g. missing scope), fall back to the first PARAPLANNER user
+    //     in the system (Emma Clarke in the demo seed).
+    let paralPlannerId: string | null = null;
+    let paraplannerResolution:
+      | 'contact-email'
+      | 'contact-name'
+      | 'fallback-first-paraplanner'
+      | 'none' = 'none';
+    if (mapping.clientZohoId) {
+      try {
+        const pp = await lookupParaplannerFromContact(mapping.clientZohoId);
+        if (pp?.email) {
+          const u = await prisma.user.findUnique({ where: { email: pp.email.toLowerCase() } });
+          if (u && u.status === 'ACTIVE' && u.role === 'PARAPLANNER') {
+            paralPlannerId = u.id;
+            paraplannerResolution = 'contact-email';
+          }
+        }
+        if (!paralPlannerId && pp?.name) {
+          const u = await prisma.user.findFirst({
+            where: {
+              name: { equals: pp.name, mode: 'insensitive' },
+              status: 'ACTIVE',
+              role: 'PARAPLANNER',
+            },
+          });
+          if (u) {
+            paralPlannerId = u.id;
+            paraplannerResolution = 'contact-name';
+          }
+        }
+      } catch (err) {
+        // Contact lookup failed (likely a missing OAuth scope or the contact
+        // doesn't exist). Don't block the import — fall through to the
+        // Emma-Clarke fallback below.
+        // eslint-disable-next-line no-console
+        console.warn(`Paraplanner lookup from Contact failed: ${(err as Error).message}`);
+      }
+    }
+    if (!paralPlannerId) {
+      const fallback = await prisma.user.findFirst({
+        where: { role: 'PARAPLANNER', status: 'ACTIVE' },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (fallback) {
+        paralPlannerId = fallback.id;
+        paraplannerResolution = 'fallback-first-paraplanner';
+      }
+    }
+
     // 5. Re-use existing case if this Zoho task was already imported
     const existing = await prisma.case.findFirst({
       where: { zohoTaskId: taskId },
@@ -142,6 +196,7 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
       if (!existing.providerId && providerId) patches.providerId = providerId;
       if (!existing.policyRef && mapping.policyRef) patches.policyRef = mapping.policyRef;
       if (!existing.zohoDeepLink && mapping.zohoDeepLink) patches.zohoDeepLink = mapping.zohoDeepLink;
+      if (!existing.paralPlannerId && paralPlannerId) patches.paralPlannerId = paralPlannerId;
 
       if (Object.keys(patches).length > 0) {
         const updated = await prisma.case.update({
@@ -173,6 +228,8 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
         providerResolvedId: providerId ?? null,
         assignedAppUserId,
         ownerResolution,
+        paralPlannerId,
+        paraplannerResolution,
         zohoTask: taskRecord,
       });
     }
@@ -194,9 +251,10 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
         zohoDeepLink: mapping.zohoDeepLink ?? null,
         createdById: req.user!.id,            // who triggered the import
         assignedToId: assignedAppUserId,      // who owns the work (matches Zoho)
+        paralPlannerId: paralPlannerId,       // paraplanner pulled from Contact (or fallback)
         status: CaseStatus.STAGE_1_LOA_PREP,
       },
-      include: { provider: true, createdBy: true, assignedTo: true },
+      include: { provider: true, createdBy: true, assignedTo: true, paraplanner: true },
     });
 
     // 7. Initialise checklist fields from active templates
@@ -217,11 +275,24 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
         action: 'CASE_CREATED',
         source: 'SYSTEM',
         newValue: `Imported from Zoho task ${taskId}`,
-        metadata: { zohoTaskId: taskId, mapping, ownerResolution, assignedAppUserId } as unknown as Prisma.InputJsonValue,
+        metadata: {
+          zohoTaskId: taskId,
+          mapping,
+          ownerResolution,
+          assignedAppUserId,
+          paraplannerResolution,
+          paralPlannerId,
+        } as unknown as Prisma.InputJsonValue,
       },
     });
 
-    res.status(201).json({ case: newCase, mapping, zohoTask: taskRecord, ownerResolution });
+    res.status(201).json({
+      case: newCase,
+      mapping,
+      zohoTask: taskRecord,
+      ownerResolution,
+      paraplannerResolution,
+    });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

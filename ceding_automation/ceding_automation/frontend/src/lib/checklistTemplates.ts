@@ -24,16 +24,37 @@ export interface ChecklistFieldDef {
   hint?: string;
 }
 
-/** Plan types we currently support end-to-end. Anything else is flagged. */
-export const SUPPORTED_PLAN_TYPES = ["Personal Pension", "ISA", "GIA"] as const;
+/** Plan types we currently support end-to-end. Anything else is flagged.
+ *  Phase 1: Pension / ISA / GIA only. "Personal Pension" is a PlanSubType
+ *  (asked for inside the checklist), not a top-level plan type. */
+export const SUPPORTED_PLAN_TYPES = ["Pension", "ISA", "GIA"] as const;
 export type SupportedPlanType = (typeof SUPPORTED_PLAN_TYPES)[number];
 
+// Legacy display strings that used to appear as a plan type before we
+// reorganised pension sub-types. Anything in this list is treated as if it
+// were "Pension" so existing data and seed fixtures keep resolving.
+const LEGACY_PENSION_ALIASES = new Set([
+  "Personal Pension",
+  "Stakeholder Pension",
+  "With-Profits Pension",
+  "SIPP",
+  "PENSION", // backend enum value
+  "pension",
+]);
+
+function normalisePlanType(planType: string | null | undefined): string | null {
+  if (!planType) return null;
+  if (LEGACY_PENSION_ALIASES.has(planType)) return "Pension";
+  return planType;
+}
+
 export function isSupportedPlanType(planType: string | null | undefined): planType is SupportedPlanType {
-  return !!planType && (SUPPORTED_PLAN_TYPES as readonly string[]).includes(planType);
+  const n = normalisePlanType(planType);
+  return !!n && (SUPPORTED_PLAN_TYPES as readonly string[]).includes(n);
 }
 
 // Canonical plan arrays are keyed by uppercase enum names; the frontend public
-// API still uses display strings ("Personal Pension"/"ISA"/"GIA"). The bridge
+// API uses friendly display strings ("Pension"/"ISA"/"GIA"). The bridge
 // happens in CHECKLIST_TEMPLATES below — importers don't need to change.
 type CanonicalPlanKey = "PENSION" | "ISA" | "GIA";
 
@@ -99,13 +120,16 @@ const ISA_FIELDS = buildPlan("ISA");
 const GIA_FIELDS = buildPlan("GIA");
 
 export const CHECKLIST_TEMPLATES: Record<string, ChecklistFieldDef[]> = {
-  "Personal Pension": PENSION_FIELDS,
+  Pension: PENSION_FIELDS,
   ISA: ISA_FIELDS,
   GIA: GIA_FIELDS,
 };
 
 export function getTemplate(planType: string): ChecklistFieldDef[] {
-  return CHECKLIST_TEMPLATES[planType] ?? [];
+  // Normalise legacy / enum-style strings ("Personal Pension", "PENSION", etc.)
+  // so a case carrying any historic plan_type still finds its template.
+  const key = normalisePlanType(planType) ?? planType;
+  return CHECKLIST_TEMPLATES[key] ?? [];
 }
 
 /** Section ordering preserved as encountered in the template */

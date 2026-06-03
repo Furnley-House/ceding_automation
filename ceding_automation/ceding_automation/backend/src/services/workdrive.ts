@@ -6,7 +6,15 @@ import { getZohoAccessToken } from './zohoCrm';
 
 // Read env at call-time, not module-load, so .env edits are picked up without rebuilding
 const workdriveApiBase = () => process.env.ZOHO_WORKDRIVE_API_BASE ?? 'https://www.zohoapis.eu/workdrive/api/v1';
-const defaultFolderId = () => process.env.ZOHO_WORKDRIVE_FOLDER_ID;
+// Sandbox/test default for the Furnley House ceding recordings folder. Used
+// when ZOHO_WORKDRIVE_FOLDER_ID isn't set (or is still the .env.example
+// placeholder). Production deployments MUST set the env var explicitly.
+const DEFAULT_WORKDRIVE_FOLDER_ID = 'a7yip2d39bf2cd6074a09a5190cf73e7a61bf';
+const defaultFolderId = () => {
+  const fromEnv = process.env.ZOHO_WORKDRIVE_FOLDER_ID;
+  if (fromEnv && !fromEnv.startsWith('your-')) return fromEnv;
+  return DEFAULT_WORKDRIVE_FOLDER_ID;
+};
 
 export interface WorkDriveUploadResult {
   id: string;

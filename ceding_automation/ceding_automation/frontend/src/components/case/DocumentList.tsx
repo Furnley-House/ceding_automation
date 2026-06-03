@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   CircleAlert,
   Eye,
+  StopCircle,
 } from "lucide-react";
 import type { DocumentRow } from "@/hooks/useDocuments";
 import { Button } from "@/components/ui/button";
@@ -88,6 +89,7 @@ export function DocumentList({
   onExtractionDone,
 }: Props) {
   const [extractingId, setExtractingId] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
 
   const runExtraction = async (doc: DocumentRow) => {
     setExtractingId(doc.id);
@@ -106,6 +108,27 @@ export function DocumentList({
       });
     } finally {
       setExtractingId(null);
+    }
+  };
+
+  const cancelExtraction = async (doc: DocumentRow) => {
+    setCancellingId(doc.id);
+    try {
+      await api.post(`/cases/${caseId}/documents/${doc.id}/cancel`);
+      toast.success("Extraction stopped", {
+        description:
+          "The document is now marked as Error. You can retry, remove it, or upload a new document.",
+      });
+      // Refresh the list so the badge flips from "Extracting…" to "Error".
+      onExtractionDone?.();
+    } catch (e: any) {
+      console.error("cancel extraction error", e);
+      toast.error("Couldn't stop extraction", {
+        description:
+          e?.response?.data?.error ?? e?.message ?? "Please retry",
+      });
+    } finally {
+      setCancellingId(null);
     }
   };
 
@@ -185,12 +208,31 @@ export function DocumentList({
               >
                 <Eye className="h-3.5 w-3.5" />
               </Button>
+              {/* Stop button — only when extraction is in flight. Lets the
+                  user unblock themselves from a stale "Extracting…" badge
+                  so they can retry, remove, or upload a different document. */}
+              {rawStatus === "PROCESSING" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => cancelExtraction(d)}
+                  disabled={cancellingId === d.id}
+                  className="h-8 px-2 text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/40"
+                  title="Stop extraction"
+                >
+                  {cancellingId === d.id ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <StopCircle className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              )}
               <Button
                 size="sm"
                 onClick={() => runExtraction(d)}
                 disabled={isExtracting}
                 className="h-8 px-2"
-                title="Run AI extraction"
+                title={isExtracting ? "Extraction in progress" : "Run AI extraction"}
               >
                 {isExtracting ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -202,7 +244,10 @@ export function DocumentList({
                 size="sm"
                 variant="ghost"
                 onClick={() => onRemove(d)}
-                disabled={isExtracting}
+                // Allow remove even mid-extraction — the cancel endpoint
+                // would have handled it, but if the user wants to skip the
+                // intermediate step and just delete, that's still fine
+                // because document delete cascades to the BFF job row.
                 className="h-8 px-2 text-muted-foreground hover:text-destructive"
                 title="Remove document"
               >

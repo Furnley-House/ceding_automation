@@ -5,7 +5,7 @@ import multer from "multer";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { requireInternalKey } from "../middleware/internalKey";
-import { uploadToAzureBlob, generateSasUrl } from "../services/storage";
+import { uploadToAzureBlob, generateSasUrl, downloadBlobAsBuffer } from "../services/storage";
 import { extractDocumentWithAI } from "../services/aiExtraction";
 import * as aiBff from "../services/aiBffClient";
 import { compareFieldValues } from "../utils/compareFieldValues";
@@ -111,6 +111,49 @@ router.get("/:caseId/documents/:docId/url", requireAuth, async (req: Request, re
   res.json({ url });
 });
 
+// ── Stream the document bytes back through the API ──────
+//
+// Why this exists: react-pdf fetches the file URL directly from the browser.
+// When the URL is a SAS link to Azure Blob Storage, the request is blocked by
+// CORS unless the storage account explicitly allows the frontend origin.
+// Proxying the bytes through this endpoint sidesteps that — the browser only
+// ever talks to our own API (same-origin / already-CORS-allowed), and the
+// SAS / connection string never leaves the server. The trade-off is that the
+// whole file moves through our backend instead of being downloaded directly.
+router.get(
+  "/:caseId/documents/:docId/raw",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const doc = await prisma.document.findUnique({
+      where: { id: req.params.docId },
+    });
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    if (doc.caseId !== req.params.caseId) {
+      // Prevent the docId-guessing path from leaking documents across cases.
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    try {
+      const buffer = await downloadBlobAsBuffer(doc.storagePath);
+      res.setHeader("Content-Type", doc.mimeType || "application/pdf");
+      // Inline so the browser renders it; filename helps when the user saves.
+      const safeName = (doc.originalName || "document.pdf").replace(/"/g, "");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${safeName}"`
+      );
+      // SAS URLs expire in 60min; cache for 5min so the PDF viewer doesn't
+      // re-fetch on every page render but stale content is short-lived.
+      res.setHeader("Cache-Control", "private, max-age=300");
+      res.setHeader("Content-Length", buffer.length.toString());
+      res.send(buffer);
+    } catch (err) {
+      console.error("[documents/raw] failed to stream blob", err);
+      res.status(502).json({ error: "Failed to load document" });
+    }
+  }
+);
+
 // ── Delete Document ─────────────────────────────────────
 //
 // Hard-delete (rare in production — usually we'd soft-delete instead). The
@@ -165,6 +208,73 @@ router.post(
     submitOrTrigger(doc.id, req.params.caseId, req.user!.id).catch(console.error);
 
     res.json({ message: "Extraction started" });
+  }
+);
+
+// ── Cancel In-flight Extraction ─────────────────────────
+//
+// Marks the document as a failed/cancelled job so:
+//   - the background poller stops checking on it (aiJobStatus = "failed")
+//   - the UI's "Extracting…" badge flips to "Error" (status = ERROR)
+//   - the idempotency guard on applyExtractionResult prevents a late
+//     write-back from re-opening the field state
+//
+// We do NOT attempt to cancel the job on the BFF side — the BFF API
+// doesn't expose a cancel endpoint and the queued worker will just be
+// wasted compute. That's acceptable: cancellation is a UX action to
+// unblock the user, not a cost-control mechanism. The BFF will finish
+// or time out on its own; our idempotency guard ignores its eventual
+// response.
+router.post(
+  "/:caseId/documents/:docId/cancel",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const doc = await prisma.document.findUnique({
+      where: { id: req.params.docId },
+    });
+    if (!doc || doc.caseId !== req.params.caseId) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    // Only meaningful while the doc is in flight. Cancelling an already-
+    // settled doc would clobber its EXTRACTED state — guard explicitly.
+    if (doc.status !== "PROCESSING" && doc.status !== "UPLOADED") {
+      return res
+        .status(409)
+        .json({ error: `Document is in ${doc.status} — nothing to cancel` });
+    }
+
+    const updated = await prisma.document.update({
+      where: { id: doc.id },
+      data: {
+        status: "ERROR",
+        aiJobStatus: "failed",
+        aiJobCompletedAt: new Date(),
+        aiJobError: "Cancelled by user",
+        errorMessage: "Cancelled by user",
+      },
+    });
+
+    // Audit using AI_EXTRACTION_RUN (we don't have a dedicated cancel enum
+    // value; metadata carries the intent so reports can still tell them
+    // apart from real failures).
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.caseId,
+        userId: req.user!.id,
+        action: "AI_EXTRACTION_RUN",
+        source: "MANUAL",
+        newValue: "cancelled",
+        metadata: {
+          documentId: doc.id,
+          previousStatus: doc.status,
+          aiJobId: doc.aiJobId,
+        },
+      },
+    });
+
+    res.json({ message: "Extraction cancelled", document: updated });
   }
 );
 

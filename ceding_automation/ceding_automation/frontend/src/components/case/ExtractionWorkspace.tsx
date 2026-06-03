@@ -49,20 +49,38 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     if (!selectedId && documents.length > 0) setSelectedId(documents[0].id);
   }, [documents, selectedId]);
 
-  // Load signed URL for the selected document
+  // Load signed URL for the selected document.
+  //
+  // getSignedUrl now returns a blob:// object URL (the PDF is streamed
+  // through the backend to dodge Azure Blob CORS). We have to revoke the
+  // previous URL when the selection changes or the component unmounts —
+  // otherwise the underlying Blob is pinned in memory for the page lifetime.
   useEffect(() => {
     let cancelled = false;
+    let createdUrl: string | null = null;
     (async () => {
       const doc = documents.find((d) => d.id === selectedId);
       if (!doc) {
-        setPdfUrl(null);
+        setPdfUrl((prev) => {
+          if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+          return null;
+        });
         return;
       }
       const url = await getSignedUrl(caseId, doc.id);
-      if (!cancelled) setPdfUrl(url);
+      if (cancelled) {
+        if (url && url.startsWith("blob:")) URL.revokeObjectURL(url);
+        return;
+      }
+      createdUrl = url;
+      setPdfUrl((prev) => {
+        if (prev && prev !== url && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+        return url;
+      });
     })();
     return () => {
       cancelled = true;
+      if (createdUrl && createdUrl.startsWith("blob:")) URL.revokeObjectURL(createdUrl);
     };
   }, [selectedId, documents, caseId]);
 
@@ -132,10 +150,10 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <Sparkles className="h-3.5 w-3.5 text-teal" />
-        Click 📄 next to any field on the right to jump the PDF to its source page.
-      </div>
+      {/* <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        {/* <Sparkles className="h-3.5 w-3.5 text-teal" /> */}
+        {/* Click 📄 next to any field on the right to jump the PDF to its source page. 
+      </div> */}
 
       {banner}
 
@@ -153,6 +171,11 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
                 await removeDocument(d);
                 if (d.id === selectedId) setSelectedId(null);
               }}
+              // Refresh the doc list whenever an inline action (retry,
+              // cancel) settles — without this the "Extracting…" badge
+              // wouldn't flip to "Error" until the next ai-status poll
+              // tick (3s) or a manual refresh.
+              onExtractionDone={refreshDocuments}
             />
             {loading && (
               <p className="text-[10px] text-muted-foreground text-center py-2">Loading documents…</p>

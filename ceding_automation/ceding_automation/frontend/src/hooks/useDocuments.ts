@@ -77,13 +77,25 @@ export async function uploadDocumentFile({
   return snakeKeys(res.data) as DocumentRow;
 }
 
+// Fetch the PDF bytes through our own API and turn them into a same-origin
+// object URL that react-pdf can load. We deliberately do NOT use the Azure
+// SAS URL directly: in dev the storage account has no CORS rule for
+// http://localhost:5173 and the browser would block the fetch even though
+// the blob is reachable. Proxying through the backend keeps everything
+// same-origin and reuses the existing auth interceptor.
+//
+// Callers must revoke the returned URL with URL.revokeObjectURL() when they
+// no longer need it — otherwise the blob is kept alive for the page lifetime.
 export async function getSignedUrl(
   caseId: string,
   docId: string
 ): Promise<string | null> {
   try {
-    const res = await api.get(`/cases/${caseId}/documents/${docId}/url`);
-    return (res.data as { url?: string })?.url ?? null;
+    const res = await api.get(
+      `/cases/${caseId}/documents/${docId}/raw`,
+      { responseType: "blob" }
+    );
+    return URL.createObjectURL(res.data as Blob);
   } catch {
     return null;
   }
