@@ -303,37 +303,22 @@ export async function listCallRecordingsWithToken(
   throw lastErr ?? new Error('Failed to fetch recordings from RingCentral');
 }
 
-// ── Transcribe a recording audio file via Azure OpenAI Whisper ────────────────
-// Downloads the MP3 from RC's media server (using the caller's bearer token),
-// then sends it to Azure OpenAI Whisper for transcription.
-// Requires AZURE_OPENAI_WHISPER_DEPLOYMENT in .env (e.g. "whisper").
-export async function transcribeRecordingWithToken(
-  contentUri: string,
-  bearerToken: string
-): Promise<{ transcript: string | null; error?: string }> {
+// ── Send an audio buffer directly to Azure Whisper ────────────────────────
+export async function transcribeAudioBuffer(audioBuffer: Buffer, filename: string = 'recording.mp3'): Promise<{ transcript: string | null; error?: string }> {
   const whisperDeployment = process.env.AZURE_OPENAI_WHISPER_DEPLOYMENT ?? 'whisper';
   const azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
   const azureApiKey = process.env.AZURE_OPENAI_API_KEY;
 
-  if (!azureEndpoint || !azureApiKey || azureApiKey.startsWith('your-')) {
+  if (!azureEndpoint || !azureApiKey || azureApiKey.startsWith('your-') || azureEndpoint.includes('YOUR_RESOURCE')) {
     return { transcript: null, error: 'Azure OpenAI not configured' };
   }
 
-  // 1. Download the recording MP3 from RC's media server
-  const audioResp = await axios.get(contentUri, {
-    headers: { Authorization: `Bearer ${bearerToken}` },
-    responseType: 'arraybuffer',
-  });
-  const audioBuffer = Buffer.from(audioResp.data as ArrayBuffer);
-
-  // 2. Send to Azure Whisper for transcription
-  // AzureOpenAI client uses fetch under the hood; we call it via raw axios for simplicity.
   const endpoint = azureEndpoint.replace(/\/$/, '');
   const url = `${endpoint}/openai/deployments/${whisperDeployment}/audio/transcriptions?api-version=2024-06-01`;
 
   const FormData = (await import('form-data')).default;
   const form = new FormData();
-  form.append('file', audioBuffer, { filename: 'recording.mp3', contentType: 'audio/mpeg' });
+  form.append('file', audioBuffer, { filename, contentType: 'audio/mpeg' });
   form.append('model', whisperDeployment);
   form.append('response_format', 'text');
 
@@ -342,6 +327,18 @@ export async function transcribeRecordingWithToken(
   });
   const text = typeof resp.data === 'string' ? resp.data.trim() : (resp.data as any)?.text ?? null;
   return { transcript: text || null };
+}
+
+// ── Transcribe a recording from RC media server (downloads + sends to Whisper) ──
+export async function transcribeRecordingWithToken(
+  contentUri: string,
+  bearerToken: string
+): Promise<{ transcript: string | null; error?: string }> {
+  const audioResp = await axios.get(contentUri, {
+    headers: { Authorization: `Bearer ${bearerToken}` },
+    responseType: 'arraybuffer',
+  });
+  return transcribeAudioBuffer(Buffer.from(audioResp.data as ArrayBuffer), 'recording.mp3');
 }
 
 // Uses server-side JWT — no user token required. Reuses the same multi-source logic.

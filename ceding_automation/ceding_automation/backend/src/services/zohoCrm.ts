@@ -11,6 +11,10 @@ interface TokenCache {
 
 let cache: TokenCache | null = null;
 
+export async function getZohoAccessToken(): Promise<string> {
+  return getAccessToken();
+}
+
 async function getAccessToken(): Promise<string> {
   if (cache && Date.now() < cache.expiresAt - 60_000) return cache.accessToken;
 
@@ -47,7 +51,7 @@ async function getAccessToken(): Promise<string> {
 
 export function buildAuthorizeUrl(redirectUri: string): string {
   const params = new URLSearchParams({
-    scope: 'ZohoCRM.modules.tasks.ALL,ZohoCRM.settings.fields.READ,ZohoCRM.users.READ',
+    scope: 'ZohoCRM.modules.tasks.ALL,ZohoCRM.settings.fields.READ,ZohoCRM.users.READ,WorkDrive.files.ALL,WorkDrive.team.READ',
     client_id: process.env.ZOHO_CLIENT_ID!,
     response_type: 'code',
     access_type: 'offline',
