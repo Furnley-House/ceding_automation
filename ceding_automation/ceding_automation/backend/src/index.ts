@@ -43,6 +43,11 @@ app.use(
 const limiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 200,
+  // BFF write-back is server-to-server (X-Internal-Key auth) and bursts
+  // 66 requests per doc per submission (65 field PATCHes + 1 doc-level).
+  // Multi-doc cases (3-4 docs) blew the shared human-IP budget and 429'd.
+  // Internal routes are already guarded by requireInternalKey middleware.
+  skip: (req) => !!req.headers["x-internal-key"],
 });
 app.use(limiter);
 
