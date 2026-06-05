@@ -1,8 +1,7 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { CaseRow } from "@/lib/caseHelpers";
-import { providers as seedProviders, type Provider } from "@/data/seedData";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -20,27 +19,41 @@ import {
 
 type Method = "origo" | "email" | "courier";
 
+// DB Provider shape (camelCase, as returned by GET /api/cases/:id under
+// caseItem.provider). Pinned to the fields this component reads — the
+// backend may return additional fields we ignore.
+type DbProvider = {
+  id: string;
+  name: string;
+  emailMain: string | null;
+  emailCedingDept: string | null;
+  phoneMain: string | null;
+  phoneCedingDept: string | null;
+  postalAddress: string | null;
+  loaFormat: string;
+  isOnOrigo: boolean;
+  planTypePrefixes: string[];
+  notes: string | null;
+  isActive: boolean;
+};
+
 interface Props {
   caseItem: CaseRow;
 }
 
-function findProvider(name: string): Provider | undefined {
-  const n = name.trim().toLowerCase();
-  return seedProviders.find(
-    (p) =>
-      p.name.toLowerCase() === n ||
-      p.aliases.some((a) => a.toLowerCase() === n),
-  );
-}
-
-function pickRoutingEmail(provider: Provider | undefined, planRef: string | null) {
+// Resolve the LOA "to" address from the DB provider row. Prefers the
+// ceding-team mailbox when populated, falls back to the general mailbox.
+// planRef is kept for forward-compat — a future Provider.routingRules
+// column would let us re-introduce per-prefix routing without changing
+// this signature.
+function pickRoutingEmail(provider: DbProvider | null, _planRef: string | null) {
   if (!provider) return { email: null as string | null, department: null as string | null };
-  const ref = (planRef ?? "").toUpperCase().trim();
-  if (ref) {
-    const match = provider.routingRules.find((r) => ref.startsWith(r.planPrefix.toUpperCase()));
-    if (match?.email) return { email: match.email, department: match.department };
-  }
-  return { email: provider.email, department: "General" };
+  const cedingEmail = provider.emailCedingDept ?? null;
+  const generalEmail = provider.emailMain ?? null;
+  return {
+    email: cedingEmail ?? generalEmail,
+    department: cedingEmail ? "Ceding / Transfers" : "General",
+  };
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -52,13 +65,17 @@ const STATUS_LABEL: Record<string, string> = {
 
 export function SendLOAWorkspace({ caseItem }: Props) {
   const qc = useQueryClient();
-  const provider = useMemo(() => findProvider(caseItem.Provider_group), [caseItem.Provider_group]);
+  // Provider comes from the joined DB row (case.provider include) — see
+  // backend routes/cases.ts GET /:id. Can be null (no providerId) or a
+  // bare auto-created placeholder with all routing fields null.
+  const provider: DbProvider | null =
+    (caseItem as unknown as { provider?: DbProvider | null }).provider ?? null;
   const planRef = (caseItem as any).plan_ref ?? caseItem.plan_number ?? null;
-  const routing = useMemo(() => pickRoutingEmail(provider, planRef), [provider, planRef]);
+  const routing = pickRoutingEmail(provider, planRef);
 
   const initialMethod: Method =
     ((caseItem as any).loa_method as Method) ??
-    (provider?.origoSupported ? "origo" : "email");
+    (provider?.isOnOrigo ? "origo" : "email");
   const [method, setMethod] = useState<Method>(initialMethod);
   const [trackingRef, setTrackingRef] = useState<string>(
     (caseItem as any).loa_tracking_ref ?? "",
@@ -110,12 +127,12 @@ ProviderHub`;
   // Use encodeURIComponent (not URLSearchParams) so spaces become %20 instead of "+".
   // Outlook Web's deeplink renders "+" literally in the body.
   const buildMailto = (body: string) => {
-    const to = routing.email ?? provider?.email ?? "";
+    const to = routing.email ?? provider?.emailMain ?? "";
     return `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   };
 
   const buildOutlookWebUrl = (body: string) => {
-    const to = routing.email ?? provider?.email ?? "";
+    const to = routing.email ?? provider?.emailMain ?? "";
     const qs =
       `path=${encodeURIComponent("/mail/action/compose")}` +
       `&to=${encodeURIComponent(to)}` +
@@ -206,9 +223,9 @@ ProviderHub`;
         <MethodTile
           icon={Globe}
           title="Origo"
-          subtitle={provider?.origoSupported ? "Recommended for this provider" : "Not supported by provider"}
+          subtitle={provider?.isOnOrigo ? "Recommended for this provider" : "Not supported by provider"}
           active={method === "origo"}
-          disabled={!provider?.origoSupported}
+          disabled={!provider?.isOnOrigo}
           onClick={() => setMethod("origo")}
         />
         <MethodTile
@@ -326,7 +343,7 @@ function OrigoPanel({
   onReceived,
   pending,
 }: {
-  provider: Provider | undefined;
+  provider: DbProvider | null;
   trackingRef: string;
   setTrackingRef: (v: string) => void;
   notes: string;
@@ -336,7 +353,7 @@ function OrigoPanel({
   onReceived: () => void;
   pending: boolean;
 }) {
-  if (!provider?.origoSupported) {
+  if (!provider?.isOnOrigo) {
     return (
       <div className="rounded-md border border-dashed border-border bg-muted/20 p-6 text-center">
         <p className="text-sm text-foreground font-semibold">
@@ -370,16 +387,9 @@ function OrigoPanel({
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           </Button>
-          {provider.portalUrl && (
-            <a
-              href={provider.portalUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 text-xs text-teal hover:underline"
-            >
-              Provider portal <ExternalLink className="h-3 w-3" />
-            </a>
-          )}
+          {/* portalUrl link removed — DB Provider model has no equivalent
+              field today. If a portalUrl column is added later, restore
+              the conditional <a> link here. */}
         </div>
         <p className="text-[11px] text-muted-foreground mt-1">
           Submit the LOA on Unipass, then paste the Origo reference below.
@@ -446,7 +456,7 @@ function EmailPanel({
   onReceived,
   pending,
 }: {
-  provider: Provider | undefined;
+  provider: DbProvider | null;
   routing: { email: string | null; department: string | null };
   planRef: string | null;
   subject: string;
