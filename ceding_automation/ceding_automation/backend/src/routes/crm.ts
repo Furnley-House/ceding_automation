@@ -4,6 +4,7 @@ import { PrismaClient, CaseStatus, PlanType, Prisma } from '@prisma/client';
 import { requireAuth } from '../middleware/auth';
 import * as zoho from '../services/zohoCrm';
 import { mapZohoTaskToCase, lookupParaplannerFromContact } from '../services/zohoCrm';
+import { generateNextCaseRef } from '../services/caseRef';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -234,9 +235,10 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
       });
     }
 
-    // 6. Create the case
-    const count = await prisma.case.count();
-    const caseRef = `FH-${new Date().getFullYear()}-${String(count + 1).padStart(6, '0')}`;
+    // 6. Create the case — caseRef via the shared helper (services/caseRef.ts)
+    // so this path uses the same max-suffix logic as the manual new-case form
+    // (avoids count-based collisions when prior cases have been deleted).
+    const caseRef = await generateNextCaseRef(prisma);
 
     const newCase = await prisma.case.create({
       data: {
