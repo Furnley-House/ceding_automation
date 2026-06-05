@@ -274,7 +274,18 @@ router.get(
       res.json({ files });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to list WorkDrive files";
-      console.error("[calls] workdrive list error:", msg);
+      // Surface Zoho's actual error body (folder/permission/team-id details)
+      // when present — the bare axios "status code 500" message hides
+      // everything useful. Log SERVER-SIDE only; the client response shape
+      // stays {error: msg} so no Zoho internals leak through the API.
+      const respStatus = (err as any)?.response?.status;
+      const respData = (err as any)?.response?.data;
+      console.error(
+        "[calls] workdrive list error:",
+        msg,
+        respStatus !== undefined ? `zohoStatus=${respStatus}` : "",
+        respData !== undefined ? `zohoBody=${typeof respData === "string" ? respData : JSON.stringify(respData)}` : "",
+      );
       res.status(500).json({ error: msg });
     }
   }
