@@ -303,30 +303,122 @@ export async function listCallRecordingsWithToken(
   throw lastErr ?? new Error('Failed to fetch recordings from RingCentral');
 }
 
-// ── Send an audio buffer directly to Azure Whisper ────────────────────────
-export async function transcribeAudioBuffer(audioBuffer: Buffer, filename: string = 'recording.mp3'): Promise<{ transcript: string | null; error?: string }> {
-  const whisperDeployment = process.env.AZURE_OPENAI_WHISPER_DEPLOYMENT ?? 'whisper';
-  const azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
-  const azureApiKey = process.env.AZURE_OPENAI_API_KEY;
+// ── Azure AI Speech — Fast Transcription endpoint constants ───────────────
+// Speech "Fast Transcription" is a synchronous batch endpoint: one POST,
+// diarization built in, returns the full result without polling. Calls are
+// typically minutes long so the sync model fits cleanly.
+const SPEECH_API_VERSION = '2024-11-15';
+const speechTranscribeUrl = (region: string) =>
+  `https://${region}.api.cognitive.microsoft.com/speechtotext/transcriptions:transcribe?api-version=${SPEECH_API_VERSION}`;
 
-  if (!azureEndpoint || !azureApiKey || azureApiKey.startsWith('your-') || azureEndpoint.includes('YOUR_RESOURCE')) {
-    return { transcript: null, error: 'Azure OpenAI not configured' };
+// Speech response shapes (only the fields we read).
+interface SpeechPhrase {
+  channel?: number;
+  speaker?: number;       // 1, 2, ... when diarization is enabled
+  offsetMilliseconds?: number;
+  durationMilliseconds?: number;
+  text?: string;
+}
+interface SpeechCombinedPhrase {
+  channel?: number;
+  text?: string;
+}
+interface SpeechResponse {
+  combinedPhrases?: SpeechCombinedPhrase[];
+  phrases?: SpeechPhrase[];
+}
+
+// Map diarized speaker number → human label. Convention: the FIRST speaker
+// heard in the recording is the Agent (RC RingOut is agent-initiated), the
+// second is the Provider. We discover the assignment from the phrase stream
+// rather than hard-coding `1 → Agent` because Speech can pick either id for
+// the first voice depending on signal quality.
+function buildSpeakerLabels(phrases: SpeechPhrase[]): Map<number, string> {
+  const order: number[] = [];
+  for (const p of phrases) {
+    if (typeof p.speaker === 'number' && !order.includes(p.speaker)) {
+      order.push(p.speaker);
+    }
+  }
+  const roles = ['Agent', 'Provider'];
+  const labels = new Map<number, string>();
+  order.forEach((spk, i) => labels.set(spk, roles[i] ?? `Speaker ${spk}`));
+  return labels;
+}
+
+// Flatten diarized response → labelled flat string. Preserves the
+// `{transcript, error}` contract so no downstream consumer changes.
+function flattenSpeechResponse(data: SpeechResponse): string | null {
+  const phrases = (data.phrases ?? []).filter((p) => p.text && p.text.trim().length > 0);
+  if (phrases.length > 0) {
+    const labels = buildSpeakerLabels(phrases);
+    return phrases
+      .map((p) => {
+        const role = typeof p.speaker === 'number' ? (labels.get(p.speaker) ?? `Speaker ${p.speaker}`) : 'Speaker';
+        return `${role}: ${p.text!.trim()}`;
+      })
+      .join('\n')
+      .trim() || null;
+  }
+  // No diarized phrases — fall back to combined text (no speaker labels possible).
+  const combined = (data.combinedPhrases ?? [])
+    .map((c) => c.text?.trim() ?? '')
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  return combined.length > 0 ? combined : null;
+}
+
+// ── Send an audio buffer to Azure AI Speech Fast Transcription ────────────
+// Returns the EXACT SAME shape Whisper used to return (`{transcript, error}`)
+// so routes, frontend state, analyseTranscript, and the Transcript DB column
+// all keep working unchanged. Diarization is inlined into the flat string as
+// "Agent: …\nProvider: …" lines.
+export async function transcribeAudioBuffer(audioBuffer: Buffer, filename: string = 'recording.mp3'): Promise<{ transcript: string | null; error?: string }> {
+  const speechKey = process.env.AZURE_SPEECH_KEY;
+  const speechRegion = process.env.AZURE_SPEECH_REGION;
+
+  if (!speechKey || !speechRegion || speechKey.startsWith('your-') || speechRegion.startsWith('your-')) {
+    return { transcript: null, error: 'Azure AI Speech not configured (set AZURE_SPEECH_KEY + AZURE_SPEECH_REGION)' };
   }
 
-  const endpoint = azureEndpoint.replace(/\/$/, '');
-  const url = `${endpoint}/openai/deployments/${whisperDeployment}/audio/transcriptions?api-version=2024-06-01`;
+  const url = speechTranscribeUrl(speechRegion);
 
   const FormData = (await import('form-data')).default;
   const form = new FormData();
-  form.append('file', audioBuffer, { filename, contentType: 'audio/mpeg' });
-  form.append('model', whisperDeployment);
-  form.append('response_format', 'text');
+  form.append('audio', audioBuffer, { filename, contentType: 'audio/mpeg' });
+  form.append(
+    'definition',
+    JSON.stringify({
+      locales: ['en-GB'],
+      profanityFilterMode: 'None',
+      diarization: { enabled: true, maxSpeakers: 2 },
+      channels: [0],
+    }),
+    { contentType: 'application/json' },
+  );
 
-  const resp = await axios.post(url, form, {
-    headers: { 'api-key': azureApiKey, ...form.getHeaders() },
-  });
-  const text = typeof resp.data === 'string' ? resp.data.trim() : (resp.data as any)?.text ?? null;
-  return { transcript: text || null };
+  try {
+    const resp = await axios.post<SpeechResponse>(url, form, {
+      headers: { 'Ocp-Apim-Subscription-Key': speechKey, ...form.getHeaders() },
+      // Speech caps Fast Transcription payloads (~300MB) and runs synchronously;
+      // a 30-min call typically returns inside ~30s, so 120s is a safe upper bound.
+      timeout: 120_000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+
+    const transcript = flattenSpeechResponse(resp.data);
+    if (!transcript) {
+      return { transcript: null, error: 'Speech returned no recognised text' };
+    }
+    return { transcript };
+  } catch (err: unknown) {
+    const status = (err as any)?.response?.status;
+    const body = (err as any)?.response?.data;
+    const msg = body?.error?.message || body?.message || (err instanceof Error ? err.message : String(err));
+    return { transcript: null, error: `Speech transcription failed${status ? ` (HTTP ${status})` : ''}: ${msg}` };
+  }
 }
 
 // ── Transcribe a recording from RC media server (downloads + sends to Whisper) ──
