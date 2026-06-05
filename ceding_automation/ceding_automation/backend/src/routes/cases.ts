@@ -18,15 +18,15 @@ const prisma = new PrismaClient();
 // ── Create Case ─────────────────────────────────────────
 const CreateCaseSchema = z.object({
   clientName: z.string().min(1),
-  clientZohoId: z.string().optional(),
+  clientZohoId: z.string().nullish(),
   planType: z.nativeEnum(PlanType),
-  policyRef: z.string().optional(),
-  planNumber: z.string().optional(),    // alias for policyRef
-  providerId: z.string().optional(),
-  providerName: z.string().optional(),  // resolve to providerId if not given
-  zohoTaskId: z.string().optional(),
-  caseNotes: z.string().optional(),
-  zohoCaseId: z.string().optional(),
+  policyRef: z.string().nullish(),
+  planNumber: z.string().nullish(),    // alias for policyRef
+  providerId: z.string().nullish(),
+  providerName: z.string().nullish(),  // resolve to providerId if not given
+  zohoTaskId: z.string().nullish(),
+  caseNotes: z.string().nullish(),
+  zohoCaseId: z.string().nullish(),
 });
 
 router.post("/", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Request, res: Response) => {

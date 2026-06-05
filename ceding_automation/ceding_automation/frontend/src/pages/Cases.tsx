@@ -140,13 +140,13 @@ const Cases = () => {
     createMutation.mutate({
       case_ref: generateCaseRef(form.plan_type),
       client_name: form.client_name,
-      Provider_group: form.Provider_group,
+      provider_name: form.Provider_group,
       plan_number: form.plan_number,
       plan_type: form.plan_type,
       status: "pending_loa",
       owner_name: userName ?? null,
-      zoho_task_id: form.zoho_task_id || null,
-      case_notes: form.case_notes || null,
+      ...(form.zoho_task_id ? { zoho_task_id: form.zoho_task_id } : {}),
+      ...(form.case_notes ? { case_notes: form.case_notes } : {}),
       current_stage: 1,
     } as any);
   };
