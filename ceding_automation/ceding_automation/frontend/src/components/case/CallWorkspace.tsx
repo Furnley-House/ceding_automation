@@ -660,19 +660,20 @@ export function CallWorkspace({
           setPhase("ended");
           setRcTranscriptStatus("done");
           toast.success("Transcript ready", { id: t, description: "Review and click Analyse." });
-          return;
+        } else {
+          // Azure not configured — tell the user clearly, don't try RC AI STT
+          toast.warning("Azure Whisper not configured", {
+            id: t,
+            description: error?.includes("not configured")
+              ? "Ask your admin to set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env — then transcription will be automatic."
+              : (error ?? "Transcription failed — paste the transcript manually."),
+          });
         }
-        // Azure not configured — tell the user clearly, don't try RC AI STT
-        toast.warning("Azure Whisper not configured", {
-          id: t,
-          description: error?.includes("not configured")
-            ? "Ask your admin to set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env — then transcription will be automatic."
-            : (error ?? "Transcription failed — paste the transcript manually."),
-        });
       } catch {
         toast.error("Transcription failed", { id: t, description: "Paste the transcript manually below." });
+      } finally {
+        setFetchingTranscriptFor(null);
       }
-      setFetchingTranscriptFor(null);
       return;
     }
 
@@ -1242,7 +1243,7 @@ export function CallWorkspace({
               )}
               {rcTranscriptStatus === "done" && (
                 <p className="text-[10px] text-success font-medium">
-                  ✓ Transcript fetched from RingCentral
+                  ✓ Transcript generated from recording
                 </p>
               )}
               {/* Show fetch button if RC widget is logged in and we have a session ID,

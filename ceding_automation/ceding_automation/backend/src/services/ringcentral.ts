@@ -421,16 +421,34 @@ export async function transcribeAudioBuffer(audioBuffer: Buffer, filename: strin
   }
 }
 
-// ── Transcribe a recording from RC media server (downloads + sends to Whisper) ──
+// ── Transcribe a recording from RC media server (downloads + sends to Speech) ──
+// Defensive 60s timeout on the RC media download so a slow/hanging media server
+// (recording not yet ready, demo-plan throttling, transient network) can't keep
+// the request open past the Container Apps ingress idle window. Errors here
+// surface as normal Promise rejections caught by the calling route's try/catch
+// — same path as any other transcription failure.
 export async function transcribeRecordingWithToken(
   contentUri: string,
   bearerToken: string
 ): Promise<{ transcript: string | null; error?: string }> {
-  const audioResp = await axios.get(contentUri, {
-    headers: { Authorization: `Bearer ${bearerToken}` },
-    responseType: 'arraybuffer',
-  });
-  return transcribeAudioBuffer(Buffer.from(audioResp.data as ArrayBuffer), 'recording.mp3');
+  try {
+    const audioResp = await axios.get(contentUri, {
+      headers: { Authorization: `Bearer ${bearerToken}` },
+      responseType: 'arraybuffer',
+      timeout: 60_000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+    return transcribeAudioBuffer(Buffer.from(audioResp.data as ArrayBuffer), 'recording.mp3');
+  } catch (err: unknown) {
+    const status = (err as any)?.response?.status;
+    const code = (err as any)?.code;
+    const msg = err instanceof Error ? err.message : String(err);
+    const reason = code === 'ECONNABORTED'
+      ? 'RC media download timed out after 60s'
+      : `RC media download failed${status ? ` (HTTP ${status})` : ''}: ${msg}`;
+    return { transcript: null, error: reason };
+  }
 }
 
 // Uses server-side JWT — no user token required. Reuses the same multi-source logic.
