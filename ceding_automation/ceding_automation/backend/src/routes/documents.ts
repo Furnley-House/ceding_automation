@@ -569,6 +569,10 @@ router.get(
 // ── BFF write-back: document-level status update ───────────────────
 // Mounted at /api/documents/:documentId. Called by the BFF only.
 // Contract: docs/ai-integration-design.md §4(b).
+// Contract is intentionally lenient on optional metadata blocks:
+// detected_provider / llm_call_meta are passed through from the pipeline whose
+// model shapes evolve independently. We pin only the fields we actually consume
+// downstream; anything else is accepted-and-ignored via .passthrough().
 const aiDocWriteBackSchema = z.object({
   job_id: z.string().regex(/^bff-[0-9a-f]{8,16}$/),
   status: z.enum(["queued", "processing", "completed", "failed"]),
@@ -581,18 +585,26 @@ const aiDocWriteBackSchema = z.object({
   page_count: z.number().int().positive().optional(),
   detected_provider: z
     .object({
-      name: z.string(),
-      canonical: z.string(),
-      confidence: z.enum(["HIGH", "MEDIUM", "LOW"]),
+      name: z.string().optional(),
+      canonical: z.string().optional(),
+      confidence: z.string().optional(),
     })
-    .optional(),
-  detected_plan_type: z.string().optional(),
+    .passthrough()
+    .optional()
+    .nullable(),
+  detected_plan_type: z.string().optional().nullable(),
   llm_call_meta: z
     .object({
-      total_tokens: z.number().int().nonnegative(),
-      total_cost_usd: z.number().nonnegative(),
+      // Backend only reads total_tokens + total_cost_usd. Both optional —
+      // pipeline's per-stage LLMCallMeta uses prompt_tokens/completion_tokens
+      // and may omit the rolled-up totals entirely. The PATCH handler guards
+      // with `if (body.llm_call_meta?.total_tokens != null)` style checks.
+      total_tokens: z.number().int().nonnegative().optional(),
+      total_cost_usd: z.number().nonnegative().optional(),
     })
-    .optional(),
+    .passthrough()
+    .optional()
+    .nullable(),
 });
 
 function bffStatusToDocumentStatus(s: string): DocumentStatus {
@@ -656,10 +668,12 @@ internalRouter.patch(
       updateData.errorMessage = body.error;
     }
     if (body.llm_call_meta) {
-      updateData.aiJobCostUsd = new Prisma.Decimal(
-        body.llm_call_meta.total_cost_usd
-      );
-      updateData.aiJobTokens = body.llm_call_meta.total_tokens;
+      if (body.llm_call_meta.total_cost_usd != null) {
+        updateData.aiJobCostUsd = new Prisma.Decimal(body.llm_call_meta.total_cost_usd);
+      }
+      if (body.llm_call_meta.total_tokens != null) {
+        updateData.aiJobTokens = body.llm_call_meta.total_tokens;
+      }
     }
     if (isTerminal && !doc.aiJobCompletedAt) {
       updateData.aiJobCompletedAt = completedAtFromBody;
