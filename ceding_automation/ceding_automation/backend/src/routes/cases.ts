@@ -49,9 +49,16 @@ router.post("/", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Req
     data.providerId = provider.id;
   }
 
-  // Generate case ref
-  const count = await prisma.case.count();
-  const caseRef = `FH-${new Date().getFullYear()}-${String(count + 1).padStart(6, "0")}`;
+  // Generate case ref — use MAX(existing suffix) + 1 so deletions don't cause
+  // collisions. Sorting by caseRef desc works because the FH-YYYY-NNNNNN format
+  // is lexicographically ordered.
+  const latest = await prisma.case.findFirst({
+    orderBy: { caseRef: "desc" },
+    select: { caseRef: true },
+  });
+  const lastSeq = latest ? parseInt(latest.caseRef.split("-").pop() ?? "0", 10) : 0;
+  const nextSeq = Number.isFinite(lastSeq) ? lastSeq + 1 : 1;
+  const caseRef = `FH-${new Date().getFullYear()}-${String(nextSeq).padStart(6, "0")}`;
 
   const newCase = await prisma.case.create({
     data: {
