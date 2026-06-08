@@ -19,20 +19,20 @@ import {
 
 type Method = "origo" | "email" | "courier";
 
-// DB Provider shape (camelCase, as returned by GET /api/cases/:id under
-// caseItem.provider). Pinned to the fields this component reads — the
-// backend may return additional fields we ignore.
+// DB Provider shape as it reaches this component (snake_case — the API
+// returns camelCase but services/api.ts:getCaseById runs the response
+// through a recursive snakeKeys() before it gets here).
 type DbProvider = {
   id: string;
   name: string;
-  emailMain: string | null;
-  emailCedingDept: string | null;
-  phoneMain: string | null;
-  phoneCedingDept: string | null;
-  postalAddress: string | null;
-  loaFormat: string;
-  isOnOrigo: boolean;
-  planTypePrefixes: string[];
+  email_main: string | null;
+  email_ceding_dept: string | null;
+  phone_main: string | null;
+  phone_ceding_dept: string | null;
+  postal_address: string | null;
+  loa_format: string;
+  is_on_origo: boolean;
+  plan_type_prefixes: string[];
   notes: string | null;
   isActive: boolean;
 };
@@ -48,8 +48,8 @@ interface Props {
 // this signature.
 function pickRoutingEmail(provider: DbProvider | null, _planRef: string | null) {
   if (!provider) return { email: null as string | null, department: null as string | null };
-  const cedingEmail = provider.emailCedingDept ?? null;
-  const generalEmail = provider.emailMain ?? null;
+  const cedingEmail = provider.email_ceding_dept ?? null;
+  const generalEmail = provider.email_main ?? null;
   return {
     email: cedingEmail ?? generalEmail,
     department: cedingEmail ? "Ceding / Transfers" : "General",
@@ -75,7 +75,7 @@ export function SendLOAWorkspace({ caseItem }: Props) {
 
   const initialMethod: Method =
     ((caseItem as any).loa_method as Method) ??
-    (provider?.isOnOrigo ? "origo" : "email");
+    (provider?.is_on_origo ? "origo" : "email");
   const [method, setMethod] = useState<Method>(initialMethod);
   const [trackingRef, setTrackingRef] = useState<string>(
     (caseItem as any).loa_tracking_ref ?? "",
@@ -127,12 +127,12 @@ ProviderHub`;
   // Use encodeURIComponent (not URLSearchParams) so spaces become %20 instead of "+".
   // Outlook Web's deeplink renders "+" literally in the body.
   const buildMailto = (body: string) => {
-    const to = routing.email ?? provider?.emailMain ?? "";
+    const to = routing.email ?? provider?.email_main ?? "";
     return `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   };
 
   const buildOutlookWebUrl = (body: string) => {
-    const to = routing.email ?? provider?.emailMain ?? "";
+    const to = routing.email ?? provider?.email_main ?? "";
     const qs =
       `path=${encodeURIComponent("/mail/action/compose")}` +
       `&to=${encodeURIComponent(to)}` +
@@ -223,9 +223,9 @@ ProviderHub`;
         <MethodTile
           icon={Globe}
           title="Origo"
-          subtitle={provider?.isOnOrigo ? "Recommended for this provider" : "Not supported by provider"}
+          subtitle={provider?.is_on_origo ? "Recommended for this provider" : "Not supported by provider"}
           active={method === "origo"}
-          disabled={!provider?.isOnOrigo}
+          disabled={!provider?.is_on_origo}
           onClick={() => setMethod("origo")}
         />
         <MethodTile
@@ -353,7 +353,7 @@ function OrigoPanel({
   onReceived: () => void;
   pending: boolean;
 }) {
-  if (!provider?.isOnOrigo) {
+  if (!provider?.is_on_origo) {
     return (
       <div className="rounded-md border border-dashed border-border bg-muted/20 p-6 text-center">
         <p className="text-sm text-foreground font-semibold">
@@ -512,7 +512,7 @@ function EmailPanel({
             {usingFallback && (
               <p className="text-[11px] text-warning mt-1">
                 {planRef
-                  ? "No routing rule matched the policy prefix — using general provider email."
+                  ? "No ceding-team email on file — using the general provider email."
                   : "No policy reference — using general provider email."}
               </p>
             )}
