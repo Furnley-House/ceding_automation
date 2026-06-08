@@ -16,6 +16,7 @@ import {
   Copy,
   RotateCw,
 } from "lucide-react";
+import { ProviderPicker } from "./ProviderPicker";
 
 type Method = "origo" | "email" | "courier";
 
@@ -277,6 +278,13 @@ ProviderHub`;
           onProcessed={markProcessed}
           onReceived={markReceived}
           pending={updateMutation.isPending}
+          onChangeProvider={(providerId) => {
+            if (providerId === provider?.id) return;
+            updateMutation.mutate(
+              { providerId },
+              { onSuccess: () => toast.success("Provider re-linked — routing updated") },
+            );
+          }}
         />
       )}
 
@@ -455,6 +463,7 @@ function EmailPanel({
   onProcessed,
   onReceived,
   pending,
+  onChangeProvider,
 }: {
   provider: DbProvider | null;
   routing: { email: string | null; department: string | null };
@@ -472,6 +481,7 @@ function EmailPanel({
   onProcessed: () => void;
   onReceived: () => void;
   pending: boolean;
+  onChangeProvider: (providerId: string) => void;
 }) {
   const [body, setBody] = useState(initialBody);
   const [activeTab, setActiveTab] = useState<"initial" | "followup">("initial");
@@ -482,13 +492,20 @@ function EmailPanel({
     <div className="space-y-3 rounded-md border border-border bg-card p-4">
       {/* Recipient resolution */}
       <div className="rounded-md bg-muted/30 border border-border p-3">
-        <p className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground mb-2">
-          Recipient (resolved from Provider Directory)
-        </p>
+        <div className="flex items-center justify-between mb-2 gap-2">
+          <p className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground">
+            Recipient (resolved from Provider Directory)
+          </p>
+          <ProviderPicker
+            currentProviderId={provider?.id ?? null}
+            onPick={onChangeProvider}
+            disabled={pending}
+          />
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
           <div>
             <p className="text-[10px] uppercase text-muted-foreground">Provider</p>
-            <p className="text-foreground">{provider?.name ?? "Unknown — add to directory"}</p>
+            <p className="text-foreground">{provider?.name ?? "No provider linked — use 'Change provider' to select one."}</p>
           </div>
           <div>
             <p className="text-[10px] uppercase text-muted-foreground">Department</p>

@@ -641,9 +641,14 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   const mapping = mapZohoTaskToCase(taskRecord);
 
   // 3a. Resolve provider from name → ID (only if the name has actually changed)
+  // Sticky operator pick (Fix 2): only auto-replace from Zoho when no provider
+  // is linked yet. After the operator uses the Stage 2 picker (or after import
+  // set the link), Zoho-side provider edits don't auto-flow — the operator
+  // re-picks in the app.
   let resolvedProviderId: string | null = caseRecord.providerId;
   const currentProviderName = caseRecord.provider?.name ?? null;
   if (
+    caseRecord.providerId === null &&
     mapping.providerName &&
     mapping.providerName.trim().toLowerCase() !==
       (currentProviderName ?? "").trim().toLowerCase()

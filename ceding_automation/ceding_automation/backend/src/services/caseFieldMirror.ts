@@ -84,6 +84,12 @@ export async function mirrorChecklistToCase(
     switch (fieldKey) {
       case "provider_name": {
         const trimmed = value.trim();
+        // Sticky operator pick (Fix 2): the case-level provider link is
+        // operator-owned via the Stage 2 picker. The checklist provider_name
+        // field still records what the document said, but the case link no
+        // longer follows it. First-time population still works because newly
+        // created cases without a provider start with providerId === null.
+        if (caseRow.providerId !== null) return { changed: false };
         // Already linked to a provider with this name? skip.
         if (
           caseRow.provider?.name?.toLowerCase() === trimmed.toLowerCase()
