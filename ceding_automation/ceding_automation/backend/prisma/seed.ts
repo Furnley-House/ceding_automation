@@ -201,6 +201,10 @@ async function main() {
   });
 
   // ── DEMO USERS (one per role) ───────────────────────
+  // Paraplanner is the real Furnley House paraplanner (Megan Doherty) so
+  // the approval / review flow can be tested against a CRM-matched account.
+  // The legacy "Emma Clarke" dummy is kept in the DB as INACTIVE (so any
+  // historical refs still resolve) — see scripts/replaceEmmaWithMegan.ts.
   const demoUsers = [
     { email: "admin@furnleyhouse.co.uk", name: "Nicki Foster", role: UserRole.ADMIN },
     // Default CA Team user (used by the role picker). Aligns with the real CRM user
@@ -208,17 +212,24 @@ async function main() {
     { email: "revathy.s@furnleyhouse.co.uk", name: "Revathy S", role: UserRole.CA_TEAM },
     // Secondary CA Team user kept for multi-CA testing.
     { email: "ca@furnleyhouse.co.uk", name: "Priya Ramesh", role: UserRole.CA_TEAM },
-    { email: "paraplanner@furnleyhouse.co.uk", name: "Emma Clarke", role: UserRole.PARAPLANNER },
+    // Real paraplanner from the Furnley House team (replaced the Emma Clarke dummy).
+    { email: "megan.doherty@furnleyhouse.co.uk", name: "Megan Doherty", role: UserRole.PARAPLANNER },
     { email: "adviser@furnleyhouse.co.uk", name: "James Whitfield", role: UserRole.ADVISER },
     { email: "srinath.k@furnleyhouse.co.uk", name: "Srinath K", role: UserRole.CA_TEAM },
   ];
   for (const u of demoUsers) {
     await prisma.user.upsert({
       where: { email: u.email },
-      update: { name: u.name },
+      update: { name: u.name, status: "ACTIVE" },
       create: { email: u.email, name: u.name, role: u.role },
     });
   }
+  // Demote the old dummy paraplanner so auto-assign + role picker don't
+  // surface her. Safe re-run: no-op if she's not present.
+  await prisma.user.updateMany({
+    where: { email: "paraplanner@furnleyhouse.co.uk" },
+    data: { status: "INACTIVE" },
+  });
 
   // ── PROVIDER DIRECTORY ──────────────────────────────
   // Source: "Provider Contact details test.xlsx" (contact info)

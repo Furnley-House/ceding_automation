@@ -137,7 +137,7 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
     //     match the value to an active app user (by email then by name).
     //     For testing: when the Contact has no paraplanner set OR the lookup
     //     fails (e.g. missing scope), fall back to the first PARAPLANNER user
-    //     in the system (Emma Clarke in the demo seed).
+    //     in the system (Megan Doherty in the demo seed).
     let paralPlannerId: string | null = null;
     let paraplannerResolution:
       | 'contact-email'

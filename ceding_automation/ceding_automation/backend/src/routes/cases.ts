@@ -203,7 +203,7 @@ function isAwaitingReview(s: CaseStatus | undefined | null): boolean {
 
 // Returns the paraplanner id that should own the review. If the case
 // already has one, keep it. Otherwise pick the first active PARAPLANNER
-// user (Emma Clarke in the demo seed) and patch the update payload to
+// user (Megan Doherty in the demo seed) and patch the update payload to
 // connect them.
 async function ensureParaplannerForReview(
   caseId: string,

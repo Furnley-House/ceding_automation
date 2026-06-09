@@ -13,7 +13,7 @@ const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:3001/api";
 // `ca_team` resolves to Revathy S so it lines up with the real Zoho task owner.
 const ROLE_EMAILS: Record<Role, string> = {
   ca_team: "revathy.s@furnleyhouse.co.uk",
-  paraplanner: "paraplanner@furnleyhouse.co.uk",
+  paraplanner: "megan.doherty@furnleyhouse.co.uk",
   adviser: "adviser@furnleyhouse.co.uk",
   admin: "admin@furnleyhouse.co.uk",
 };

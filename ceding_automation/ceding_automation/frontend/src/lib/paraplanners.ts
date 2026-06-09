@@ -1,6 +1,14 @@
-// Stable paraplanner records used for assignment and in-app notifications.
+// Display/decorative metadata for paraplanners. Real per-case paraplanner
+// link is resolved backend-side via Case.paralPlannerId; this list is just
+// for chips, initials, and workload colour-coding on the dashboard.
+//
+// `email` is the cross-environment-stable key.
+// `user_id` is a placeholder retained only for AssignParaplannerDialog
+// (currently dead code — never imported). Don't depend on it matching a
+// real DB row; staging / prod have different cuids per env.
 export interface Paraplanner {
-  user_id: string;
+  email: string;
+  user_id: string; // placeholder for legacy dialog only — do not query against DB
   full_name: string;
   initials: string;
   workload: number;
@@ -9,21 +17,25 @@ export interface Paraplanner {
 
 export const PARAPLANNERS: Paraplanner[] = [
   {
-    user_id: "11111111-1111-1111-1111-111111111111",
-    full_name: "Emma Clarke",
-    initials: "EC",
+    // Real Furnley House paraplanner — primary reviewer for ceding cases.
+    email: "megan.doherty@furnleyhouse.co.uk",
+    user_id: "megan-placeholder",
+    full_name: "Megan Doherty",
+    initials: "MD",
     workload: 4,
-    specialism: "DB transfers · safeguarded benefits",
+    specialism: "Pension · ISA · GIA ceding cases",
   },
   {
-    user_id: "22222222-2222-2222-2222-222222222222",
+    email: "daniel.okonkwo@furnleyhouse.co.uk",
+    user_id: "daniel-placeholder",
     full_name: "Daniel Okonkwo",
     initials: "DO",
     workload: 7,
     specialism: "SIPP & personal pensions",
   },
   {
-    user_id: "33333333-3333-3333-3333-333333333333",
+    email: "sophie.bennett@furnleyhouse.co.uk",
+    user_id: "sophie-placeholder",
     full_name: "Sophie Bennett",
     initials: "SB",
     workload: 2,
@@ -31,7 +43,8 @@ export const PARAPLANNERS: Paraplanner[] = [
   },
 ];
 
-export function getParaplanner(userId: string | null | undefined): Paraplanner | undefined {
-  if (!userId) return undefined;
-  return PARAPLANNERS.find((p) => p.user_id === userId);
+export function getParaplannerByName(fullName: string | null | undefined): Paraplanner | undefined {
+  if (!fullName) return undefined;
+  const lower = fullName.trim().toLowerCase();
+  return PARAPLANNERS.find((p) => p.full_name.toLowerCase() === lower);
 }

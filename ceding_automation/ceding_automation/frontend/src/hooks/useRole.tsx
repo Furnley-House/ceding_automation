@@ -16,7 +16,7 @@ export const ROLE_LABELS: Record<Role, string> = {
 export const ROLE_USERS: Record<Role, string> = {
   ca_team: "Revathy S",
   adviser: "James Whitfield",
-  paraplanner: "Emma Clarke",
+  paraplanner: "Megan Doherty",
   admin: "Nicki Foster",
 };
 
