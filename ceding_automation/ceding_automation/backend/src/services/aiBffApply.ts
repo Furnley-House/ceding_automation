@@ -275,13 +275,26 @@ export async function applyExtractionResult(
           caseId: caseRow.id,
           planType: caseRow.planType,
           fundName: f.fundName || `Fund ${idx + 1}`,
-          numberOfUnits: f.units != null ? new Prisma.Decimal(f.units) : null,
-          pricePerUnit: f.price != null ? new Prisma.Decimal(f.price) : null,
-          value: f.value != null ? new Prisma.Decimal(f.value) : null,
+          // isin and sedol arrive as separate fields from the BFF; the Prisma
+          // column collapses them into one TEXT (isinSedolCiti). Prefer ISIN
+          // when present (more specific), fall back to SEDOL.
+          isinSedolCiti: f.isin ?? f.sedol ?? null,
+          numberOfUnits:
+            f.numberOfUnits != null ? new Prisma.Decimal(f.numberOfUnits) : null,
+          pricePerUnit:
+            f.pricePerUnit != null ? new Prisma.Decimal(f.pricePerUnit) : null,
+          value: f.valueGbp != null ? new Prisma.Decimal(f.valueGbp) : null,
+          fundCharge:
+            f.fundChargePercent != null
+              ? new Prisma.Decimal(f.fundChargePercent)
+              : null,
+          isWithProfits: f.isWithProfits ?? false,
+          // Honest per-row confidence from the LLM. Falls back to MISSING if
+          // the BFF omitted it — never invent HIGH.
+          confidence: f.confidence ?? "MISSING",
           sourceDocumentId: documentId,
           displayOrder: idx,
           status: "AI_EXTRACTED",
-          confidence: "HIGH",
         })),
       });
       await prisma.auditLog.create({

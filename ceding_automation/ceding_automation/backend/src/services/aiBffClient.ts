@@ -138,11 +138,21 @@ export interface BffJobResult {
     detectedProvider: { name: string; canonical: string; confidence: string };
     detectedPlanType: string;
     fields: BffExtractedField[];
+    // 9-field shape mirroring the BFF /result reshape (extract.py) and the
+    // pipeline's FundLine Pydantic model. Earlier 4-field stub
+    // (units/price/value) silently dropped ISIN/SEDOL/charge/with-profits/
+    // confidence; widened so the corresponding ChecklistFundLine columns
+    // (already present in the DB) actually get populated.
     fundLines: Array<{
       fundName: string;
-      units: number;
-      price: number;
-      value: number;
+      isin: string | null;
+      sedol: string | null;
+      numberOfUnits: number | null;
+      pricePerUnit: number | null;
+      valueGbp: number | null;
+      fundChargePercent: number | null;
+      isWithProfits: boolean;
+      confidence: BffConfidence;
     }>;
     withProfits: unknown;
     summary: {
@@ -255,9 +265,14 @@ interface RawBffResult {
     }>;
     fund_lines?: Array<{
       fund_name: string;
-      units: number;
-      price: number;
-      value: number;
+      isin: string | null;
+      sedol: string | null;
+      number_of_units: number | null;
+      price_per_unit: number | null;
+      value_gbp: number | null;
+      fund_charge_percent: number | null;
+      is_with_profits: boolean;
+      confidence: BffConfidence;
     }>;
     with_profits?: unknown;
     summary?: {
@@ -298,9 +313,14 @@ export async function getJobResult(jobId: string): Promise<BffJobResult> {
         })),
         fundLines: (data.response?.fund_lines ?? []).map((f) => ({
           fundName: f.fund_name,
-          units: f.units,
-          price: f.price,
-          value: f.value,
+          isin: f.isin ?? null,
+          sedol: f.sedol ?? null,
+          numberOfUnits: f.number_of_units ?? null,
+          pricePerUnit: f.price_per_unit ?? null,
+          valueGbp: f.value_gbp ?? null,
+          fundChargePercent: f.fund_charge_percent ?? null,
+          isWithProfits: f.is_with_profits ?? false,
+          confidence: f.confidence,
         })),
         withProfits: data.response?.with_profits ?? null,
         summary: {
