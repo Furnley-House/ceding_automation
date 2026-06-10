@@ -39,12 +39,28 @@ export interface ChecklistFieldState {
   comment?: string | null;
 }
 
+/** Two-candidate conflict pack passed down by ChecklistPanel for fields
+ *  in CONFLICT state. ChecklistField stays pure — no API knowledge here;
+ *  the parent supplies `onResolve` which closes over caseId + fieldId +
+ *  the refetch, and routes through the existing api.resolveConflict
+ *  wrapper. */
+export interface ConflictResolution {
+  existing: { value: string | null; docName: string | null; page: number | null };
+  incoming: { value: string | null; docName: string | null; page: number | null };
+  onResolve: (chosenValue: string) => Promise<void>;
+}
+
 interface Props {
   def: ChecklistFieldDef;
   state: ChecklistFieldState;
   onChange: (next: Partial<ChecklistFieldState>) => void;
   /** When provided, renders a "jump to source" button next to the field */
   onJumpToSource?: () => void;
+  /** When the field is in CONFLICT, renders an inline resolver panel
+   *  showing both candidate values + their provenance + "Use this value"
+   *  buttons. Undefined for non-conflicted fields (or if the parent
+   *  couldn't assemble the candidates — e.g. missing conflict_values). */
+  conflict?: ConflictResolution;
 }
 
 const CONF_META: Record<Confidence, { label: string; icon: React.ElementType; cls: string }> = {
@@ -55,13 +71,14 @@ const CONF_META: Record<Confidence, { label: string; icon: React.ElementType; cl
   CONFLICT: { label: "Conflicting sources", icon: AlertTriangle, cls: "bg-overdue/15 text-overdue border-overdue/40" },
 };
 
-export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) {
+export function ChecklistField({ def, state, onChange, onJumpToSource, conflict }: Props) {
   const { canEditChecklist, canApprove, userName } = useRole();
   const [localValue, setLocalValue] = useState(state.value ?? "");
   const [reviewOpen, setReviewOpen] = useState(false);
   const [commentOpen, setCommentOpen] = useState(false);
   const [reviewText, setReviewText] = useState("");
   const [commentText, setCommentText] = useState(state.comment ?? "");
+  const [resolving, setResolving] = useState(false);
 
   useEffect(() => setLocalValue(state.value ?? ""), [state.value]);
 
@@ -364,6 +381,33 @@ export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) 
         )}
       </div>
 
+      {state.confidence === "CONFLICT" && conflict && (
+        <div className="mt-3 pt-3 border-t border-overdue/30 space-y-2">
+          <p className="text-[11px] font-semibold text-foreground flex items-center gap-1">
+            <AlertTriangle className="h-3 w-3 text-overdue" />
+            Two sources disagree — pick a value
+          </p>
+          <ConflictCandidate
+            label="Existing"
+            candidate={conflict.existing}
+            disabled={resolving}
+            onPick={async (chosen) => {
+              setResolving(true);
+              try { await conflict.onResolve(chosen); } finally { setResolving(false); }
+            }}
+          />
+          <ConflictCandidate
+            label="New"
+            candidate={conflict.incoming}
+            disabled={resolving}
+            onPick={async (chosen) => {
+              setResolving(true);
+              try { await conflict.onResolve(chosen); } finally { setResolving(false); }
+            }}
+          />
+        </div>
+      )}
+
       {(state.evidenceSource || state.comment || state.originalAiValue) && (
         <div className="mt-2 pt-2 border-t border-border/60 space-y-1">
           {state.evidenceSource && (
@@ -385,6 +429,39 @@ export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) 
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+interface ConflictCandidateProps {
+  label: string;
+  candidate: { value: string | null; docName: string | null; page: number | null };
+  disabled: boolean;
+  onPick: (chosen: string) => Promise<void>;
+}
+
+function ConflictCandidate({ label, candidate, disabled, onPick }: ConflictCandidateProps) {
+  const displayValue = candidate.value ?? "(empty)";
+  const docLabel = candidate.docName ?? "another document";
+  const pageSuffix = candidate.page != null ? `, p.${candidate.page}` : "";
+  return (
+    <div className="flex items-start justify-between gap-3 px-3 py-2 rounded border border-overdue/30 bg-overdue/5">
+      <div className="min-w-0 flex-1">
+        <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</p>
+        <p className="text-sm font-semibold text-foreground break-words">{displayValue}</p>
+        <p className="text-[10px] text-muted-foreground mt-0.5">
+          from {docLabel}{pageSuffix}
+        </p>
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        className="shrink-0 h-7 text-[11px]"
+        disabled={disabled || candidate.value == null}
+        onClick={() => onPick(candidate.value ?? "")}
+      >
+        Use this value
+      </Button>
     </div>
   );
 }

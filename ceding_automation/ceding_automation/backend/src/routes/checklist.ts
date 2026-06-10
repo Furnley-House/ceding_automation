@@ -1,6 +1,6 @@
 // backend/src/routes/checklist.ts
 import { Router, Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { requireInternalKey } from "../middleware/internalKey";
@@ -148,6 +148,17 @@ router.patch(
 
     const oldValue = field.value;
 
+    // Conflict cleanup hygiene: a manual edit that sets a value on a
+    // conflicted field implicitly resolves the conflict — the operator has
+    // chosen one of the candidates (or typed a third value). Clear BOTH
+    // the hasConflict flag AND the stale conflictValues JSON so the row
+    // doesn't leave stale state behind. Previously this path only cleared
+    // hasConflict when `resolvedConflict: true` was explicitly passed, and
+    // conflictValues was never cleared by PATCH at all (only by the
+    // dedicated POST /resolve-conflict endpoint).
+    const isResolvingConflict =
+      field.hasConflict && (value !== undefined || resolvedConflict === true);
+
     const updated = await prisma.checklistField.update({
       where: { id: req.params.fieldId },
       data: {
@@ -156,7 +167,12 @@ router.patch(
         status: "MANUALLY_OVERRIDDEN",
         manualEditedById: req.user!.id,
         manualEditedAt: new Date(),
-        hasConflict: resolvedConflict ? false : field.hasConflict,
+        hasConflict: isResolvingConflict ? false : field.hasConflict,
+        // Only include the key when we mean to clear it. Spreading an
+        // empty object on the non-resolving branch lets Prisma leave the
+        // existing JSON untouched. Prisma.JsonNull writes SQL JSON null
+        // — actually clears the column rather than skipping the update.
+        ...(isResolvingConflict ? { conflictValues: Prisma.JsonNull } : {}),
         // Promote confidence to HIGH on manual edit
         confidence: value ? "HIGH" : "MISSING",
       },

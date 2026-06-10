@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertTriangle, CircleDashed, ListChecks, ThumbsUp } from "lucide-react";
-import { ChecklistField, type ChecklistFieldState, type Confidence } from "./ChecklistField";
+import { ChecklistField, type ChecklistFieldState, type Confidence, type ConflictResolution } from "./ChecklistField";
 import { getTemplate, groupBySection, type ChecklistFieldDef } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useChecklistFields, isMissing, type ChecklistRow } from "@/hooks/useChecklistFields";
+import { useDocuments } from "@/hooks/useDocuments";
+import { api } from "@/lib/api";
 import { FundDetailsTable } from "./FundDetailsTable";
 
 interface Props {
@@ -32,6 +34,20 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
     caseId,
     template,
   });
+  // Used to resolve conflict_values.new_document_id → human document name.
+  // The case page already mounts this hook elsewhere; React-Query-style
+  // dedup isn't in use here, so this triggers one extra GET /documents on
+  // initial panel mount. Cheap and lazy — only the document list, not
+  // contents.
+  const { documents } = useDocuments(caseId);
+  const documentNamesById = useMemo(() => {
+    const m = new Map<string, string>();
+    documents.forEach((d) => {
+      if (!d.id) return;
+      m.set(d.id, d.original_name ?? d.filename ?? d.id);
+    });
+    return m;
+  }, [documents]);
 
   // Re-fetch when an external signal arrives (e.g. BFF extraction completed).
   // Skip the first run so we don't double up with useChecklistFields' own
@@ -113,6 +129,56 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
     const completion = total === 0 ? 0 : Math.round(((total - counts.missing) / total) * 100);
     return { ...counts, total, completion };
   }, [visibleFields, byKey]);
+
+  // Assemble the two-candidate resolver pack for a CONFLICT field. Returns
+  // undefined when not conflicted or when the row lacks conflict_values
+  // (defensive — shouldn't happen, but the resolver UI would have nothing
+  // to show). Closes over caseId + refresh so ChecklistField stays pure.
+  const buildConflict = (f: ChecklistFieldDef): ConflictResolution | undefined => {
+    const r = byKey.get(f.key) as
+      | (ChecklistRow & {
+          conflict_values?: {
+            existing?: string | null;
+            new?: string | null;
+            new_document_id?: string | null;
+            new_page?: number | null;
+          } | null;
+          source_document?: { original_name?: string | null; filename?: string | null } | null;
+          source_page_number?: number | null;
+        })
+      | undefined;
+    if (!r) return undefined;
+    if ((r.confidence ?? "").toUpperCase() !== "CONFLICT") return undefined;
+    const cv = r.conflict_values;
+    if (!cv) return undefined;
+    const newDocId = cv.new_document_id ?? null;
+    const incomingDocName = newDocId ? documentNamesById.get(newDocId) ?? null : null;
+    const existingDocName =
+      r.source_document?.original_name ?? r.source_document?.filename ?? null;
+    const existingPage = r.source_page_number ?? r.source_page ?? null;
+    return {
+      existing: {
+        value: r.value ?? null,
+        docName: existingDocName,
+        page: existingPage,
+      },
+      incoming: {
+        value: cv.new ?? null,
+        docName: incomingDocName,
+        page: cv.new_page ?? null,
+      },
+      onResolve: async (chosenValue: string) => {
+        try {
+          await api.resolveConflict(caseId, r.id, chosenValue);
+          await refresh();
+          toast.success("Conflict resolved", { description: `Set to "${chosenValue}"` });
+        } catch (err) {
+          console.error("resolveConflict failed", err);
+          toast.error("Could not resolve conflict — try again");
+        }
+      },
+    };
+  };
 
   const stateForField = (f: ChecklistFieldDef): ChecklistFieldState => {
     const r = byKey.get(f.key);
@@ -295,6 +361,7 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
                         ? () => onJumpToSource(r.source_page ?? null, f.label, r.evidence_source ?? null)
                         : undefined
                     }
+                    conflict={buildConflict(f)}
                   />
                 );
               })}
