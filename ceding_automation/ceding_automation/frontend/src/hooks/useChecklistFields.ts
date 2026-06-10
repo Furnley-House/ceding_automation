@@ -82,6 +82,40 @@ function normaliseRows(raw: unknown): ChecklistRow[] {
   return raw.map((r) => adoptEvidenceFields(snakeKeys(r) as ChecklistRow));
 }
 
+// ── isMissing ───────────────────────────────────────────────────
+// A field counts as "missing" when ANY of the following is true:
+//   1. The value column is empty (null / undefined / whitespace).
+//   2. Confidence is the MISSING enum value (no extraction signal).
+//   3. The literal value is the string "MISSING" (case-insensitive) —
+//      the AI returns this when the document itself prints "MISSING"
+//      in the form field, which is still missing data, not a real value.
+//
+// Use this everywhere instead of ad-hoc checks like `!row.value`. Keeping
+// the rule in one place prevents Stage 4 / Stage 6 / Stage 8 from
+// disagreeing about whether the same field is filled.
+export function isMissing(row: {
+  value?: string | null;
+  confidence?: string | null;
+} | null | undefined): boolean {
+  if (!row) return true;
+  const v = (row.value ?? "").trim();
+  if (v === "") return true;
+  if (v.toUpperCase() === "MISSING") return true;
+  const conf = (row.confidence ?? "").toString().toUpperCase();
+  if (conf === "MISSING") return true;
+  return false;
+}
+
+// Display helper — "—" for missing, the actual value otherwise.
+// Avoids showing the literal word "MISSING" in tables / approval lists.
+export function displayValue(row: {
+  value?: string | null;
+  confidence?: string | null;
+} | null | undefined): string {
+  if (isMissing(row)) return "—";
+  return (row?.value ?? "").trim();
+}
+
 export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
   const { role, userName } = useRole();
   const [rows, setRows] = useState<ChecklistRow[]>([]);

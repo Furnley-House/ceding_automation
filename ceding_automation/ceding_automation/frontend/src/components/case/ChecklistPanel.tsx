@@ -5,7 +5,7 @@ import { getTemplate, groupBySection, type ChecklistFieldDef } from "@/lib/check
 import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { useChecklistFields, type ChecklistRow } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing, type ChecklistRow } from "@/hooks/useChecklistFields";
 import { FundDetailsTable } from "./FundDetailsTable";
 
 interface Props {
@@ -68,7 +68,9 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
     // CONFLICT belongs in the review bucket — two sources disagreed, the
     // user needs to pick the right value.
     if (filter === "review") return conf === "MEDIUM" || conf === "LOW" || conf === "CONFLICT";
-    if (filter === "missing") return conf === "MISSING";
+    // Use the shared isMissing helper so confidence=MISSING AND
+    // value="MISSING" (literal string from the AI) both count.
+    if (filter === "missing") return isMissing(r);
     if (filter === "approved") return r?.status === "approved";
     return true;
   };
@@ -86,19 +88,24 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
     const counts = { high: 0, medium: 0, low: 0, conflict: 0, missing: 0, approved: 0, review: 0 };
     visibleFields.forEach((f) => {
       const r = byKey.get(f.key);
-      const conf = (r?.confidence ?? "MISSING").toUpperCase();
-      if (conf === "HIGH") counts.high++;
-      else if (conf === "MEDIUM") counts.medium++;
-      // CONFLICT is still folded into counts.low (a human decision is
-      // needed before approval, same review bucket) AND tracked separately
-      // in counts.conflict so the "Needs review" chip can surface conflict
-      // size as a sub-line. The review total stays medium + low (where low
-      // includes conflict), unchanged from before this addition.
-      else if (conf === "LOW" || conf === "CONFLICT") {
-        counts.low++;
-        if (conf === "CONFLICT") counts.conflict++;
+      // Missing wins over confidence buckets — a value-says-"MISSING" row
+      // would otherwise be counted under HIGH (which it technically came
+      // back as) and skew the completion progress bar.
+      if (isMissing(r)) {
+        counts.missing++;
+      } else {
+        const conf = (r?.confidence ?? "").toUpperCase();
+        if (conf === "HIGH") counts.high++;
+        else if (conf === "MEDIUM") counts.medium++;
+        // CONFLICT folds into counts.low (same review bucket, needs human
+        // decision before approval) AND is tracked separately in
+        // counts.conflict so the "Needs review" chip can surface conflict
+        // size as a sub-line.
+        else if (conf === "LOW" || conf === "CONFLICT") {
+          counts.low++;
+          if (conf === "CONFLICT") counts.conflict++;
+        }
       }
-      else counts.missing++;
       if (r?.status === "approved") counts.approved++;
       if (r?.status === "review_requested") counts.review++;
     });

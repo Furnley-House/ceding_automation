@@ -27,7 +27,7 @@ import { FundDetailsTable } from "./FundDetailsTable";
 import { useDocuments } from "@/hooks/useDocuments";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { useChecklistFields } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing, displayValue } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation } from "react-router-dom";
@@ -266,8 +266,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
     let returned = 0;
     visibleFields.forEach((f) => {
       const r = byKey.get(f.key);
-      const v = r?.value;
-      if (!!v && v.trim().length > 0) filled += 1;
+      if (!isMissing(r)) filled += 1;
       if (r?.status === "review_requested") returned += 1;
     });
     const missing = total - filled;
@@ -289,10 +288,9 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
         section,
         fields: fields.filter((f) => {
           const r = byKey.get(f.key);
-          const v = r?.value;
-          const isFilled = !!v && v.trim().length > 0;
-          if (filter === "filled") return isFilled;
-          if (filter === "missing") return !isFilled;
+          const missing = isMissing(r);
+          if (filter === "filled") return !missing;
+          if (filter === "missing") return missing;
           if (filter === "returned") return r?.status === "review_requested";
           return true;
         }),
@@ -451,9 +449,10 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
                 <ul className="divide-y divide-border">
                   {fields.map((f) => {
                     const row = byKey.get(f.key);
-                    const filled = !!row?.value && row.value.trim().length > 0;
+                    const missing = isMissing(row);
+                    const filled = !missing;
                     const returned = row?.status === "review_requested";
-                    const editable = (isCA || isAdmin) && (returned || !filled);
+                    const editable = (isCA || isAdmin) && (returned || missing);
                     return (
                       <li
                         key={f.key}
@@ -471,7 +470,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
                           </span>
                           <span className="text-muted-foreground min-w-[180px]">{f.label}</span>
                           <span className={`flex-1 ${filled ? "text-foreground" : "italic text-warning"}`}>
-                            {filled ? row!.value : "Missing"}
+                            {filled ? displayValue(row) : "Missing"}
                           </span>
                           {editable && (
                             <button

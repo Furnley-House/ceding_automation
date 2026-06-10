@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { getProviders } from "@/services/api";
-import { useChecklistFields } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing } from "@/hooks/useChecklistFields";
 import { getTemplate } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -228,7 +228,9 @@ export function CallWorkspace({
   const missingFields = useMemo(
     () =>
       rows
-        .filter((r) => r.field_key && (!r.value || r.status === "missing"))
+        // Pulls in: empty values, confidence=MISSING, AND value="MISSING"
+        // (literal string the AI returns when the document says "MISSING").
+        .filter((r) => r.field_key && isMissing(r))
         .map((r) => ({
           key: r.field_key!,
           label: labelByKey.get(r.field_key!)?.label ?? r.field_key!,

@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner";
 import { checklistApi, casesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
-import { useChecklistFields } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { FundDetailsTable } from "./FundDetailsTable";
 import { Button } from "@/components/ui/button";
@@ -83,7 +83,7 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       const r = byKey.get(f.key);
       if (r?.status === "approved") approved++;
       else if (r?.status === "review_requested") review++;
-      else if (!r?.value) missing++;
+      else if (isMissing(r)) missing++;
       else pending++;
     });
     return { approved, review, pending, missing, total: visibleFields.length };
@@ -112,9 +112,9 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       .filter((r) => {
         if (filter === "approved" && r.status !== "approved") return false;
         if (filter === "review" && r.status !== "review_requested") return false;
-        if (filter === "missing" && r.value) return false;
+        if (filter === "missing" && !isMissing(r)) return false;
         if (filter === "pending") {
-          if (r.status === "approved" || r.status === "review_requested" || !r.value) return false;
+          if (r.status === "approved" || r.status === "review_requested" || isMissing(r)) return false;
         }
         if (q) {
           return (
@@ -155,7 +155,7 @@ export function ApprovalWorkspace({ caseItem }: Props) {
   const bulkApprove = useMutation({
     mutationFn: async () => {
       const targets = rows.filter(
-        (r) => selected.has(r.id) && !!r.value && r.status !== "approved",
+        (r) => selected.has(r.id) && !isMissing(r) && r.status !== "approved",
       );
       if (targets.length === 0) {
         throw new Error("No eligible fields selected (must have a value and not already approved).");

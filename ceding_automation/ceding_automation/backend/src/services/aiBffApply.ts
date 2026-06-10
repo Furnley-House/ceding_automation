@@ -56,12 +56,29 @@ export async function applyFieldExtraction(args: {
   }
 
   // (2) Skip-on-MISSING guard — don't replace a real value with a fresh MISSING.
-  const isMissing = args.data.value === null || args.data.confidence === "MISSING";
-  if (isMissing && field.value !== null) {
+  // Treat the LITERAL string "MISSING" coming back from the BFF as a missing
+  // signal too — it shows up when the source document itself prints "MISSING"
+  // in the form field. Storing "MISSING" as the value confuses every
+  // downstream counter (Stage 6, Approval, export) and shows the word
+  // "MISSING" as a real value on screen.
+  const looksMissing =
+    args.data.value === null ||
+    args.data.confidence === "MISSING" ||
+    (typeof args.data.value === "string" && args.data.value.trim().toUpperCase() === "MISSING");
+  if (looksMissing && field.value !== null) {
     return { outcome: "no-overwrite-missing", fieldId: field.id };
   }
 
-  const newValueStr = args.data.value === null ? null : String(args.data.value);
+  // Normalise: if BFF returned literal "MISSING", store as null so the rest
+  // of the app's "is this missing?" logic works without per-row string checks.
+  const incomingRaw = args.data.value;
+  const incomingNormalised =
+    incomingRaw === null
+      ? null
+      : typeof incomingRaw === "string" && incomingRaw.trim().toUpperCase() === "MISSING"
+        ? null
+        : incomingRaw;
+  const newValueStr = incomingNormalised === null ? null : String(incomingNormalised);
   const rawValueStr = args.data.rawValue ?? newValueStr;
 
   // (3) Conflict path — existing value differs from new value.
@@ -120,13 +137,21 @@ export async function applyFieldExtraction(args: {
   }
 
   // (4) Apply path.
+  // If we normalised "MISSING" → null above, force confidence to MISSING too
+  // so the stored row is internally consistent (no nulls with HIGH conf).
+  const valueWasNormalised =
+    typeof incomingRaw === "string" &&
+    incomingRaw.trim().toUpperCase() === "MISSING" &&
+    newValueStr === null;
+  const effectiveConfidence = valueWasNormalised ? "MISSING" : args.data.confidence;
+
   const oldValue = field.value;
   await prisma.checklistField.update({
     where: { id: field.id },
     data: {
       value: newValueStr,
       aiRawValue: rawValueStr,
-      confidence: args.data.confidence,
+      confidence: effectiveConfidence,
       status: "AI_EXTRACTED",
       sourceDocumentId: args.documentId,
       sourcePageNumber: args.data.sourcePage,

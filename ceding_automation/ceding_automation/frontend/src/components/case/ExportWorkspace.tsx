@@ -13,7 +13,7 @@ import {
 import { toast } from "sonner";
 import { auditApi, casesApi, fundLinesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
-import { useChecklistFields } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing, displayValue } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
 import type { CaseRow } from "@/lib/caseHelpers";
@@ -62,8 +62,8 @@ export function ExportWorkspace({ caseItem }: Props) {
     let pending = 0;
     template.forEach((tf) => {
       const row = byKey.get(tf.key);
-      if (!row || row.status === "missing" || !row.value) missing += 1;
-      else if (row.status === "approved") approved += 1;
+      if (isMissing(row)) missing += 1;
+      else if (row?.status === "approved") approved += 1;
       else pending += 1;
     });
     return { total, approved, missing, pending, allApproved: approved === total && total > 0 };
@@ -89,11 +89,14 @@ export function ExportWorkspace({ caseItem }: Props) {
     sectionGroups.forEach((group) => {
       group.fields.forEach((tf) => {
         const row = byKey.get(tf.key);
+        // Use displayValue so literal "MISSING" strings render as "—"
+        // and the spreadsheet status column ("missing") agrees with it.
+        const missing = isMissing(row);
         checklistRows.push([
           group.section,
           tf.label,
-          row?.value ?? "",
-          row?.status ?? "missing",
+          missing ? "—" : displayValue(row),
+          missing ? "missing" : (row?.status ?? "missing"),
           row?.confidence ?? "",
           row?.source_page ?? "",
           row?.manually_edited ? "Yes" : "No",
