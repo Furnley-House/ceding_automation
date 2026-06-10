@@ -1,6 +1,6 @@
 # Deploy handoff — `develop` → staging
 **From:** Rev · **For:** Nishant (or his Claude Code)
-**Window covered:** 2–4 June 2026 (post `feature/ai-bff-integration` merge)
+**Window covered:** 2–10 June 2026 (post `feature/ai-bff-integration` merge)
 **Branch:** `develop`
 **Local commit ready to push:** `59af584` "feat: BFF AI integration, export route, fund details, Zoho field caching, and schema migrations" + uncommitted changes from the Emma→Megan switch
 
@@ -26,6 +26,7 @@ I tested everything locally against a local Postgres. Couldn't test against stag
 | **DB cleanup** | Reconciled DB checklist templates with canonical JSON (deactivated 63 orphans). Dropped redundant columns (`Provider.acceptedSigType`, `Case.planSubType`, `CallScript.providerPhone/Dept`) + `PlanSubType` enum. Notification dedup with 5-min window. |
 | **Dashboard cleanup** | Removed 4 mock-data tiles (On hold / AI confidence / Phase medians chart / Median provider response). New "Prepare for SR" CTA when all client cases are complete (opens Zoho Contact in a new tab). |
 | **Test wiring** | Demo paraplanner switched from dummy "Emma Clarke" → real "Megan Doherty" (already a Furnley House user). |
+| **"Missing" unification** | Single `isMissing(row)` / `displayValue(row)` helper used by Stages 4 / 5 / 6 / 8 / Export. AI write-back now normalises the literal string `"MISSING"` → `null` + `confidence=MISSING` so the UI counters agree across stages. Plus a one-shot cleanup script for legacy rows. |
 
 Full per-day breakdown: see `CHANGELOG_2026-06-02_to_06-04.md` at the repo root.
 
@@ -90,6 +91,32 @@ ZOHO_WORKDRIVE_FOLDER_ID=a7yip2d39bf2cd6074a09a5190cf73e7a61bf
 
 ---
 
+## 4a. "Missing" field unification (10 Jun)
+
+**Problem this fixed:** the AI sometimes wrote the literal string `"MISSING"` into `ChecklistField.value` when the source PDF itself printed `MISSING` in a form box. The UI was inconsistent — Stage 4 (Extract) showed those as filled (because `value` was truthy), but Stage 5 (Call) / Stage 6 (Review) / Stage 8 (Approval) / the Export each had slightly different ad-hoc checks. Counts disagreed across screens, and "MISSING" leaked into the downloaded XLSX.
+
+**What changed:**
+
+1. **Shared helpers** in [frontend/src/hooks/useChecklistFields.ts](frontend/src/hooks/useChecklistFields.ts):
+   - `isMissing(row)` — true if `value` is empty/whitespace, OR `value.toUpperCase() === "MISSING"`, OR `confidence === "MISSING"`.
+   - `displayValue(row)` — returns `"—"` for missing rows, trimmed value otherwise. Use this in tables instead of `row.value ?? "—"`.
+
+2. **Stages 4 / 5 / 6 / 8 + Export** all import and use these helpers — no more local `!row.value` checks. Stats counters, filters, bulk-approve targets, and XLSX columns are now in lock-step.
+
+3. **Backend AI write-back guard** in [backend/src/services/aiBffApply.ts](backend/src/services/aiBffApply.ts):
+   - Incoming `value === "MISSING"` (any case) is now treated identically to `null` + `confidence=MISSING`. The string is never persisted going forward.
+   - The "don't overwrite a non-missing existing value with a missing one" guard also triggers on the literal string, not just `null`.
+
+4. **One-shot DB cleanup** ([backend/src/scripts/normaliseMissingValues.ts](backend/src/scripts/normaliseMissingValues.ts)) — needs to run **once post-deploy** on staging to clean up rows that already have `value = "MISSING"`. It:
+   - Finds every `ChecklistField` where `value` matches `"MISSING"` case-insensitively
+   - Skips approved + manually-overridden rows (won't stomp adviser/CA decisions)
+   - Sets `value = null, confidence = MISSING` on the rest
+   - Idempotent — safe to re-run; second run is a no-op once cleanup is done.
+
+**No migration** — schema didn't change; it's pure code + a data backfill script.
+
+---
+
 ## 5. Deploy sequence
 
 ```powershell
@@ -116,6 +143,11 @@ git push origin develop
 #    Run from the staging container OR a workstation with the staging DATABASE_URL:
 DATABASE_URL=<staging-url> npx tsx backend/src/scripts/replaceEmmaWithMegan.ts
 #    Output will say what it migrated. Idempotent — safe to re-run.
+
+# 5. Post-deploy: normalise legacy `value = "MISSING"` rows in the checklist
+#    (see §4a — one-shot cleanup of strings the AI persisted before the guard landed):
+DATABASE_URL=<staging-url> npx tsx backend/src/scripts/normaliseMissingValues.ts
+#    Prints "Found N fields ... Normalised N rows" and exits. Idempotent.
 ```
 
 ---
@@ -136,6 +168,7 @@ Order matters — confirm each before moving on:
 | 8 | Open the downloaded .xlsx | 4 sheets: Summary / Checklist / **Fund Details** / Audit Trail | Excel |
 | 9 | All Barrie Addison cases complete → Dashboard | Purple "All ceding done · Prepare SR" badge; button opens Zoho Contact in new tab | UI |
 | 10 | Refresh-from-Zoho link in case header | Pulls paraplanner from Contact module; case header updates | UI + DevTools network |
+| 11 | After running `normaliseMissingValues.ts`: open any case with previously-"MISSING"-string fields | Stage 4 / 5 / 6 / 8 missing counts now agree; downloaded XLSX shows `—`, not the word `MISSING` | UI + Excel |
 
 ---
 
@@ -180,6 +213,9 @@ backend/
       cleanDuplicateNotifications.ts                       ← one-shot
       replaceEmmaWithMegan.ts                              ← portable, run post-deploy on staging
       findMegan.ts                                         ← read-only helper
+      normaliseMissingValues.ts                            ← NEW: one-shot post-deploy, clears legacy "MISSING" string rows
+    services/
+      aiBffApply.ts                                        ← MODIFIED: AI write-back normalises "MISSING" → null
 
 frontend/
   src/
@@ -188,6 +224,13 @@ frontend/
         FundDetailsTable.tsx                               ← NEW: editable + read-only modes
     hooks/
       useFundLines.ts                                      ← NEW
+      useChecklistFields.ts                                ← MODIFIED: exports isMissing() + displayValue() helpers
+    components/case/
+      ChecklistPanel.tsx                                   ← MODIFIED: Stage 4 uses isMissing()
+      CallWorkspace.tsx                                    ← MODIFIED: Stage 5 uses isMissing()
+      stages.tsx (StageReviewChecklist)                    ← MODIFIED: Stage 6 uses isMissing() + displayValue()
+      ApprovalWorkspace.tsx                                ← MODIFIED: Stage 8 stats/filter/bulkApprove use isMissing()
+      ExportWorkspace.tsx                                  ← MODIFIED: XLSX value/status columns use isMissing()/displayValue()
 
 CHANGELOG_2026-06-02_to_06-04.md                          ← detailed per-day log
 DEPLOY_HANDOFF_TO_NISHANT.md                              ← this file
