@@ -652,25 +652,51 @@ router.patch(
       });
     }
 
-    const result = await applyFieldExtraction({
-      caseId: req.params.caseId,
-      fieldKey: field.template.fieldKey,
-      data: {
-        fieldKey: body.field_key,
-        value: body.value,
-        rawValue: body.raw_value ?? null,
-        confidence: body.confidence,
-        sourcePage: body.source_page ?? null,
-        sourceQuote: body.source_quote ?? null,
-        reasoning: body.reasoning ?? null,
-      },
-      jobId: body.job_id,
-      documentId: body.document_id,
-      // PATCH body doesn't carry detected_provider; fall back to the case's
-      // registry-known provider name (canonical by construction since the
-      // Provider table is the source of truth).
-      providerCanonical: field.case?.provider?.name ?? undefined,
-    });
+    // Guard the BFF write-back call. Without this try/catch, any Prisma
+    // error (P2003 FK violation when the source doc was deleted mid-flight,
+    // P2025 record-not-found, transient connection drops) bubbles up as an
+    // unhandled promise rejection and crashes the Node process. The BFF
+    // typically multi-PATCHes 65 fields per doc, so one bad field would
+    // restart the whole backend mid-batch — observed as a 13-restart loop
+    // on 2026-06-10. Catch here, return 500 for THIS request, keep the
+    // process alive for everyone else.
+    let result;
+    try {
+      result = await applyFieldExtraction({
+        caseId: req.params.caseId,
+        fieldKey: field.template.fieldKey,
+        data: {
+          fieldKey: body.field_key,
+          value: body.value,
+          rawValue: body.raw_value ?? null,
+          confidence: body.confidence,
+          sourcePage: body.source_page ?? null,
+          sourceQuote: body.source_quote ?? null,
+          reasoning: body.reasoning ?? null,
+        },
+        jobId: body.job_id,
+        documentId: body.document_id,
+        // PATCH body doesn't carry detected_provider; fall back to the case's
+        // registry-known provider name (canonical by construction since the
+        // Provider table is the source of truth).
+        providerCanonical: field.case?.provider?.name ?? undefined,
+      });
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      console.error(
+        "[ai-extract] applyFieldExtraction failed for case=%s field=%s job=%s doc=%s code=%s:",
+        req.params.caseId,
+        req.params.fieldId,
+        body.job_id,
+        body.document_id,
+        code ?? "unknown",
+        err,
+      );
+      return res.status(500).json({
+        error: "Field extraction write failed",
+        code: code ?? "unknown",
+      });
+    }
 
     if (result.outcome === "preserved") {
       return res.json({ ok: true, fieldId: field.id, skipped: "preserved" });

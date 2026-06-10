@@ -145,6 +145,36 @@ export async function applyFieldExtraction(args: {
     newValueStr === null;
   const effectiveConfidence = valueWasNormalised ? "MISSING" : args.data.confidence;
 
+  // Verify the source document still exists. The BFF can deliver a write-back
+  // for an extraction whose source Document was hard-deleted between job
+  // submission and completion (user-driven delete, retry-upload pattern,
+  // or any race). Postgres enforces the FK at write-time and rejects with
+  // P2003, which previously crashed the Node process — observed on
+  // 2026-06-10 as a 13-restart loop on rev 0000022. We persist the
+  // extracted value WITHOUT the dangling FK rather than throwing. The
+  // field loses its "Jump to source PDF" linkage but keeps the value,
+  // which is more useful than crashing the whole backend.
+  //
+  // The findUnique tolerates any string id — non-existent ids return
+  // null, not an error. args.documentId is typed `string` (not nullable),
+  // so we don't need a null guard here; if a caller ever violates the
+  // type contract, the route-level try/catch on the BFF write-back will
+  // contain the failure.
+  const sourceDocExists = await prisma.document.findUnique({
+    where: { id: args.documentId },
+    select: { id: true },
+  });
+  const safeSourceDocumentId = sourceDocExists ? args.documentId : null;
+  if (!sourceDocExists) {
+    console.warn(
+      "[applyFieldExtraction] source document not found — writing field value without sourceDocumentId. case=%s field=%s job=%s requestedDocId=%s",
+      args.caseId,
+      args.fieldKey,
+      args.jobId,
+      args.documentId,
+    );
+  }
+
   const oldValue = field.value;
   await prisma.checklistField.update({
     where: { id: field.id },
@@ -153,7 +183,7 @@ export async function applyFieldExtraction(args: {
       aiRawValue: rawValueStr,
       confidence: effectiveConfidence,
       status: "AI_EXTRACTED",
-      sourceDocumentId: args.documentId,
+      sourceDocumentId: safeSourceDocumentId,
       sourcePageNumber: args.data.sourcePage,
       sourceSection: "BFF",
       sourceQuote: args.data.sourceQuote,
