@@ -83,15 +83,21 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
   );
 
   const stats = useMemo(() => {
-    const counts = { high: 0, medium: 0, low: 0, missing: 0, approved: 0, review: 0 };
+    const counts = { high: 0, medium: 0, low: 0, conflict: 0, missing: 0, approved: 0, review: 0 };
     visibleFields.forEach((f) => {
       const r = byKey.get(f.key);
       const conf = (r?.confidence ?? "MISSING").toUpperCase();
       if (conf === "HIGH") counts.high++;
       else if (conf === "MEDIUM") counts.medium++;
-      // CONFLICT is treated like LOW for stats: it's a field that needs a
-      // human decision before it can be approved.
-      else if (conf === "LOW" || conf === "CONFLICT") counts.low++;
+      // CONFLICT is still folded into counts.low (a human decision is
+      // needed before approval, same review bucket) AND tracked separately
+      // in counts.conflict so the "Needs review" chip can surface conflict
+      // size as a sub-line. The review total stays medium + low (where low
+      // includes conflict), unchanged from before this addition.
+      else if (conf === "LOW" || conf === "CONFLICT") {
+        counts.low++;
+        if (conf === "CONFLICT") counts.conflict++;
+      }
       else counts.missing++;
       if (r?.status === "approved") counts.approved++;
       if (r?.status === "review_requested") counts.review++;
@@ -182,6 +188,11 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
             icon={AlertTriangle}
             count={stats.medium + stats.low}
             label="Needs review"
+            subLabel={
+              stats.conflict > 0
+                ? `incl. ${stats.conflict} conflict${stats.conflict === 1 ? "" : "s"}`
+                : undefined
+            }
             colour="warning"
             active={filter === "review"}
             onClick={() => setFilter(filter === "review" ? "all" : "review")}
@@ -206,7 +217,15 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
         {filter !== "all" && (
           <div className="mt-3 flex items-center justify-between text-xs">
             <span className="text-muted-foreground">
-              Showing only <strong className="text-foreground">{filter === "review" ? "needs review" : filter}</strong> fields
+              {filter === "review" ? (
+                <>
+                  Showing fields that need review (<strong className="text-foreground">medium, low confidence, or conflicting sources</strong>)
+                </>
+              ) : (
+                <>
+                  Showing only <strong className="text-foreground">{filter}</strong> fields
+                </>
+              )}
             </span>
             <button
               type="button"
@@ -293,6 +312,7 @@ function SummaryChip({
   icon: Icon,
   count,
   label,
+  subLabel,
   colour,
   active,
   onClick,
@@ -300,6 +320,8 @@ function SummaryChip({
   icon: React.ElementType;
   count: number;
   label: string;
+  /** Optional secondary line under the label (e.g. "incl. 2 conflicts"). */
+  subLabel?: string;
   colour: "success" | "warning" | "overdue" | "teal";
   active?: boolean;
   onClick?: () => void;
@@ -327,6 +349,9 @@ function SummaryChip({
       <div className="leading-tight">
         <p className="font-bold text-sm text-foreground">{count}</p>
         <p className="text-[10px] text-muted-foreground">{label}</p>
+        {subLabel && (
+          <p className="text-[9px] text-muted-foreground opacity-80">{subLabel}</p>
+        )}
       </div>
     </button>
   );
