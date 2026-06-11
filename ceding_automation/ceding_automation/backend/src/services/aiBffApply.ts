@@ -251,68 +251,15 @@ export async function applyExtractionResult(
     });
   }
 
-  // ── Fund Details table ─────────────────────────────────────
-  // BFF returns a `fund_lines` array alongside the scalar fields. Previous
-  // versions silently dropped these; we now persist them in ChecklistFundLine.
-  // Strategy: REPLACE existing AI-extracted rows for this document, keep
-  // manual rows untouched (status === MANUALLY_ENTERED / OVERRIDDEN).
-  if (Array.isArray(result.response.fundLines) && result.response.fundLines.length > 0) {
-    const caseRow = await prisma.case.findUnique({
-      where: { id: doc.caseId },
-      select: { id: true, planType: true },
-    });
-    if (caseRow) {
-      // Delete prior AI rows for this document so re-extraction doesn't pile up.
-      await prisma.checklistFundLine.deleteMany({
-        where: {
-          caseId: caseRow.id,
-          sourceDocumentId: documentId,
-          status: { in: ["AI_EXTRACTED"] },
-        },
-      });
-      await prisma.checklistFundLine.createMany({
-        data: result.response.fundLines.map((f, idx) => ({
-          caseId: caseRow.id,
-          planType: caseRow.planType,
-          fundName: f.fundName || `Fund ${idx + 1}`,
-          // isin and sedol arrive as separate fields from the BFF; the Prisma
-          // column collapses them into one TEXT (isinSedolCiti). Prefer ISIN
-          // when present (more specific), fall back to SEDOL.
-          isinSedolCiti: f.isin ?? f.sedol ?? null,
-          numberOfUnits:
-            f.numberOfUnits != null ? new Prisma.Decimal(f.numberOfUnits) : null,
-          pricePerUnit:
-            f.pricePerUnit != null ? new Prisma.Decimal(f.pricePerUnit) : null,
-          value: f.valueGbp != null ? new Prisma.Decimal(f.valueGbp) : null,
-          fundCharge:
-            f.fundChargePercent != null
-              ? new Prisma.Decimal(f.fundChargePercent)
-              : null,
-          isWithProfits: f.isWithProfits ?? false,
-          // Honest per-row confidence from the LLM. Falls back to MISSING if
-          // the BFF omitted it — never invent HIGH.
-          confidence: f.confidence ?? "MISSING",
-          sourceDocumentId: documentId,
-          displayOrder: idx,
-          status: "AI_EXTRACTED",
-        })),
-      });
-      await prisma.auditLog.create({
-        data: {
-          caseId: caseRow.id,
-          userId: SYSTEM_USER_ID,
-          action: "FUND_LINE_ADDED",
-          source: "AI",
-          newValue: `${result.response.fundLines.length} fund rows extracted`,
-          metadata: {
-            jobId: result.jobId,
-            documentId,
-            count: result.response.fundLines.length,
-          } as Prisma.InputJsonValue,
-        },
-      });
-    }
-  }
+  // Fund Details table — shared helper so the doc-status PATCH push path
+  // can persist atomically inside the SAME $transaction that flips
+  // aiJobCompletedAt. Both paths produce byte-identical writes.
+  await applyFundLines({
+    caseId: doc.caseId,
+    documentId,
+    jobId: result.jobId,
+    fundLines: result.response.fundLines,
+  });
 
   const submittedAt = doc.aiJobSubmittedAt ?? doc.uploadedAt;
   const elapsedMs = Date.now() - submittedAt.getTime();
@@ -355,4 +302,115 @@ export async function applyExtractionResult(
   });
 
   return { outcome: "applied" };
+}
+
+// ── ChecklistFundLine persistence — shared by push + pull paths ─────────────
+//
+// Called from BOTH:
+//   - applyExtractionResult (poller / PULL path) — passes no tx; uses prisma.
+//   - PATCH /api/documents/:id (BFF doc-status PUSH path) — passes tx so the
+//     fund-line writes happen inside the SAME prisma.$transaction as the
+//     document.update that flips aiJobCompletedAt. If applyFundLines throws,
+//     the whole tx rolls back, aiJobCompletedAt is NOT set, and the poller
+//     later picks the doc up and runs the SAME helper via the pull path —
+//     self-healing.
+//
+// Behavior contract (must match the pre-refactor inline block byte-for-byte
+// when called without a tx):
+//   - No-op when fundLines is empty / undefined.
+//   - Looks up the case row to get planType (required column on
+//     checklist_fund_lines).
+//   - No-op if the case row is missing.
+//   - Deletes ONLY prior AI_EXTRACTED rows for THIS sourceDocumentId — manual
+//     rows (MANUALLY_ENTERED / OVERRIDDEN) are preserved, rows from OTHER
+//     documents on the same case are preserved.
+//   - Inserts one row per fund_lines entry: fundName, isinSedolCiti (ISIN
+//     preferred, SEDOL fallback), numberOfUnits, pricePerUnit, value (from
+//     valueGbp), fundCharge (from fundChargePercent), isWithProfits,
+//     honest per-row confidence (MISSING fallback), sourceDocumentId,
+//     displayOrder=idx, status=AI_EXTRACTED.
+//   - Writes one FUND_LINE_ADDED audit log entry (count = rows inserted).
+//
+// `fundLines` accepts the BffJobResult.response.fundLines shape (camelCase,
+// 9 fields). Callers that have snake_case wire data must map first.
+type FundLinesTx = Pick<
+  PrismaClient,
+  "case" | "checklistFundLine" | "auditLog"
+> | Prisma.TransactionClient;
+
+export interface ApplyFundLinesArgs {
+  caseId: string;
+  documentId: string;
+  jobId: string;
+  fundLines: BffJobResult["response"]["fundLines"] | undefined | null;
+  /** Optional transaction client. Falls back to the module-level prisma. */
+  tx?: FundLinesTx;
+}
+
+export async function applyFundLines(
+  args: ApplyFundLinesArgs
+): Promise<{ count: number }> {
+  const client: FundLinesTx = args.tx ?? prisma;
+  const fundLines = args.fundLines;
+  if (!Array.isArray(fundLines) || fundLines.length === 0) {
+    return { count: 0 };
+  }
+
+  const caseRow = await client.case.findUnique({
+    where: { id: args.caseId },
+    select: { id: true, planType: true },
+  });
+  if (!caseRow) return { count: 0 };
+
+  // Delete prior AI rows for this document so re-extraction doesn't pile up.
+  await client.checklistFundLine.deleteMany({
+    where: {
+      caseId: caseRow.id,
+      sourceDocumentId: args.documentId,
+      status: { in: ["AI_EXTRACTED"] },
+    },
+  });
+  await client.checklistFundLine.createMany({
+    data: fundLines.map((f, idx) => ({
+      caseId: caseRow.id,
+      planType: caseRow.planType,
+      fundName: f.fundName || `Fund ${idx + 1}`,
+      // isin and sedol arrive as separate fields from the BFF; the Prisma
+      // column collapses them into one TEXT (isinSedolCiti). Prefer ISIN
+      // when present (more specific), fall back to SEDOL.
+      isinSedolCiti: f.isin ?? f.sedol ?? null,
+      numberOfUnits:
+        f.numberOfUnits != null ? new Prisma.Decimal(f.numberOfUnits) : null,
+      pricePerUnit:
+        f.pricePerUnit != null ? new Prisma.Decimal(f.pricePerUnit) : null,
+      value: f.valueGbp != null ? new Prisma.Decimal(f.valueGbp) : null,
+      fundCharge:
+        f.fundChargePercent != null
+          ? new Prisma.Decimal(f.fundChargePercent)
+          : null,
+      isWithProfits: f.isWithProfits ?? false,
+      // Honest per-row confidence from the LLM. Falls back to MISSING if
+      // the BFF omitted it — never invent HIGH.
+      confidence: f.confidence ?? "MISSING",
+      sourceDocumentId: args.documentId,
+      displayOrder: idx,
+      status: "AI_EXTRACTED",
+    })),
+  });
+  await client.auditLog.create({
+    data: {
+      caseId: caseRow.id,
+      userId: SYSTEM_USER_ID,
+      action: "FUND_LINE_ADDED",
+      source: "AI",
+      newValue: `${fundLines.length} fund rows extracted`,
+      metadata: {
+        jobId: args.jobId,
+        documentId: args.documentId,
+        count: fundLines.length,
+      } as Prisma.InputJsonValue,
+    },
+  });
+
+  return { count: fundLines.length };
 }

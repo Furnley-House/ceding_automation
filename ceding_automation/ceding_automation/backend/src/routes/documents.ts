@@ -8,6 +8,7 @@ import { requireInternalKey } from "../middleware/internalKey";
 import { uploadToAzureBlob, generateSasUrl, downloadBlobAsBuffer } from "../services/storage";
 import { extractDocumentWithAI } from "../services/aiExtraction";
 import * as aiBff from "../services/aiBffClient";
+import { applyFundLines } from "../services/aiBffApply";
 import { compareFieldValues } from "../utils/compareFieldValues";
 
 const router = Router();
@@ -573,6 +574,21 @@ router.get(
 // detected_provider / llm_call_meta are passed through from the pipeline whose
 // model shapes evolve independently. We pin only the fields we actually consume
 // downstream; anything else is accepted-and-ignored via .passthrough().
+// Snake_case wire shape mirroring the BFF /result reshape (extract.py) and
+// the pipeline's FundLine Pydantic model. Optional at the body level — every
+// existing caller (and any non-fund document) simply omits the key.
+const fundLineWireSchema = z.object({
+  fund_name: z.string(),
+  isin: z.string().optional().nullable(),
+  sedol: z.string().optional().nullable(),
+  number_of_units: z.number().optional().nullable(),
+  price_per_unit: z.number().optional().nullable(),
+  value_gbp: z.number().optional().nullable(),
+  fund_charge_percent: z.number().optional().nullable(),
+  is_with_profits: z.boolean().optional(),
+  confidence: z.enum(["HIGH", "MEDIUM", "LOW", "MISSING"]).optional(),
+});
+
 const aiDocWriteBackSchema = z.object({
   job_id: z.string().regex(/^bff-[0-9a-f]{8,16}$/),
   status: z.enum(["queued", "processing", "completed", "failed"]),
@@ -605,6 +621,14 @@ const aiDocWriteBackSchema = z.object({
     .passthrough()
     .optional()
     .nullable(),
+  // Fund Details rows piggy-backed on the doc-status PATCH so they persist
+  // atomically with the aiJobCompletedAt flip. Optional — non-fund docs and
+  // every pre-existing caller omit this. When present, the handler wraps the
+  // document.update + audit + applyFundLines in a single $transaction; if
+  // anything throws, the doc isn't marked complete and the poller picks up
+  // the doc and retries via applyExtractionResult (which calls the SAME
+  // applyFundLines helper).
+  fund_lines: z.array(fundLineWireSchema).optional(),
 });
 
 function bffStatusToDocumentStatus(s: string): DocumentStatus {
@@ -681,36 +705,80 @@ internalRouter.patch(
       updateData.extractionMs = completedAtFromBody.getTime() - submittedAt.getTime();
     }
 
-    await prisma.document.update({
-      where: { id: doc.id },
-      data: updateData,
+    // Map snake_case wire shape → applyFundLines's camelCase BffJobResult
+    // shape. Done outside the tx so a malformed body fails cheaply.
+    const mappedFundLines =
+      body.fund_lines && body.fund_lines.length > 0
+        ? body.fund_lines.map((fl) => ({
+            fundName: fl.fund_name,
+            isin: fl.isin ?? null,
+            sedol: fl.sedol ?? null,
+            numberOfUnits: fl.number_of_units ?? null,
+            pricePerUnit: fl.price_per_unit ?? null,
+            valueGbp: fl.value_gbp ?? null,
+            fundChargePercent: fl.fund_charge_percent ?? null,
+            isWithProfits: fl.is_with_profits ?? false,
+            confidence: fl.confidence ?? "MISSING",
+          }))
+        : null;
+
+    // Audit-log entry — fields identical to the prior inline write. Pulled
+    // into a builder so both branches (with-tx, without-tx) can reuse it.
+    const buildAuditCreate = (): Prisma.AuditLogCreateArgs["data"] => ({
+      caseId: doc.caseId,
+      userId: req.user!.id,
+      action: "AI_EXTRACTION_RUN",
+      source: "AI",
+      newValue:
+        body.status === "completed"
+          ? `Extraction completed (${body.job_id})`
+          : `Extraction failed: ${body.error ?? "unknown error"}`,
+      metadata: {
+        jobId: body.job_id,
+        documentId: doc.id,
+        bffStatus: body.status,
+        stage: body.stage ?? null,
+        error: body.error ?? null,
+        detectedProvider: body.detected_provider ?? null,
+        detectedPlanType: body.detected_plan_type ?? null,
+        costUsd: body.llm_call_meta?.total_cost_usd ?? null,
+        tokens: body.llm_call_meta?.total_tokens ?? null,
+      } as Prisma.InputJsonValue,
     });
 
-    // Audit only on terminal transitions (avoid noise on stage progression).
-    if (isTerminal && !doc.aiJobCompletedAt) {
-      await prisma.auditLog.create({
-        data: {
+    if (mappedFundLines) {
+      // Fund-lines path: persist funds + flip aiJobCompletedAt atomically.
+      // If applyFundLines throws, the whole tx rolls back, aiJobCompletedAt
+      // stays null, and the poller picks the doc up to retry via
+      // applyExtractionResult (which uses the SAME applyFundLines helper).
+      await prisma.$transaction(async (tx) => {
+        await tx.document.update({
+          where: { id: doc.id },
+          data: updateData,
+        });
+        if (isTerminal && !doc.aiJobCompletedAt) {
+          await tx.auditLog.create({ data: buildAuditCreate() });
+        }
+        await applyFundLines({
           caseId: doc.caseId,
-          userId: req.user!.id,
-          action: "AI_EXTRACTION_RUN",
-          source: "AI",
-          newValue:
-            body.status === "completed"
-              ? `Extraction completed (${body.job_id})`
-              : `Extraction failed: ${body.error ?? "unknown error"}`,
-          metadata: {
-            jobId: body.job_id,
-            documentId: doc.id,
-            bffStatus: body.status,
-            stage: body.stage ?? null,
-            error: body.error ?? null,
-            detectedProvider: body.detected_provider ?? null,
-            detectedPlanType: body.detected_plan_type ?? null,
-            costUsd: body.llm_call_meta?.total_cost_usd ?? null,
-            tokens: body.llm_call_meta?.total_tokens ?? null,
-          } as Prisma.InputJsonValue,
-        },
+          documentId: doc.id,
+          jobId: body.job_id,
+          fundLines: mappedFundLines,
+          tx,
+        });
       });
+    } else {
+      // No fund_lines on the body — preserves the EXACT pre-refactor path
+      // for every caller (non-fund docs + the existing scalar-only flow).
+      // Same two writes, same order, NO transaction wrapping, NO behavior
+      // change.
+      await prisma.document.update({
+        where: { id: doc.id },
+        data: updateData,
+      });
+      if (isTerminal && !doc.aiJobCompletedAt) {
+        await prisma.auditLog.create({ data: buildAuditCreate() });
+      }
     }
 
     return res.json({
