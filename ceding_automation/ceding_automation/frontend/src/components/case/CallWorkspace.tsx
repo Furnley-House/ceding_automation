@@ -207,6 +207,18 @@ export function CallWorkspace({
   const [wdPanelOpen, setWdPanelOpen] = useState(true);
   const [wdTranscribingId, setWdTranscribingId] = useState<string | null>(null);
 
+  // ── Per-user RingCentral OAuth connection state ─────────────────────────
+  const [rcUserConnected, setRcUserConnected] = useState<boolean>(false);
+  const [rcUserName, setRcUserName] = useState<string | null>(null);
+  const [rcConnecting, setRcConnecting] = useState(false);
+  // Captured from the RC widget's login event — used to auto-map the Ceding user
+  // to whichever extension is currently signed in on the widget. Persisted to
+  // localStorage so Connect still works even when the widget isn't visible on
+  // a manual-call case (no provider selected).
+  const [rcWidgetLoginNumber, setRcWidgetLoginNumber] = useState<string | null>(
+    () => localStorage.getItem("rc-widget-login-number")
+  );
+
   // ── Analysis state ────────────────────────────────────────────────────
   const [analyzing, setAnalyzing] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -272,6 +284,89 @@ export function CallWorkspace({
       .catch(() => setRcConfigured(false));
   }, [caseId]);
 
+  // ── Check whether the logged-in user has connected their own RC account ─
+  const refreshRcUserStatus = async () => {
+    try {
+      const res = await api.get(`/auth/rc/status`);
+      const data = res.data as { connected: boolean; ownerName?: string };
+      setRcUserConnected(data.connected);
+      setRcUserName(data.ownerName ?? null);
+      // If the user isn't connected to RC, make sure no stale recordings are shown
+      if (!data.connected) setRcRecordings([]);
+    } catch {
+      setRcUserConnected(false);
+      setRcRecordings([]);
+    }
+  };
+  useEffect(() => {
+    void refreshRcUserStatus();
+    // If the OAuth landing page sent us back here, refresh status again
+    const handler = (e: StorageEvent) => {
+      if (e.key === "rc-just-connected") void refreshRcUserStatus();
+    };
+    window.addEventListener("storage", handler);
+    return () => window.removeEventListener("storage", handler);
+  }, []);
+
+  interface RcExtensionInfo {
+    id: string;
+    extensionNumber?: string;
+    name: string;
+    email?: string;
+  }
+
+  const connectRingCentral = async () => {
+    if (!rcWidgetLoginNumber) {
+      toast.error("Sign in to the RingCentral widget first", {
+        description: "Open any case with a provider selected, sign in to the widget once — then Connect works everywhere.",
+        duration: 8000,
+      });
+      return;
+    }
+    setRcConnecting(true);
+    // Clear any stale recordings — they may belong to a previously-mapped extension
+    setRcRecordings([]);
+    try {
+      // We pass the RC widget's signed-in extension info so the backend maps THIS user
+      // to whichever extension is currently active on the widget. This means the user
+      // can only map themselves to an account they have RC credentials for — secure.
+      const res = await api.post(`/auth/rc/connect`, {
+        widgetLoginNumber: rcWidgetLoginNumber,
+      });
+      const data = res.data as { matched: boolean; extension?: RcExtensionInfo };
+      if (data.matched && data.extension) {
+        setRcUserConnected(true);
+        setRcUserName(data.extension.name);
+        toast.success(`Connected as ${data.extension.name}`, { description: "Click Load Recordings to see your calls." });
+      }
+    } catch (err: unknown) {
+      const status = (err as any)?.response?.status;
+      const msg = (err as any)?.response?.data?.error ?? (err as Error).message;
+      if (status === 404) {
+        toast.error("Could not match your RC widget login to any extension", {
+          description: msg,
+          duration: 8000,
+        });
+      } else {
+        toast.error("Connect failed", { description: msg });
+      }
+    } finally {
+      setRcConnecting(false);
+    }
+  };
+
+  const disconnectRingCentral = async () => {
+    try {
+      await api.post(`/auth/rc/disconnect`);
+      setRcUserConnected(false);
+      setRcUserName(null);
+      setRcRecordings([]); // Clear data on disconnect
+      toast.success("RingCentral disconnected");
+    } catch (err: unknown) {
+      toast.error("Disconnect failed", { description: (err as any)?.response?.data?.error ?? (err as Error).message });
+    }
+  };
+
   useEffect(() => {
     if (totalQuestions === 0) return;
     const sig = `${caseId}-${missingFields.length}-${reviewFields.length}`;
@@ -328,6 +423,17 @@ export function CallWorkspace({
       switch (data.type) {
         case "rc-login-status-notify":
           setRcLoggedIn(!!(data.loggedIn));
+          // loginNumber format: "+44116218XXXX*777" where 777 is the extension number
+          if (data.loggedIn && data.loginNumber && typeof data.loginNumber === "string") {
+            const ln = data.loginNumber as string;
+            setRcWidgetLoginNumber(ln);
+            localStorage.setItem("rc-widget-login-number", ln);
+          }
+          if (data.loggedIn === false) {
+            // Don't clear stored loginNumber on widget sign-out — it's still
+            // valid info we can reuse to connect later. Only the DB mapping
+            // matters for actual recording access.
+          }
           break;
         // These events only fire when the user is logged in — use them as a
         // fallback to catch the logged-in state when rc-login-status-notify
@@ -565,7 +671,11 @@ export function CallWorkspace({
       }
     } catch (err: unknown) {
       const status = (err as any)?.response?.status;
-      if (status === 403) {
+      const needsConnect = (err as any)?.response?.data?.needsRcConnect;
+      if (status === 403 && needsConnect) {
+        setRcUserConnected(false);
+        toast.error("Connect your RingCentral account first", { description: "Click 'Connect RingCentral' so your own recordings show here." });
+      } else if (status === 403) {
         setRcToken("");
         localStorage.removeItem("rc-access-token");
         setRcTokenPanelOpen(true);
@@ -1192,6 +1302,20 @@ export function CallWorkspace({
                 </Button>
               )}
 
+              {/* Open RC dialpad — for manual calls where the provider isn't in the directory */}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  document.getElementById("rc-hide-style")?.remove();
+                  window.postMessage({ type: "rc-adapter-navigate-to", path: "/dialer" }, "*");
+                }}
+                title="Open the RC dialpad to manually enter a number"
+              >
+                <Phone className="h-3.5 w-3.5 mr-1.5" />
+                Open dialpad
+              </Button>
+
               <Button
                 size="sm"
                 variant="outline"
@@ -1287,6 +1411,31 @@ export function CallWorkspace({
             </span>
           </h4>
           <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+            {rcUserConnected ? (
+              <span className="flex items-center gap-1.5 text-[10px] text-success font-semibold normal-case tracking-normal" title={rcUserName ? `Connected as ${rcUserName}` : "Connected"}>
+                <Wifi className="h-3 w-3" />
+                {rcUserName ? rcUserName.split(" ")[0] : "Connected"}
+                <button
+                  type="button"
+                  onClick={() => void disconnectRingCentral()}
+                  className="ml-0.5 text-[9px] text-muted-foreground hover:text-overdue underline"
+                  title="Disconnect RingCentral"
+                >
+                  disconnect
+                </button>
+              </span>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                disabled={rcConnecting}
+                onClick={() => void connectRingCentral()}
+              >
+                {rcConnecting ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Wifi className="h-3 w-3 mr-1" />}
+                Connect RingCentral
+              </Button>
+            )}
             <select
               value={rcViewMode}
               onChange={(e) => setRcViewMode(e.target.value as "latest" | "all")}
@@ -1300,8 +1449,9 @@ export function CallWorkspace({
               size="sm"
               variant="outline"
               className="h-7 text-xs"
-              disabled={rcRecordingsLoading}
+              disabled={rcRecordingsLoading || !rcUserConnected}
               onClick={() => void fetchRcRecordings()}
+              title={rcUserConnected ? "Load your RC recordings" : "Connect RingCentral first"}
             >
               {rcRecordingsLoading ? (
                 <Loader2 className="h-3 w-3 animate-spin mr-1" />

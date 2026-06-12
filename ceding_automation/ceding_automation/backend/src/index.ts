@@ -19,6 +19,7 @@ import { authRoutes } from "./routes/auth";
 import { notificationRoutes } from "./routes/notifications";
 import { crmRoutes } from "./routes/crm";
 import { callRoutes } from "./routes/calls";
+import { rcAuthRoutes } from "./routes/rcAuth";
 import { exportRoutes } from "./routes/export";
 import { startPoller } from "./services/aiBffPoller";
 
@@ -71,6 +72,7 @@ app.get("/health", (_req, res) => {
 
 // ── Routes ───────────────────────────────────────────────
 app.use("/api/auth", authRoutes);
+app.use("/api/auth", rcAuthRoutes);
 app.use("/api/cases", caseRoutes);
 app.use("/api/cases", documentRoutes);
 app.use("/api/cases", checklistRoutes);

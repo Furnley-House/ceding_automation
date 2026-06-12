@@ -11,13 +11,12 @@ import {
   getAccessToken,
   AGENT_PHONE,
   fetchCallTranscript,
-  listCallRecordings,
   listCallRecordingsWithToken,
   transcribeRecordingWithToken,
-  transcribeRecording,
   transcribeAudioBuffer,
 } from "../services/ringcentral";
 import { uploadToWorkDrive, listWorkDriveFiles, downloadWorkDriveFile } from "../services/workdrive";
+import { getUserRcExtensionId } from "../services/rcUserAuth";
 import { generateCallScript, analyseTranscript } from "../services/aiCallAssist";
 
 const router = Router();
@@ -345,7 +344,7 @@ router.post(
       return res.status(400).json({ error: "contentUri and fileName required" });
     }
     try {
-      // 1. Download MP3 from RC using server JWT (or user token if not configured)
+      // 1. Download MP3 from RC using the admin JWT (works for any extension's recordings)
       let bearerToken: string;
       if (isRingCentralConfigured()) {
         bearerToken = await getAccessToken();
@@ -402,7 +401,7 @@ router.get(
     const { contentUri, rcToken: userToken } = req.query as { contentUri?: string; rcToken?: string };
     if (!contentUri) return res.status(400).json({ error: "contentUri required" });
     try {
-      // Prefer server JWT; fall back to user-supplied token
+      // Use admin JWT (covers any extension's recordings); fall back to user-supplied token
       let bearerToken: string;
       if (isRingCentralConfigured()) {
         bearerToken = await getAccessToken();
@@ -426,15 +425,18 @@ router.get(
   }
 );
 
-// ── Transcribe using server-side JWT (no user token needed) ──────────────────────
+// ── Transcribe using the logged-in user's RC token ───────────────────────────
 router.post(
   "/:caseId/calls/rc-transcribe",
   requireAuth,
   async (req: Request, res: Response) => {
     const { contentUri } = req.body as { contentUri?: string };
     if (!contentUri) return res.status(400).json({ error: "contentUri required" });
+    if (!isRingCentralConfigured()) return res.status(503).json({ error: "RC not configured" });
     try {
-      const result = await transcribeRecording(contentUri);
+      // Admin JWT downloads the audio; works for any extension's recordings
+      const token = await getAccessToken();
+      const result = await transcribeRecordingWithToken(contentUri, token);
       res.json(result);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Transcription failed";
@@ -506,22 +508,28 @@ router.get(
   "/:caseId/calls/rc-recordings",
   requireAuth,
   async (req: Request, res: Response) => {
-    const { phoneNumber, dateFrom, perPage } = req.query as {
-      phoneNumber?: string;
-      dateFrom?: string;
-      perPage?: string;
-    };
+    const { perPage } = req.query as { perPage?: string };
+    res.set("Cache-Control", "no-store");
     try {
-      const recordings = await listCallRecordings({
-        phoneNumber,
-        dateFrom,
+      // Per-user OAuth: use THIS user's RC token so they only see their own calls.
+      // Step 1: get the logged-in user's mapped RC extension (throws 403 if not mapped yet)
+      const extensionId = await getUserRcExtensionId(req.user!.id);
+      // Step 2: use admin JWT to query THAT extension's call-log
+      if (!isRingCentralConfigured()) {
+        return res.status(503).json({ error: "RC admin JWT not configured" });
+      }
+      const token = await getAccessToken();
+      const recordings = await listCallRecordingsWithToken(token, {
         perPage: perPage ? parseInt(perPage, 10) : 20,
+        extensionOnly: true,
+        extensionId,
       });
       res.json({ recordings });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to fetch recordings";
+      const status = (err as any)?.rcStatus === 403 ? 403 : 503;
       console.error("[calls] rc-recordings error:", msg);
-      res.status(503).json({ error: msg });
+      res.status(status).json({ error: msg, needsRcConnect: status === 403 });
     }
   }
 );

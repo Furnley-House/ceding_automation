@@ -138,6 +138,15 @@ model User {
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
+  // RingCentral per-user OAuth — each user connects their own RC account
+  rcRefreshToken         String?
+  rcAccessToken          String?
+  rcAccessTokenExpiresAt DateTime?
+  rcExtensionId          String?
+  rcAccountId            String?
+  rcOwnerName            String?
+  rcConnectedAt          DateTime?
+
   // Relations
   casesCreated     Case[]              @relation("CaseCreatedBy")
   casesAssigned    Case[]              @relation("CaseAssignedTo")

@@ -171,7 +171,7 @@ export interface CallRecordingEntry {
 //   2. message-store?messageType=VoiceMail — voicemails (RC widget "Recordings" tab shows these)
 export async function listCallRecordingsWithToken(
   bearerToken: string,
-  options: { perPage?: number; extensionOnly?: boolean } = {}
+  options: { perPage?: number; extensionOnly?: boolean; extensionId?: string } = {}
 ): Promise<CallRecordingEntry[]> {
   // Try the configured server first, then sandbox — token is only valid on the
   // environment the RC widget is using (prod or devtest/sandbox).
@@ -216,9 +216,11 @@ export async function listCallRecordingsWithToken(
     }
 
     // ── 1. Extension call-log (no type filter — picks up all voice calls) ────
+    // When extensionId is provided, query that specific extension's log; else use ~ (token owner)
+    const extPath = options.extensionId ? options.extensionId : "~";
     try {
       const { data } = await axios.get(
-        `${server}/restapi/v1.0/account/~/extension/~/call-log`,
+        `${server}/restapi/v1.0/account/~/extension/${extPath}/call-log`,
         { headers: authHeader, params: { showRecording: true, perPage, dateFrom: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() } }
       );
       serverReachable = true;
@@ -235,7 +237,7 @@ export async function listCallRecordingsWithToken(
     if (serverReachable) {
       try {
         const { data: syncData } = await axios.get(
-          `${server}/restapi/v1.0/account/~/extension/~/call-log-sync`,
+          `${server}/restapi/v1.0/account/~/extension/${extPath}/call-log-sync`,
           { headers: authHeader, params: { syncType: 'FSync', showRecording: true, recordCount: perPage } }
         );
         const syncRecords = ((syncData as Record<string, unknown>)?.records ?? []) as Record<string, unknown>[];
@@ -265,7 +267,7 @@ export async function listCallRecordingsWithToken(
     if (serverReachable) {
       try {
         const { data: vmData } = await axios.get(
-          `${server}/restapi/v1.0/account/~/extension/~/message-store`,
+          `${server}/restapi/v1.0/account/~/extension/${extPath}/message-store`,
           { headers: authHeader, params: { messageType: 'VoiceMail', perPage } }
         );
         const msgs = ((vmData as Record<string, unknown>)?.records ?? []) as Record<string, unknown>[];
