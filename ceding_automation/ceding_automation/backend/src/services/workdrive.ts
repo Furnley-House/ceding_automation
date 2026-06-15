@@ -9,7 +9,7 @@ const workdriveApiBase = () => process.env.ZOHO_WORKDRIVE_API_BASE ?? 'https://w
 // Sandbox/test default for the Furnley House ceding recordings folder. Used
 // when ZOHO_WORKDRIVE_FOLDER_ID isn't set (or is still the .env.example
 // placeholder). Production deployments MUST set the env var explicitly.
-const DEFAULT_WORKDRIVE_FOLDER_ID = 'a7yip2d39bf2cd6074a09a5190cf73e7a61bf';
+const DEFAULT_WORKDRIVE_FOLDER_ID = 'j0qma656e29ffedef476ebf89cdc1bb40edb8';
 const defaultFolderId = () => {
   const fromEnv = process.env.ZOHO_WORKDRIVE_FOLDER_ID;
   if (fromEnv && !fromEnv.startsWith('your-')) return fromEnv;

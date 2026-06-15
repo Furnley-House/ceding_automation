@@ -84,7 +84,7 @@ ZOHO_CONTACT_FIELD_PARAPLANNER=Paraplanner          # (Paraplanner)
 ZOHO_CONTACT_FIELD_OWNER=Owner                      # (Owner)
 
 # WorkDrive folder for exports + recordings
-ZOHO_WORKDRIVE_FOLDER_ID=a7yip2d39bf2cd6074a09a5190cf73e7a61bf
+ZOHO_WORKDRIVE_FOLDER_ID=j0qma656e29ffedef476ebf89cdc1bb40edb8
 # (currently hardcoded as a default in services/workdrive.ts for the sandbox;
 # set this env var for prod to override cleanly)
 ```
@@ -178,7 +178,7 @@ Order matters — confirm each before moving on:
 After deploy and seed, Emma is INACTIVE but old cases still have `paralPlannerId = Emma`. Run `replaceEmmaWithMegan.ts` to repoint, or leave them alone if you'd rather test with fresh cases.
 
 ### b) Hardcoded WorkDrive folder ID
-`backend/src/services/workdrive.ts` has a hardcoded fallback (`a7yip2d39bf2cd6074a09a5190cf73e7a61bf`) for when `ZOHO_WORKDRIVE_FOLDER_ID` env var is missing. Fine for sandbox, **set the env var explicitly for prod**.
+`backend/src/services/workdrive.ts` has a hardcoded fallback (`j0qma656e29ffedef476ebf89cdc1bb40edb8`) for when `ZOHO_WORKDRIVE_FOLDER_ID` env var is missing. Fine for sandbox, **set the env var explicitly for prod**.
 
 ### c) `Client_Owners` deliberately not sent to Plans
 The Multi-Select User Lookup on Plans.Client_Owners kept rejecting our cached IDs (`INVALID_DATA: id seems to be invalid`). We disabled the field on the PATCH after several attempts. The cached IDs are still saved on the Case row in case you crack it later. Re-enable by uncommenting the `setIf("Client_Owners", ...)` block in `backend/src/routes/export.ts` (around `buildPlanFields`).
