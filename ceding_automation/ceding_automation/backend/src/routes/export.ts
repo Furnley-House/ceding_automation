@@ -15,6 +15,7 @@ import { uploadToWorkDrive } from "../services/workdrive";
 import {
   updatePlanRecord,
   findPlanRecordByPolicyRef,
+  mapPlanTypeToZoho,
 } from "../services/zohoCrm";
 
 const router = Router();
@@ -58,20 +59,10 @@ function parseDateISO(s: string | null | undefined): string | undefined {
   return d.toISOString().slice(0, 10);
 }
 
-// Our internal PlanType enum → exact Plans-module pick-list values. If
-// your CRM uses different labels (e.g. "Personal Pension" vs "Pension"),
-// adjust here.
-function mapPlanTypePicklist(planType: string): string {
-  switch (planType) {
-    case "PENSION":     return "Pension";
-    case "ISA":         return "ISA";
-    case "GIA":         return "GIA";
-    case "BOND":        return "Bond";
-    case "FINAL_SALARY": return "Final Salary";
-    case "PROTECTION":  return "Protection";
-    default:            return planType;
-  }
-}
+// Shared helper for PlanType → Zoho pick-list mapping lives in
+// services/zohoCrm.ts as mapPlanTypeToZoho (also consumed by the
+// D4 "Create new in Zoho" flow). Re-exported alias kept local-only.
+const mapPlanTypePicklist = mapPlanTypeToZoho;
 
 // Build the Zoho Plans-module payload. Anything we don't have a usable
 // value for is omitted so we don't overwrite real CRM data with blanks.
@@ -118,13 +109,19 @@ function buildPlanFields(
     setIf("Plan_Start_Date", caseRecord.planStartDate.toISOString().slice(0, 10));
   }
 
+  // ─ Hard-coded business-rule defaults (D6) ─
+  // Both fields are fixed values per Furnley House process — they are no
+  // longer surfaced on the checklist for new cases (canonical JSON has no
+  // entry for either key), and the export must always push these regardless
+  // of any stale checklist value left on legacy cases.
+  out["Non_Advised"] = true;
+  out["Plan_Status"] = "In Force";
+
   // ─ Checklist-derived ─ keys match field_keys used elsewhere in the app
-  setIf("Plan_Status", fieldsByKey.get("plan_status")?.value);                // Pick list (Active/Dormant/Closed)
   setIf("Crystallisation_Status", fieldsByKey.get("crystallisation_status")?.value); // Pick list
   setIf("Valuation", parseNumeric(fieldsByKey.get("current_value")?.value));  // Currency
   setIf("Valuation_Date", parseDateISO(fieldsByKey.get("valuation_date")?.value)); // Date
   setIf("Normal_Retirement_Age", parseNumeric(fieldsByKey.get("normal_retirement_age")?.value)); // Number
-  setIf("Non_Advised", parseBool(fieldsByKey.get("non_advised")?.value));     // Boolean
 
   return out;
 }
@@ -196,7 +193,13 @@ router.post(
       ok: boolean;
       fieldsUpdated: number;
       recordId?: string;
+      planName?: string;
       resolvedVia?: "stored" | "policy_ref_search";
+      // Captured for the receipt panel so testers can verify what landed
+      // in Zoho field-by-field, not just the count. Same shape as the
+      // payload passed to updatePlanRecord — Lookup fields appear as
+      // { id: "..." }.
+      fields?: Record<string, unknown>;
     } = { ok: false, fieldsUpdated: 0 };
     let zohoError: string | null = null;
 
@@ -205,6 +208,13 @@ router.post(
     //   Fallback: search the Plans module by Policy_Ref. Cache the result
     //   back to the case so we don't search on every export.
     let planRecordId = caseRecord.zohoCaseId;
+    // Plan.Name from the resolved Zoho record — surfaced on the receipt
+    // panel + header so testers can verify which record we touched without
+    // opening Zoho. Only populated when the export route itself resolved
+    // the record (the search hit returned the record); for cases where
+    // zohoCaseId was already cached, we leave it undefined and the
+    // receipt falls back to "Plan <id>".
+    let planRecordName: string | undefined;
     let resolvedVia: "stored" | "policy_ref_search" | null = planRecordId ? "stored" : null;
     if (!planRecordId && caseRecord.policyRef) {
       try {
@@ -212,10 +222,18 @@ router.post(
         if (hit) {
           planRecordId = hit.id;
           resolvedVia = "policy_ref_search";
-          // Persist so subsequent exports skip the search
+          // Capture Plan Name from the record body — used purely for display.
+          const recName = (hit.record as Record<string, unknown>).Name;
+          if (typeof recName === "string" && recName.trim()) planRecordName = recName.trim();
+          // Persist so subsequent exports skip the search. Also cache the
+          // Plan Name on the case row so the header / receipt panel can
+          // show "<Plan Name> (<Policy Ref>)" without another Zoho hit.
           await prisma.case.update({
             where: { id: caseId },
-            data: { zohoCaseId: hit.id },
+            data: {
+              zohoCaseId: hit.id,
+              ...(planRecordName ? { zohoPlanName: planRecordName } : {}),
+            },
           });
         }
       } catch (err) {
@@ -239,7 +257,9 @@ router.post(
             ok: true,
             fieldsUpdated: Object.keys(fields).length,
             recordId: planRecordId,
+            planName: planRecordName,
             resolvedVia: resolvedVia ?? undefined,
+            fields,
           };
         } catch (err) {
           zohoError = err instanceof Error ? err.message : String(err);

@@ -55,19 +55,33 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
 
       setBusy(true);
       setUploadingNames(valid.map((v) => v.name));
-      try {
-        for (const f of valid) {
+      // Sequential one-at-a-time uploads, but each failure is contained to
+      // its own file — a 400 on file 2 must not abort files 3..N. The old
+      // `for/await` loop threw on the first failure and silently dropped
+      // the rest, which read to testers as "multi-file sometimes doesn't
+      // work" with no clue which file was the problem.
+      const failures: { name: string; message: string }[] = [];
+      let successes = 0;
+      for (const f of valid) {
+        try {
           await uploadDocumentFile({ caseId, file: f });
+          successes++;
+        } catch (e) {
+          const message =
+            (e as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+            (e instanceof Error ? e.message : "Upload failed");
+          failures.push({ name: f.name, message });
         }
-        toast.success(`Uploaded ${valid.length} document${valid.length === 1 ? "" : "s"}`);
-        onUploaded?.();
-      } catch (e: any) {
-        console.error(e);
-        toast.error("Upload failed", { description: e?.message ?? "Please retry" });
-      } finally {
-        setBusy(false);
-        setUploadingNames([]);
       }
+      if (successes > 0) {
+        toast.success(`Uploaded ${successes} document${successes === 1 ? "" : "s"}`);
+        onUploaded?.();
+      }
+      for (const f of failures) {
+        toast.error(`${f.name} failed`, { description: f.message });
+      }
+      setBusy(false);
+      setUploadingNames([]);
     },
     [busy, caseId, onUploaded],
   );

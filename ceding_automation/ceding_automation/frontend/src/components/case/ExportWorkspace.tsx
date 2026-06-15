@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import {
   Download,
@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   AlertTriangle,
   ExternalLink,
+  XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { auditApi, casesApi, fundLinesApi } from "@/lib/api";
@@ -16,6 +17,7 @@ import { useRole } from "@/hooks/useRole";
 import { useChecklistFields, isMissing, displayValue } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
+import { UnlinkedPlanBanner } from "./UnlinkedPlanBanner";
 import type { CaseRow } from "@/lib/caseHelpers";
 
 interface AuditRow {
@@ -44,6 +46,45 @@ function formatTs(iso: string | null): string {
   return `${d.toLocaleDateString("en-GB")} ${d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`;
 }
 
+// Snapshot of the latest CHECKLIST_EXPORTED audit row's metadata — the
+// shape the backend writes in export.ts is mirrored here so the receipt
+// panel can render without an `any` cast. Optional everywhere because
+// older audit rows may pre-date the fields we read.
+interface ExportReceipt {
+  exportedAt: string;
+  actorName: string | null;
+  fileName?: string;
+  workdrive?: { id: string; permalink?: string; name?: string } | null;
+  workdriveError?: string | null;
+  zohoUpdate?: {
+    ok: boolean;
+    fieldsUpdated: number;
+    recordId?: string;
+    planName?: string;
+    resolvedVia?: "stored" | "policy_ref_search";
+    // Full payload sent to Zoho — rendered as a key/value table in the
+    // receipt so testers can verify what landed without opening Zoho.
+    fields?: Record<string, unknown>;
+  };
+  zohoError?: string | null;
+  cacheWarning?: string | null;
+}
+
+// Convert a Zoho-bound value into something human-readable. Lookup fields
+// arrive as { id: "..." }; primitives pass through; booleans → Yes/No.
+function formatZohoValue(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  if (typeof v === "number") return String(v);
+  if (typeof v === "string") return v;
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    if (typeof o.id === "string") return `linked · ${o.id}`;
+    return JSON.stringify(o);
+  }
+  return String(v);
+}
+
 export function ExportWorkspace({ caseItem }: Props) {
   const { userName } = useRole();
   const template = getTemplate(caseItem.plan_type);
@@ -52,6 +93,50 @@ export function ExportWorkspace({ caseItem }: Props) {
   const [uploading, setUploading] = useState(false);
   const [lastExportAt, setLastExportAt] = useState<string | null>(null);
   const [workdriveLink, setWorkdriveLink] = useState<string | null>(null);
+  const [receipt, setReceipt] = useState<ExportReceipt | null>(null);
+  const [receiptLoading, setReceiptLoading] = useState(true);
+
+  // Reads the latest CHECKLIST_EXPORTED audit row so the receipt panel
+  // persists across page reloads — testers stop having to re-export just
+  // to see the previous run's outcome.
+  const fetchLatestReceipt = useMemo(
+    () => async () => {
+      try {
+        const res = await auditApi.getForCase(caseItem.id);
+        const rows = (res.data as Array<{
+          action: string;
+          created_at: string;
+          actor_name: string | null;
+          metadata: Record<string, unknown> | null;
+        }>) ?? [];
+        const last = rows.find((r) => r.action === "CHECKLIST_EXPORTED");
+        if (!last || !last.metadata) {
+          setReceipt(null);
+          return;
+        }
+        const m = last.metadata;
+        setReceipt({
+          exportedAt: last.created_at,
+          actorName: last.actor_name,
+          fileName: (m.fileName as string) ?? undefined,
+          workdrive: (m.workdrive as ExportReceipt["workdrive"]) ?? null,
+          workdriveError: (m.workdriveError as string | null) ?? null,
+          zohoUpdate: (m.zohoUpdate as ExportReceipt["zohoUpdate"]) ?? undefined,
+          zohoError: (m.zohoError as string | null) ?? null,
+          cacheWarning: (m.cacheWarning as string | null) ?? null,
+        });
+      } catch {
+        setReceipt(null);
+      } finally {
+        setReceiptLoading(false);
+      }
+    },
+    [caseItem.id],
+  );
+
+  useEffect(() => {
+    fetchLatestReceipt();
+  }, [fetchLatestReceipt]);
 
 
   const stats = useMemo(() => {
@@ -301,6 +386,10 @@ export function ExportWorkspace({ caseItem }: Props) {
       } else {
         toast.warning("Export finished with warnings", { description: lines.join("\n") });
       }
+
+      // Pull the audit row that the backend just wrote so the receipt panel
+      // reflects this latest run without a page reload.
+      await fetchLatestReceipt();
     } catch (err) {
       console.error(err);
       toast.error("Export failed", { description: err instanceof Error ? err.message : "Unknown error" });
@@ -425,6 +514,191 @@ export function ExportWorkspace({ caseItem }: Props) {
           </a>
         )}
       </div>
+
+      {/* Zoho update receipt (D3) — sourced from the latest CHECKLIST_EXPORTED audit row */}
+      <ExportReceiptPanel receipt={receipt} loading={receiptLoading} />
+
+      {/* D4 fallback — if the case still has no linked Plans record, give the
+          CA a direct path to link or create one without leaving the stage. */}
+      {!(caseItem as unknown as { zoho_case_id?: string | null }).zoho_case_id && (
+        <UnlinkedPlanBanner
+          caseId={caseItem.id}
+          policyRef={caseItem.plan_number ?? null}
+          planType={caseItem.plan_type}
+          provider={caseItem.Provider_group ?? null}
+          compact
+        />
+      )}
+    </div>
+  );
+}
+
+// Renders a persistent summary of the most recent Complete-export run so
+// QA / testers can verify Zoho-side success without DB access. Distinct
+// from the post-action toast (which evaporates) — this survives reloads.
+function ExportReceiptPanel({
+  receipt,
+  loading,
+}: {
+  receipt: ExportReceipt | null;
+  loading: boolean;
+}) {
+  if (loading) {
+    return (
+      <div className="rounded-md border border-border bg-card p-4 text-xs text-muted-foreground flex items-center gap-2">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading export receipt…
+      </div>
+    );
+  }
+  if (!receipt) {
+    return (
+      <div className="rounded-md border border-dashed border-border bg-muted/30 p-4 text-xs text-muted-foreground">
+        No export run yet for this case — receipt will appear here after Complete export.
+      </div>
+    );
+  }
+
+  const wdOk = !!receipt.workdrive;
+  const zohoOk = !!receipt.zohoUpdate?.ok;
+  const allOk = wdOk && zohoOk;
+
+  return (
+    <div
+      className={`rounded-md border p-4 ${
+        allOk
+          ? "border-success/40 bg-success/5"
+          : "border-warning/40 bg-warning/5"
+      }`}
+    >
+      <div className="flex items-center gap-2 mb-3">
+        {allOk ? (
+          <CheckCircle2 className="h-4 w-4 text-success" />
+        ) : (
+          <AlertTriangle className="h-4 w-4 text-warning" />
+        )}
+        <h4 className="text-[11px] uppercase tracking-widest font-bold text-foreground">
+          Zoho update receipt
+        </h4>
+      </div>
+
+      <dl className="grid grid-cols-[140px_1fr] gap-x-3 gap-y-1.5 text-xs">
+        <dt className="text-muted-foreground">Run at</dt>
+        <dd className="text-foreground">{formatTs(receipt.exportedAt)}</dd>
+
+        {receipt.actorName && (
+          <>
+            <dt className="text-muted-foreground">By</dt>
+            <dd className="text-foreground">{receipt.actorName}</dd>
+          </>
+        )}
+
+        {receipt.fileName && (
+          <>
+            <dt className="text-muted-foreground">File</dt>
+            <dd className="text-foreground font-mono text-[11px] break-all">{receipt.fileName}</dd>
+          </>
+        )}
+
+        <dt className="text-muted-foreground">WorkDrive</dt>
+        <dd className={wdOk ? "text-success" : "text-warning"}>
+          {wdOk ? (
+            <span className="inline-flex items-center gap-1">
+              <CheckCircle2 className="h-3 w-3" /> Uploaded
+              {receipt.workdrive?.permalink && (
+                <a
+                  href={receipt.workdrive.permalink}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ml-2 text-teal hover:underline inline-flex items-center gap-1"
+                >
+                  <ExternalLink className="h-3 w-3" /> Open
+                </a>
+              )}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1">
+              <XCircle className="h-3 w-3" /> {receipt.workdriveError ?? "Failed"}
+            </span>
+          )}
+        </dd>
+
+        <dt className="text-muted-foreground">Zoho Plans</dt>
+        <dd className={zohoOk ? "text-success" : "text-warning"}>
+          {zohoOk ? (
+            <div className="flex flex-col gap-1">
+              <span className="inline-flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3" /> Updated{" "}
+                {receipt.zohoUpdate?.fieldsUpdated ?? 0} field
+                {receipt.zohoUpdate?.fieldsUpdated === 1 ? "" : "s"}
+              </span>
+              <span className="text-foreground text-[11px]">
+                {receipt.zohoUpdate?.planName ? (
+                  <span className="font-semibold">{receipt.zohoUpdate.planName}</span>
+                ) : (
+                  <span className="font-mono">{receipt.zohoUpdate?.recordId ?? "—"}</span>
+                )}
+                {receipt.zohoUpdate?.resolvedVia && (
+                  <span className="text-muted-foreground ml-2">
+                    · resolved via{" "}
+                    {receipt.zohoUpdate.resolvedVia === "stored"
+                      ? "cached id"
+                      : "Policy Ref search"}
+                  </span>
+                )}
+              </span>
+              {receipt.zohoUpdate?.fields && Object.keys(receipt.zohoUpdate.fields).length > 0 && (
+                <PushedFieldsTable fields={receipt.zohoUpdate.fields} />
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-0.5">
+              <span className="inline-flex items-center gap-1">
+                <XCircle className="h-3 w-3" /> Update failed
+              </span>
+              {receipt.zohoError && (
+                <span className="text-foreground text-[11px] break-words">
+                  {receipt.zohoError}
+                </span>
+              )}
+            </div>
+          )}
+        </dd>
+
+        {receipt.cacheWarning && (
+          <>
+            <dt className="text-muted-foreground">Note</dt>
+            <dd className="text-warning text-[11px]">{receipt.cacheWarning}</dd>
+          </>
+        )}
+      </dl>
+    </div>
+  );
+}
+
+// Field-by-field breakdown of what landed in Zoho. Renders inside the
+// Zoho Plans row so the receipt is self-contained — no need to open the
+// Zoho record to verify each value. Lookup fields show as "linked · {id}";
+// scalars / pick-list / dates show their literal value.
+function PushedFieldsTable({ fields }: { fields: Record<string, unknown> }) {
+  const entries = Object.entries(fields);
+  return (
+    <div className="mt-2 rounded-md border border-success/30 bg-background/60 overflow-hidden">
+      <table className="w-full text-[11px]">
+        <thead className="bg-muted/50">
+          <tr>
+            <th className="text-left px-2 py-1 font-semibold text-muted-foreground w-1/2">Field</th>
+            <th className="text-left px-2 py-1 font-semibold text-muted-foreground">Value pushed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(([key, value]) => (
+            <tr key={key} className="border-t border-border">
+              <td className="px-2 py-1 font-mono text-foreground">{key}</td>
+              <td className="px-2 py-1 text-foreground break-all">{formatZohoValue(value)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

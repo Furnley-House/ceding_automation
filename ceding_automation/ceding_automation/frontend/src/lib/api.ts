@@ -51,6 +51,16 @@ export const casesApi = {
       headers: { "Content-Type": "multipart/form-data" },
     });
   },
+  // D4 — search the Zoho Plans module for the "Link existing" picker.
+  searchPlans: (q: string) =>
+    api.get(`/cases/plans/search`, { params: { q } }),
+  // D4 — link an existing Plans record to a case (caches id + name and
+  // PATCHes the linked Zoho Task's What_Id).
+  linkPlan: (id: string, planRecordId: string) =>
+    api.post(`/cases/${id}/link-plan`, { planRecordId }),
+  // D4 — create a new Plans record in Zoho from the case data, then link.
+  createPlan: (id: string) =>
+    api.post(`/cases/${id}/create-plan`),
 };
 
 // ── Documents ────────────────────────────────────────────

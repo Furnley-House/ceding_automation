@@ -255,6 +255,20 @@ function planModuleName(): string {
   return process.env.ZOHO_PLAN_MODULE ?? 'Plans';
 }
 
+// App PlanType enum → exact Plans-module pick-list label. Adjust if your
+// CRM uses different labels for any of these.
+export function mapPlanTypeToZoho(planType: string): string {
+  switch (planType) {
+    case "PENSION":      return "Pension";
+    case "ISA":          return "ISA";
+    case "GIA":          return "GIA";
+    case "BOND":         return "Bond";
+    case "FINAL_SALARY": return "Final Salary";
+    case "PROTECTION":   return "Protection";
+    default:             return planType;
+  }
+}
+
 export async function updatePlanRecord(
   planRecordId: string,
   fields: Record<string, unknown>,
@@ -304,6 +318,143 @@ export async function findPlanRecordByPolicyRef(
   const matches = parsed.data ?? [];
   if (matches.length !== 1) return null; // ambiguous or no match → require manual resolution
   const rec = matches[0];
+  return { id: rec.id as string, record: rec };
+}
+
+// Multi-result Plans search by Policy_Ref starts-with. Used by the D4
+// "Link existing" picker — exposes ambiguous / partial matches so the
+// CA can choose, instead of the unique-match silent-skip behaviour of
+// findPlanRecordByPolicyRef.
+//
+// Returns up to `limit` lightweight rows (id, Name, Policy_Ref, Plan_Type).
+export interface PlanSearchHit {
+  id: string;
+  name: string | null;
+  policyRef: string | null;
+  planType: string | null;
+}
+export async function searchPlansByPolicyRefStartsWith(
+  q: string,
+  limit = 10,
+): Promise<PlanSearchHit[]> {
+  const trimmed = q.trim();
+  if (!trimmed) return [];
+  const token = await getAccessToken();
+  // Zoho CRM v6 doesn't support `starts_with` on all field types; Policy_Ref
+  // is a Single Line and supports `starts_with`. `equals` is the safe fallback
+  // if your CRM rejects the operator (catch the 400 and retry).
+  const criteria = `(Policy_Ref:starts_with:${trimmed})`;
+  const url = `${apiBase()}/${planModuleName()}/search?criteria=${encodeURIComponent(criteria)}&per_page=${Math.min(
+    limit,
+    200,
+  )}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  if (res.status === 204) return [];
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`Zoho ${planModuleName()} search failed (${res.status}): ${body}`);
+  }
+  const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
+  const rows = parsed.data ?? [];
+  return rows.slice(0, limit).map((r) => ({
+    id: String(r.id ?? ""),
+    name: typeof r.Name === "string" ? r.Name : null,
+    policyRef: typeof r.Policy_Ref === "string" ? r.Policy_Ref : null,
+    planType: typeof r.Plan_Type === "string" ? r.Plan_Type : null,
+  }));
+}
+
+// Create a new Plans record in Zoho. Used by the D4 "Create new in Zoho"
+// flow when no existing Plans record matches the case's Policy Ref.
+// Returns the new record's id (and Name when Zoho echoes it back).
+//
+// Note: Contact link is intentionally OUT of this helper's signature for
+// now — D5 owns the Plans→Contact lookup field name. Once that lands,
+// callers can pass an extra field on the `fields` payload.
+export async function createPlanRecord(
+  fields: Record<string, unknown>,
+): Promise<{ id: string; name: string | null }> {
+  const token = await getAccessToken();
+  const url = `${apiBase()}/${planModuleName()}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ data: [fields] }),
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`Zoho ${planModuleName()} POST failed (${res.status}): ${body}`);
+  }
+  const parsed = JSON.parse(body) as { data?: Array<{ details?: { id?: string }; status?: string; message?: string }> };
+  const first = parsed.data?.[0];
+  if (!first || first.status !== "success" || !first.details?.id) {
+    throw new Error(`Zoho ${planModuleName()} POST returned non-success: ${body}`);
+  }
+  const newId = first.details.id;
+  // Zoho's create response doesn't include Name — fetch the new record to
+  // capture the auto-generated Plan Name (e.g. "Plan119576") for caching.
+  let name: string | null = null;
+  try {
+    const fetched = await findPlanRecordById(newId);
+    const nm = fetched?.record.Name;
+    if (typeof nm === "string" && nm.trim()) name = nm.trim();
+  } catch {
+    // Best-effort: name backfill failure shouldn't block the create.
+  }
+  return { id: newId, name };
+}
+
+// Link a Zoho Task to a Plans record by setting What_Id + $se_module.
+// Both fields are required by the CRM API — `What_Id` alone is rejected.
+export async function linkTaskToPlan(taskId: string, planRecordId: string): Promise<void> {
+  const token = await getAccessToken();
+  const res = await fetch(`${apiBase()}/Tasks/${taskId}`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      data: [
+        {
+          id: taskId,
+          What_Id: planRecordId,
+          $se_module: planModuleName(),
+        },
+      ],
+    }),
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`Zoho Tasks/${taskId} What_Id update failed (${res.status}): ${body}`);
+  }
+}
+
+// Fetch a single Plans record by id. Used by the case-sync to backfill
+// Plans.Name onto cases that already have zohoCaseId cached from an earlier
+// import (Task.What_Id) but predate the zohoPlanName column.
+export async function findPlanRecordById(
+  recordId: string,
+): Promise<{ id: string; record: Record<string, unknown> } | null> {
+  if (!recordId || !recordId.trim()) return null;
+  const token = await getAccessToken();
+  const url = `${apiBase()}/${planModuleName()}/${encodeURIComponent(recordId.trim())}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  if (res.status === 204 || res.status === 404) return null;
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`Zoho ${planModuleName()} get failed (${res.status}): ${body}`);
+  }
+  const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
+  const rec = parsed.data?.[0];
+  if (!rec) return null;
   return { id: rec.id as string, record: rec };
 }
 

@@ -61,7 +61,11 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
     refresh();
   }, [refreshSignal, refresh]);
 
-  type FieldFilter = "all" | "high" | "review" | "missing" | "approved";
+  // Stage 4 is the AI extraction review surface. We deliberately omit the
+  // "approved" filter here — approval happens later (Stage 6 / Stage 8) and
+  // showing it on Stage 4 was just clutter that pushed the useful filters
+  // (High / Needs review / Missing) into a tighter row.
+  type FieldFilter = "all" | "high" | "review" | "missing";
   const [filter, setFilter] = useState<FieldFilter>("all");
 
   const visibleFields = useMemo(
@@ -87,7 +91,6 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
     // Use the shared isMissing helper so confidence=MISSING AND
     // value="MISSING" (literal string from the AI) both count.
     if (filter === "missing") return isMissing(r);
-    if (filter === "approved") return r?.status === "approved";
     return true;
   };
 
@@ -248,7 +251,7 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
         <div className="h-1.5 bg-background rounded overflow-hidden mb-3">
           <div className="h-full bg-teal transition-all" style={{ width: `${stats.completion}%` }} />
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
           <SummaryChip
             icon={CheckCircle2}
             count={stats.high}
@@ -277,14 +280,6 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
             colour="overdue"
             active={filter === "missing"}
             onClick={() => setFilter(filter === "missing" ? "all" : "missing")}
-          />
-          <SummaryChip
-            icon={ThumbsUp}
-            count={stats.approved}
-            label="Approved"
-            colour="teal"
-            active={filter === "approved"}
-            onClick={() => setFilter(filter === "approved" ? "all" : "approved")}
           />
         </div>
         {filter !== "all" && (

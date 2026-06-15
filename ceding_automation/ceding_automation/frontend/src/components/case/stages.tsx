@@ -24,6 +24,7 @@ import { ApprovalWorkspace } from "./ApprovalWorkspace";
 import { ExportWorkspace } from "./ExportWorkspace";
 import { CompleteWorkspace } from "./CompleteWorkspace";
 import { FundDetailsTable } from "./FundDetailsTable";
+import { UnlinkedPlanBanner } from "./UnlinkedPlanBanner";
 import { useDocuments } from "@/hooks/useDocuments";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -83,6 +84,7 @@ function StagePanel({
 }
 
 export function StageCaseDetails({ caseItem }: StageProps) {
+  const zohoCaseId = (caseItem as unknown as { zoho_case_id?: string | null }).zoho_case_id ?? null;
   return (
     <StagePanel
       num={1}
@@ -90,6 +92,16 @@ export function StageCaseDetails({ caseItem }: StageProps) {
       title="Case Details"
       description="Confirm the case metadata captured from Zoho CRM or entered manually."
     >
+      {!zohoCaseId && (
+        <div className="mb-4">
+          <UnlinkedPlanBanner
+            caseId={caseItem.id}
+            policyRef={caseItem.plan_number ?? null}
+            planType={caseItem.plan_type}
+            provider={caseItem.Provider_group ?? null}
+          />
+        </div>
+      )}
       <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
         <Detail label="Client name" value={caseItem.client_name} />
         <Detail label="Provider" value={caseItem.Provider_group} />

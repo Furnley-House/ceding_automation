@@ -196,7 +196,8 @@ model Case {
   // Client info (from Zoho CRM)
   clientName   String
   clientZohoId String?
-  zohoCaseId   String? // Zoho CRM deal/activity ID
+  zohoCaseId   String? // Zoho CRM Plans-module record id
+  zohoPlanName String? // Plans.Name (auto-generated, e.g. "Plan119575") — display only
   zohoDeepLink String?
   zohoTaskId   String?
 
@@ -212,8 +213,11 @@ model Case {
   // Status & stage
   status      CaseStatus @default(STAGE_1_LOA_PREP)
   loaStatus   LOAStatus  @default(NOT_SENT)
-  loaSentAt   DateTime?
-  loaSignedAt DateTime?
+  loaSentAt   DateTime?  // exposed to UI as loa_sent_date via flattenCase
+  // LOA bookkeeping written from Stage 2 SendLOAWorkspace.
+  loaNotes         String? // free-text note ("Sent via Origo on …", follow-up info, etc.)
+  loaMethod        String? // "origo" | "email" | "courier"
+  loaTrackingRef   String? // courier tracking / Origo case ref
   ragStatus   String? // "GREEN", "AMBER", "RED"
 
   // Assignment

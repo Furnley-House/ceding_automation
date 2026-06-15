@@ -19,22 +19,32 @@ const internalRouter = Router();
 const prisma = new PrismaClient();
 
 // Multer – store in memory, then stream to Azure Blob
+//
+// File-type rule: accept on EITHER a recognised MIME OR a recognised file
+// extension. Browsers / OSes report `application/octet-stream` for legacy
+// Office files on Windows even when the extension is .doc / .xls — without
+// the extension fallback those uploads fail with a misleading "Unsupported
+// file type" 400, and any subsequent files in the same multi-file batch
+// never make it past the frontend's `for await` loop.
+const ALLOWED_MIME_TYPES = [
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+  "text/plain",
+];
+const ALLOWED_EXTENSIONS_RE = /\.(pdf|doc|docx|xls|xlsx|txt)$/i;
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max
   fileFilter: (_req, file, cb) => {
-    const allowed = [
-      "application/pdf",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      "application/msword",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "application/vnd.ms-excel",
-      "text/plain",
-    ];
-    if (allowed.includes(file.mimetype)) {
+    const mimeOk = ALLOWED_MIME_TYPES.includes(file.mimetype);
+    const extOk = ALLOWED_EXTENSIONS_RE.test(file.originalname ?? "");
+    if (mimeOk || extOk) {
       cb(null, true);
     } else {
-      cb(new Error(`Unsupported file type: ${file.mimetype}`));
+      cb(new Error(`Unsupported file type: ${file.mimetype} (${file.originalname})`));
     }
   },
 });

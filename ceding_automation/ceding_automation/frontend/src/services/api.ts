@@ -94,7 +94,12 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
     (_, i) => i + 1,
   );
   // If the case is fully complete, mark stage 10 itself as completed too.
-  if (upperStatus === "STAGE_10_COMPLETE" || upperStatus === "APPROVED") {
+  // APPROVED is intentionally NOT included: a paraplanner-approved case still
+  // has Stage 9 (Export & WorkDrive) to run, so stages_completed must stop at 8.
+  // Pushing 10 here would draw a green tick under "Ceding Complete" while the
+  // CA is still on Stage 9, leaving stage 9 looking like the only outstanding
+  // step — which is what the user reported.
+  if (upperStatus === "STAGE_10_COMPLETE") {
     if (!stagesCompleted.includes(10)) stagesCompleted.push(10);
   }
 
@@ -111,12 +116,20 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
     (createdBy?.id as string | undefined) ??
     (c.created_by_id as string | undefined) ??
     null;
+  // Several UI surfaces (Stage 1 case details, XLSX export, status banner)
+  // were written against the snake-case key `loa_sent_date`, but the wire
+  // response carries `loa_sent_at` after snakeKeys on Prisma's `loaSentAt`
+  // DateTime column. Alias here so those reads find a value instead of
+  // always rendering "Not sent".
+  const loaSentDate = (c.loa_sent_at as string | null | undefined) ?? null;
+
   return {
     ...c,
     backend_status: rawStatus,       // keep original for API calls
     status: uiStatus,
     current_stage: currentStage,
     stages_completed: stagesCompleted,
+    loa_sent_date: loaSentDate,
     Provider_group: provider?.name ?? "",
     // snake_case alias used by Dashboard / Cases list / MyInbox — without
     // this, every row was being bucketed as "Unknown" on the provider donut.

@@ -1,7 +1,8 @@
-import { useParams, useNavigate, Link, useLocation } from "react-router-dom";
+import { useParams, useNavigate, Link, useLocation, useOutletContext } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, AlertTriangle, ExternalLink, RefreshCw } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, AlertTriangle, ExternalLink, RefreshCw } from "lucide-react";
+import type { AppLayoutContext } from "@/components/layout/AppLayout";
 import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho } from "@/services/api";
 import { CEDING_STAGES, STATUS_LABELS, STATUS_STYLES, RAG_STYLES, calculateRag } from "@/lib/caseHelpers";
 import { isSupportedPlanType, SUPPORTED_PLAN_TYPES } from "@/lib/checklistTemplates";
@@ -27,6 +28,9 @@ const CaseDetail = () => {
   const location = useLocation();
   const qc = useQueryClient();
   const { isCA, role, userName } = useRole();
+  // Sidebar auto-collapse hook lives at the layout level — we only consume
+  // it from Stage 4 (PDF↔extraction comparison wants every pixel it can get).
+  const layoutCtx = useOutletContext<AppLayoutContext | undefined>();
 
   const { data: caseItem, isLoading } = useQuery({
     queryKey: ["case", id],
@@ -128,6 +132,34 @@ const CaseDetail = () => {
       setViewStage(computedStage);
     }
   }, [computedStage]);
+
+  // Stage-specific layout tweaks.
+  // - Stage 4 is the PDF↔checklist comparison surface. The case header
+  //   eats vertical space and the global sidebar eats horizontal space —
+  //   both get collapsed on entry. We restore the pre-Stage-4 sidebar
+  //   state on exit so the layout doesn't feel jumpy for stages 1/2/3.
+  // - The case-header accordion is local to this page; default closed
+  //   when arriving on Stage 4, openable on demand.
+  const [headerCollapsed, setHeaderCollapsed] = useState<boolean>(false);
+  const sidebarPriorStateRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (viewStage === 4) {
+      setHeaderCollapsed(true);
+      if (layoutCtx && sidebarPriorStateRef.current === null) {
+        sidebarPriorStateRef.current = layoutCtx.sidebarCollapsed;
+        layoutCtx.setSidebarCollapsed(true);
+      }
+    } else {
+      setHeaderCollapsed(false);
+      if (layoutCtx && sidebarPriorStateRef.current !== null) {
+        layoutCtx.setSidebarCollapsed(sidebarPriorStateRef.current);
+        sidebarPriorStateRef.current = null;
+      }
+    }
+    // layoutCtx is stable between renders but its setter ref changes on
+    // every render — depending on viewStage only keeps the effect tight.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewStage]);
 
   if (isLoading) {
     return (
@@ -284,25 +316,57 @@ const CaseDetail = () => {
                       View in Zoho <ExternalLink className="h-3 w-3" />
                     </a>
                   )}
+                  {/* Accordion toggle — hides the detailed field grid below.
+                      Auto-collapses on Stage 4 (Extract & Fill Gaps) so the
+                      PDF↔extraction comparison gets the full viewport.
+                      Always available so testers on any stage can reclaim
+                      vertical space if they want. */}
+                  <button
+                    type="button"
+                    onClick={() => setHeaderCollapsed((v) => !v)}
+                    title={headerCollapsed ? "Show case details" : "Hide case details"}
+                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                  >
+                    {headerCollapsed ? (
+                      <>
+                        <ChevronDown className="h-3.5 w-3.5" /> Show details
+                      </>
+                    ) : (
+                      <>
+                        <ChevronUp className="h-3.5 w-3.5" /> Hide details
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-1.5 text-xs mt-2">
-                <HeaderField label="Provider" value={caseItem.Provider_group} />
-                <HeaderField label="Plan type" value={caseItem.plan_type} />
-                <HeaderField label="Policy ref" value={caseItem.plan_number} mono />
-                <HeaderField label="Owner" value={caseItem.owner_name ?? "—"} />
-                <HeaderField label="Zoho task" value={(caseItem as any).zoho_task_id ?? "—"} mono />
-                <HeaderField
-                  label="Created"
-                  value={new Date(caseItem.created_at).toLocaleDateString("en-GB", {
-                    day: "2-digit",
-                    month: "short",
-                    year: "numeric",
-                  })}
-                />
-                <HeaderField label="Stage" value={`${currentStage} of 10`} />
-                <HeaderField label="RAG" value={RAG_STYLES[rag].label} />
-              </div>
+              {!headerCollapsed && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-1.5 text-xs mt-2">
+                  <HeaderField label="Provider" value={caseItem.Provider_group} />
+                  <HeaderField label="Plan type" value={caseItem.plan_type} />
+                  <HeaderField label="Policy ref" value={caseItem.plan_number} mono />
+                  <HeaderField label="Task owner" value={caseItem.owner_name ?? "—"} />
+                  <HeaderField
+                    label="Paraplanner"
+                    value={(caseItem as any).paraplanner_name ?? "—"}
+                  />
+                  <HeaderField label="Zoho task" value={(caseItem as any).zoho_task_id ?? "—"} mono />
+                  <HeaderField
+                    label="Created"
+                    value={new Date(caseItem.created_at).toLocaleDateString("en-GB", {
+                      day: "2-digit",
+                      month: "short",
+                      year: "numeric",
+                    })}
+                  />
+                  <HeaderField label="Stage" value={`${currentStage} of 10`} />
+                  <HeaderField label="RAG" value={RAG_STYLES[rag].label} />
+                  <LinkedPlanField
+                    zohoCaseId={(caseItem as any).zoho_case_id ?? null}
+                    planName={(caseItem as any).zoho_plan_name ?? null}
+                    policyRef={(caseItem.plan_number as string | null | undefined) ?? null}
+                  />
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -427,6 +491,52 @@ function HeaderField({ label, value, mono }: { label: string; value: string; mon
     <div className="flex flex-col gap-0.5 min-w-0">
       <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</span>
       <span className={`text-foreground truncate ${mono ? "font-mono text-[11px]" : "text-xs"}`}>{value}</span>
+    </div>
+  );
+}
+
+// Linked Plan indicator (D3) — surfaces whether the case is wired to a Zoho
+// Plans record without making the tester open Zoho. Two states today:
+//   ✓ Linked    — zoho_case_id is populated (either from Zoho Task.What_Id
+//                 at import, or from the Policy_Ref Plans search that runs
+//                 on every Refresh-from-Zoho sync).
+//   ⚠ Not linked — no id even after the policy-ref fallback search; the
+//                 CRM either has no matching Plans record, or has more
+//                 than one (the search requires a single unique hit).
+// "✗ No match found" as a third state needs the sync to surface that
+// distinction; for now the warning text below explains both possibilities.
+function LinkedPlanField({
+  zohoCaseId,
+  planName,
+  policyRef,
+}: {
+  zohoCaseId: string | null;
+  planName: string | null;
+  policyRef: string | null;
+}) {
+  const linked = !!zohoCaseId;
+  const label = linked ? "✓ Linked" : "⚠ Not linked";
+  // Preferred display: "Plan119575 (CT98621568A)" when both are known;
+  // gracefully fall back to whichever piece is available.
+  let valueText: string;
+  if (!linked) {
+    valueText = "No unique Plans record · click Refresh from Zoho";
+  } else if (planName && policyRef) {
+    valueText = `${planName} (${policyRef})`;
+  } else if (planName) {
+    valueText = planName;
+  } else {
+    valueText = policyRef ?? "—";
+  }
+  return (
+    <div className="flex flex-col gap-0.5 min-w-0">
+      <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+        Linked plan
+      </span>
+      <span className={`text-xs truncate ${linked ? "text-success" : "text-warning"}`}>
+        <span className="font-semibold">{label}</span>
+        <span className="text-foreground font-mono ml-1">· {valueText}</span>
+      </span>
     </div>
   );
 }

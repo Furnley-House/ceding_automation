@@ -1,6 +1,6 @@
 // backend/src/routes/cases.ts
 import { Router, Request, Response } from "express";
-import { PrismaClient, CaseStatus, PlanType, Prisma } from "@prisma/client";
+import { PrismaClient, CaseStatus, LOAStatus, PlanType, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { z } from "zod";
 import * as zoho from "../services/zohoCrm";
@@ -10,6 +10,12 @@ import {
   extractContactUserFields,
   findProviderRecordByName,
   findZohoUserById,
+  findPlanRecordByPolicyRef,
+  findPlanRecordById,
+  searchPlansByPolicyRefStartsWith,
+  createPlanRecord,
+  linkTaskToPlan,
+  mapPlanTypeToZoho,
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
 
@@ -353,6 +359,31 @@ router.patch(
     if (typeof body.zohoCaseId === "string") data.zohoCaseId = body.zohoCaseId;
     if (typeof body.zohoDeepLink === "string") data.zohoDeepLink = body.zohoDeepLink;
 
+    // LOA bookkeeping (Stage 2 SendLOAWorkspace). Accept null explicitly
+    // so the UI can clear a previous value — `typeof null === "object"`,
+    // so we test the key presence rather than the type.
+    if ("loaNotes" in body) data.loaNotes = body.loaNotes as string | null;
+    if ("loaMethod" in body) data.loaMethod = body.loaMethod as string | null;
+    if ("loaTrackingRef" in body) data.loaTrackingRef = body.loaTrackingRef as string | null;
+    if ("loaSentDate" in body) {
+      // UI field is the date the LOA went out; stored in loaSentAt (DateTime).
+      data.loaSentAt = body.loaSentDate ? new Date(body.loaSentDate as string) : null;
+    }
+    // loaStatus arrives lowercase ("sent"/"processed"/"received"/"not_sent").
+    // Map to the Prisma LOAStatus enum. (SIGNED is in the enum but no UI
+    // surface ever sends it — leaving the branch out keeps this honest.)
+    if (typeof body.loaStatus === "string") {
+      const upper = body.loaStatus.toUpperCase();
+      if ((Object.values(LOAStatus) as string[]).includes(upper)) {
+        data.loaStatus = upper as LOAStatus;
+        // Auto-stamp loaSentAt when the status flips to SENT and the UI
+        // didn't supply an explicit loaSentDate.
+        if (upper === "SENT" && !("loaSentDate" in body)) {
+          data.loaSentAt = data.loaSentAt ?? new Date();
+        }
+      }
+    }
+
     // Fields the legacy UI sends that have no Prisma column — silently drop:
     //   stagesCompleted, lastActivityAt, zohoCedingStatus, zohoSyncedAt.
     // (updatedAt is maintained automatically by Prisma.)
@@ -491,7 +522,6 @@ router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (
     data: {
       loaStatus,
       loaSentAt: loaStatus === "SENT" ? new Date() : undefined,
-      loaSignedAt: loaStatus === "SIGNED" ? new Date() : undefined,
     },
   });
 
@@ -879,6 +909,62 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   considerChange("zohoDeepLink", mapping.zohoDeepLink, caseRecord.zohoDeepLink);
   considerChange("zohoCaseId", mapping.zohoCaseId, caseRecord.zohoCaseId);
   considerChange("clientZohoId", mapping.clientZohoId, caseRecord.clientZohoId);
+
+  // 3e. Plans-module linkage by Policy_Ref fallback + Plan Name capture.
+  //
+  // The Zoho Task carries a `What_Id` only when the operator linked the
+  // Task to a Plans record before we imported it. In practice many tasks
+  // land here unlinked, even though a matching Plans record exists in CRM
+  // (linked by Client_Owners instead). Without this fallback the case
+  // header showed "⚠ Not linked" until a Stage 9 export ran, which felt
+  // wrong to testers — the CRM clearly had the right record all along.
+  //
+  // Two paths, both end up populating zohoPlanName (Plans.Name, e.g.
+  // "Plan119575") so the header can show <Name> (<Policy Ref>):
+  //   • If we still don't have a zohoCaseId, search Plans by Policy_Ref.
+  //   • If we have a zohoCaseId but no cached zohoPlanName (legacy rows
+  //     pre-dating this column), fetch the Plans record by id to backfill.
+  let planSyncNote: string | null = null;
+  const effectiveZohoCaseId =
+    (updates.zohoCaseId as string | undefined) ?? caseRecord.zohoCaseId;
+  const effectivePolicyRef =
+    (updates.policyRef as string | undefined) ?? caseRecord.policyRef;
+  const pickPlanName = (rec: Record<string, unknown>): string | null => {
+    const n = rec.Name;
+    return typeof n === "string" && n.trim() ? n.trim() : null;
+  };
+  if (!effectiveZohoCaseId && effectivePolicyRef) {
+    try {
+      const hit = await findPlanRecordByPolicyRef(effectivePolicyRef);
+      if (hit) {
+        updates.zohoCaseId = hit.id;
+        const planName = pickPlanName(hit.record);
+        if (planName) updates.zohoPlanName = planName;
+        changes.push({
+          field: "linkedPlan",
+          from: null,
+          to: planName ?? hit.id,
+        });
+      } else {
+        planSyncNote = `No unique Plans record for Policy_Ref="${effectivePolicyRef}"`;
+      }
+    } catch (err) {
+      planSyncNote = `Plans search by Policy_Ref failed: ${(err as Error).message}`;
+    }
+  } else if (effectiveZohoCaseId && !caseRecord.zohoPlanName) {
+    // Backfill Plan Name for cases that already had zohoCaseId cached but
+    // are missing the display name. One-shot — once stored, sync won't
+    // re-fetch it.
+    try {
+      const rec = await findPlanRecordById(effectiveZohoCaseId);
+      if (rec) {
+        const planName = pickPlanName(rec.record);
+        if (planName) updates.zohoPlanName = planName;
+      }
+    } catch (err) {
+      planSyncNote = `Plan Name backfill failed: ${(err as Error).message}`;
+    }
+  }
   if (resolvedProviderId !== caseRecord.providerId) {
     updates.providerId = resolvedProviderId;
     changes.push({
@@ -931,6 +1017,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
         changes,
         paraplannerSyncNote,
         providerSyncNote,
+        planSyncNote,
         cachedZohoIds: {
           zohoOwnerId: cachedZohoOwnerId,
           zohoClientOwnerIds: cachedZohoClientOwnerIds,
@@ -947,6 +1034,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
     changes,
     paraplannerSyncNote,
     providerSyncNote,
+    planSyncNote,
     cachedZohoIds: {
       zohoOwnerId: cachedZohoOwnerId,
       zohoClientOwnerIds: cachedZohoClientOwnerIds,
@@ -956,5 +1044,171 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
     case: updated,
   });
 });
+
+// ── D4: Plans-record link/create flow ────────────────────────
+// Three endpoints back the unlinked-plan banner on Stage 1 + Stage 9
+// fallback. The frontend never talks to Zoho directly — these proxy
+// through so the OAuth token + module-name resolution stay server-side.
+
+// Multi-result Plans search by Policy_Ref starts-with.
+// Used by the "Link existing" picker — returns up to 10 candidates.
+router.get(
+  "/plans/search",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const q = (req.query.q as string | undefined) ?? "";
+    if (!q.trim()) return res.json({ hits: [] });
+    try {
+      const hits = await searchPlansByPolicyRefStartsWith(q, 10);
+      res.json({ hits });
+    } catch (err) {
+      res.status(502).json({ error: (err as Error).message });
+    }
+  },
+);
+
+// Link a chosen existing Plans record to this case.
+// Updates the case row (zohoCaseId, zohoPlanName) and, if a Zoho Task is
+// linked, PATCHes Task.What_Id so the linkage is durable on the CRM side.
+const LinkPlanSchema = z.object({ planRecordId: z.string().min(1) });
+router.post(
+  "/:id/link-plan",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const parsed = LinkPlanSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const caseRow = await prisma.case.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, zohoTaskId: true },
+    });
+    if (!caseRow) return res.status(404).json({ error: "Case not found" });
+
+    const { planRecordId } = parsed.data;
+    // Fetch the Plans record so we can cache Name + verify the id is real
+    // before we touch Task.What_Id. Better to 502 here than half-link.
+    let planName: string | null = null;
+    try {
+      const rec = await findPlanRecordById(planRecordId);
+      if (!rec) return res.status(404).json({ error: "Plans record not found in Zoho" });
+      const nm = rec.record.Name;
+      if (typeof nm === "string" && nm.trim()) planName = nm.trim();
+    } catch (err) {
+      return res.status(502).json({ error: `Plans fetch failed: ${(err as Error).message}` });
+    }
+
+    // Best-effort Task linkage. If it fails (permissions, deleted Task,
+    // etc.), still cache the linkage on the case row — export only needs
+    // the case-side data.
+    let taskLinkNote: string | null = null;
+    if (caseRow.zohoTaskId) {
+      try {
+        await linkTaskToPlan(caseRow.zohoTaskId, planRecordId);
+      } catch (err) {
+        taskLinkNote = `Task ${caseRow.zohoTaskId} What_Id update failed: ${(err as Error).message}`;
+      }
+    }
+
+    const updated = await prisma.case.update({
+      where: { id: req.params.id },
+      data: { zohoCaseId: planRecordId, zohoPlanName: planName },
+    });
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.id,
+        userId: req.user!.id,
+        action: "CASE_UPDATED",
+        source: "MANUAL",
+        newValue: `Linked Plans record ${planName ?? planRecordId}`,
+        metadata: { linkedPlan: { id: planRecordId, name: planName }, taskLinkNote } as Prisma.InputJsonValue,
+      },
+    });
+    res.json({ ok: true, planRecordId, planName, taskLinkNote, case: updated });
+  },
+);
+
+// Create a new Plans record in Zoho from the case's current data, then
+// link it back. The new record carries Policy_Ref + Plan_Type + Provider;
+// the Plans→Contact lookup is DEFERRED to D5 (Aruna to confirm the
+// CRM-side field name). Once confirmed, add the Contact field here.
+router.post(
+  "/:id/create-plan",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const caseRow = await prisma.case.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        policyRef: true,
+        planType: true,
+        zohoTaskId: true,
+        zohoProviderRecordId: true,
+        clientZohoId: true,
+      },
+    });
+    if (!caseRow) return res.status(404).json({ error: "Case not found" });
+    if (!caseRow.policyRef) {
+      return res.status(400).json({ error: "Case has no Policy Ref — cannot create a Plans record without it." });
+    }
+
+    const fields: Record<string, unknown> = {
+      Policy_Ref: caseRow.policyRef,
+      Plan_Type: mapPlanTypeToZoho(caseRow.planType),
+    };
+    if (caseRow.zohoProviderRecordId) {
+      fields.Provider = { id: caseRow.zohoProviderRecordId };
+    }
+    // TODO(D5): set the Plans→Contact lookup field once Aruna confirms its
+    // API name (likely `Client`, `Contact_Name`, or `Client_Id`). For now
+    // the new Plans record is Contact-orphaned — matches today's manual
+    // workflow exactly.
+
+    let created: { id: string; name: string | null };
+    try {
+      created = await createPlanRecord(fields);
+    } catch (err) {
+      return res.status(502).json({ error: (err as Error).message });
+    }
+
+    let taskLinkNote: string | null = null;
+    if (caseRow.zohoTaskId) {
+      try {
+        await linkTaskToPlan(caseRow.zohoTaskId, created.id);
+      } catch (err) {
+        taskLinkNote = `Task ${caseRow.zohoTaskId} What_Id update failed: ${(err as Error).message}`;
+      }
+    }
+
+    const updated = await prisma.case.update({
+      where: { id: req.params.id },
+      data: { zohoCaseId: created.id, zohoPlanName: created.name },
+    });
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.id,
+        userId: req.user!.id,
+        action: "CASE_UPDATED",
+        source: "MANUAL",
+        newValue: `Created Plans record ${created.name ?? created.id}`,
+        metadata: {
+          createdPlan: { id: created.id, name: created.name },
+          payload: fields,
+          taskLinkNote,
+          contactLinkPending: "D5 — Plans→Contact field name unconfirmed",
+        } as Prisma.InputJsonValue,
+      },
+    });
+    res.json({
+      ok: true,
+      planRecordId: created.id,
+      planName: created.name,
+      taskLinkNote,
+      contactLinkPending: true,
+      case: updated,
+    });
+  },
+);
 
 export { router as caseRoutes };

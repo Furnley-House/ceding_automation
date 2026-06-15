@@ -176,7 +176,6 @@ ProviderHub`;
       {
         loa_status: "received",
         loa_notes: notes || null,
-        pdf_received_date: new Date().toISOString().slice(0, 10),
       },
       { onSuccess: () => toast.success("LOA received — ready for document upload") },
     );
