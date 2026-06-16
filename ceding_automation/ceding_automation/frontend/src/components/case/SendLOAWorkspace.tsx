@@ -158,11 +158,6 @@ ProviderHub`;
 
   // Use encodeURIComponent (not URLSearchParams) so spaces become %20 instead of "+".
   // Outlook Web's deeplink renders "+" literally in the body.
-  const buildMailto = (body: string) => {
-    const to = routing.email ?? provider?.email_main ?? "";
-    return `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  };
-
   const buildOutlookWebUrl = (body: string) => {
     const to = routing.email ?? provider?.email_main ?? "";
     const qs =
@@ -312,7 +307,6 @@ ProviderHub`;
           subject={subject}
           initialBody={initialBody}
           followUpBody={followUpBody}
-          buildMailto={buildMailto}
           buildOutlookWebUrl={buildOutlookWebUrl}
           copy={copy}
           notes={emailNotes}
@@ -497,7 +491,6 @@ function EmailPanel({
   subject,
   initialBody,
   followUpBody,
-  buildMailto,
   buildOutlookWebUrl,
   copy,
   notes,
@@ -515,7 +508,6 @@ function EmailPanel({
   subject: string;
   initialBody: string;
   followUpBody: string;
-  buildMailto: (body: string) => string;
   buildOutlookWebUrl: (body: string) => string;
   copy: (text: string, label: string) => void;
   notes: string;
@@ -611,11 +603,6 @@ function EmailPanel({
           <a href={buildOutlookWebUrl(body)} target="_blank" rel="noreferrer">
             <Mail className="h-4 w-4" /> Open in Outlook Web
             <ExternalLink className="h-3.5 w-3.5" />
-          </a>
-        </Button>
-        <Button asChild variant="outline" className="gap-1.5">
-          <a href={buildMailto(body)}>
-            <Mail className="h-4 w-4" /> Open in desktop mail
           </a>
         </Button>
         <Button variant="outline" onClick={() => copy(body, "Body")} className="gap-1.5">
