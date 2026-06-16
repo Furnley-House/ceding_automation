@@ -48,7 +48,7 @@ const limiter = rateLimit({
   // 66 requests per doc per submission (65 field PATCHes + 1 doc-level).
   // Multi-doc cases (3-4 docs) blew the shared human-IP budget and 429'd.
   // Internal routes are already guarded by requireInternalKey middleware.
-  skip: (req) => !!req.headers["x-internal-key"],
+  skip: (req) => !!req.headers["x-internal-key"] || req.path.endsWith("/ai-status"),
 });
 app.use(limiter);
 
