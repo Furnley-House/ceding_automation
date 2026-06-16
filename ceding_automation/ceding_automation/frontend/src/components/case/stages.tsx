@@ -149,7 +149,7 @@ export function StageSendLOA({ caseItem }: StageProps) {
 
 export function StageDocumentUpload({ caseItem }: StageProps) {
   // (Stage 3 — see StageSendLOA above for stage 2)
-  const { documents, removeDocument, refresh } = useDocuments(caseItem.id);
+  const { documents, removeDocument, refresh } = useDocuments(caseItem.id, { refreshInterval: 5000 });
   return (
     <StagePanel
       num={3}

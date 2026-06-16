@@ -33,7 +33,7 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     loading,
     refresh: refreshDocuments,
     removeDocument,
-  } = useDocuments(caseId);
+  } = useDocuments(caseId, { refreshInterval: 5000 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [jumpRequest, setJumpRequest] = useState<{ page: number; banner: string; nonce: number } | null>(

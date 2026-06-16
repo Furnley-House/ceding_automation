@@ -23,7 +23,9 @@ const EMPTY_STATUS: ExtractionStatus = {
   elapsedMs: null,
 };
 
-const POLL_INTERVAL_MS = 3000;
+const BASE_INTERVAL_MS = 3000;
+const MAX_INTERVAL_MS = 30000;
+const STOP_AFTER_429_COUNT = 3;
 
 /**
  * Poll the backend for AI extraction progress on a specific document.
@@ -34,9 +36,15 @@ const POLL_INTERVAL_MS = 3000;
  *
  * `onComplete` fires exactly once when status transitions to "completed".
  * The latest callback closure is captured via a ref so passing a fresh
- * arrow function on every render doesn't tear down the interval.
+ * arrow function on every render doesn't tear down the polling cycle.
  *
- * Mirrors the pollRef pattern in CallWorkspace.tsx (ring-out status).
+ * S2 (Stage 3/4 redesign, Decision 5): the poll loop uses self-rescheduling
+ * setTimeout (not setInterval) so it can grow the delay between ticks on
+ * error. Exponential backoff to a 30s cap on any error; reset to 3s on the
+ * next 200. Stop polling entirely after 3 consecutive 429s — preventing
+ * the click-spam-into-a-429-wall pattern that bit UAT before /ai-status was
+ * exempted from the limiter. The hook only resumes after a caseId or
+ * documentId change re-mounts the effect.
  */
 export function useExtractionStatus(
   caseId: string,
@@ -44,12 +52,11 @@ export function useExtractionStatus(
   onComplete?: () => void
 ): ExtractionStatus {
   const [state, setState] = useState<ExtractionStatus>(EMPTY_STATUS);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const onCompleteRef = useRef(onComplete);
   const completeFiredRef = useRef(false);
 
   // Keep the latest onComplete in a ref so the effect below can stay scoped
-  // to caseId / documentId without re-mounting the interval each render.
+  // to caseId / documentId without re-mounting the poller each render.
   useEffect(() => {
     onCompleteRef.current = onComplete;
   });
@@ -60,11 +67,26 @@ export function useExtractionStatus(
 
     if (!documentId) return;
 
+    let stopped = false;
+    let currentDelay = BASE_INTERVAL_MS;
+    let consecutive429s = 0;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = () => {
+      if (stopped) return;
+      timeoutId = setTimeout(tick, currentDelay);
+    };
+
     const tick = async () => {
+      if (stopped) return;
       try {
         const res = await api.get(
           `/cases/${caseId}/documents/${documentId}/ai-status`
         );
+        // Success: reset backoff and 429 counter.
+        consecutive429s = 0;
+        currentDelay = BASE_INTERVAL_MS;
+
         const data = (res.data ?? {}) as Record<string, unknown>;
         const next: ExtractionStatus = {
           jobId: typeof data.jobId === "string" ? data.jobId : null,
@@ -85,30 +107,40 @@ export function useExtractionStatus(
         setState(next);
 
         if (next.status === "completed" || next.status === "failed") {
-          if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-          }
+          stopped = true;
           if (next.status === "completed" && !completeFiredRef.current) {
             completeFiredRef.current = true;
             onCompleteRef.current?.();
           }
+          return; // terminal — do not reschedule
         }
       } catch (err) {
-        // A single failed poll shouldn't crash the parent. Log and let the
-        // next tick retry — the interval keeps running.
+        const httpStatus = (err as { response?: { status?: number } })?.response
+          ?.status;
+        if (httpStatus === 429) {
+          consecutive429s++;
+          if (consecutive429s >= STOP_AFTER_429_COUNT) {
+            console.error(
+              "[useExtractionStatus] 3 consecutive 429s — stopping poller",
+            );
+            stopped = true;
+            return; // bail — won't resume until the effect re-mounts
+          }
+        } else {
+          consecutive429s = 0;
+        }
+        // Exponential backoff up to MAX. Recovers to BASE on next 200.
+        currentDelay = Math.min(currentDelay * 2, MAX_INTERVAL_MS);
         console.error("[useExtractionStatus]", err);
       }
+      schedule();
     };
 
-    void tick();
-    pollRef.current = setInterval(tick, POLL_INTERVAL_MS);
+    void tick(); // fire immediately on mount, then self-reschedule
 
     return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
+      stopped = true;
+      if (timeoutId) clearTimeout(timeoutId);
     };
   }, [caseId, documentId]);
 

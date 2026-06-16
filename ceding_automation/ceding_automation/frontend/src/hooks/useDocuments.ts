@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 
 export interface DocumentRow {
@@ -31,7 +31,11 @@ function snakeKeys(v: unknown): unknown {
   return v;
 }
 
-export function useDocuments(caseId: string | undefined) {
+export function useDocuments(
+  caseId: string | undefined,
+  options?: { refreshInterval?: number },
+) {
+  const refreshInterval = options?.refreshInterval ?? 0;
   const [documents, setDocuments] = useState<DocumentRow[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -48,7 +52,33 @@ export function useDocuments(caseId: string | undefined) {
     }
   }, [caseId]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  // S2 (Stage 3/4 redesign, Decision 5): opt-in live polling. When the caller
+  // sets a refreshInterval, the doc list refreshes on that cadence — but
+  // self-throttles to a no-op once every doc reaches a terminal status
+  // (EXTRACTED / ERROR per the Prisma DocumentStatus enum). UPLOADED and
+  // PROCESSING are treated as in-flight: keep polling. A `documentsRef`
+  // lets the interval read the latest documents without re-creating the
+  // timer on every render. The GET /api/cases/:id/documents route is
+  // exempted from the rate limiter (backend/src/index.ts skip predicate)
+  // so multi-user shared-NAT polling won't 429.
+  const documentsRef = useRef(documents);
+  useEffect(() => {
+    documentsRef.current = documents;
+  });
+
+  useEffect(() => {
+    refresh();
+    if (refreshInterval <= 0) return;
+
+    const id = setInterval(() => {
+      const anyInFlight = documentsRef.current.some((d) => {
+        const s = d.status;
+        return s !== "EXTRACTED" && s !== "ERROR";
+      });
+      if (anyInFlight) refresh();
+    }, refreshInterval);
+    return () => clearInterval(id);
+  }, [caseId, refresh, refreshInterval]);
 
   const removeDocument = async (doc: DocumentRow) => {
     try {
