@@ -52,6 +52,13 @@ export async function applyFieldExtraction(args: {
 
   // (1) Preservation guard — never stomp CA-Team edits or adviser approvals.
   if (field.isApproved || field.isManuallyOverridden) {
+    console.log(
+      "[merge-outcome] outcome=preserved case=%s field=%s job=%s doc=%s",
+      args.caseId,
+      args.fieldKey,
+      args.jobId,
+      args.documentId,
+    );
     return { outcome: "preserved", fieldId: field.id };
   }
 
@@ -66,6 +73,13 @@ export async function applyFieldExtraction(args: {
     args.data.confidence === "MISSING" ||
     (typeof args.data.value === "string" && args.data.value.trim().toUpperCase() === "MISSING");
   if (looksMissing && field.value !== null) {
+    console.log(
+      "[merge-outcome] outcome=no-overwrite-missing case=%s field=%s job=%s doc=%s",
+      args.caseId,
+      args.fieldKey,
+      args.jobId,
+      args.documentId,
+    );
     return { outcome: "no-overwrite-missing", fieldId: field.id };
   }
 
@@ -133,6 +147,15 @@ export async function applyFieldExtraction(args: {
         } as Prisma.InputJsonValue,
       },
     });
+    console.log(
+      "[merge-outcome] outcome=conflict case=%s field=%s job=%s doc=%s existingLen=%s incomingLen=%s",
+      args.caseId,
+      args.fieldKey,
+      args.jobId,
+      args.documentId,
+      field.value === null ? "null" : String(field.value.length),
+      newValueStr === null ? "null" : String(newValueStr.length),
+    );
     return { outcome: "conflict", fieldId: field.id };
   }
 
@@ -216,6 +239,15 @@ export async function applyFieldExtraction(args: {
   // Propagate this field's value to the Case row (provider, policy_ref,
   // plan_start_date). Fail-soft — checklist write already succeeded.
   await mirrorChecklistToCase(args.caseId, field.template.fieldKey, newValueStr);
+  console.log(
+    "[merge-outcome] outcome=applied case=%s field=%s job=%s doc=%s existingLen=%s incomingLen=%s",
+    args.caseId,
+    args.fieldKey,
+    args.jobId,
+    args.documentId,
+    oldValue === null ? "null" : String(oldValue.length),
+    newValueStr === null ? "null" : String(newValueStr.length),
+  );
   return { outcome: "applied", fieldId: field.id };
 }
 
