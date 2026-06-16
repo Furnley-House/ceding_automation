@@ -26,6 +26,11 @@ interface Props {
   onSelect: (id: string) => void;
   onRemove: (doc: DocumentRow) => void;
   onExtractionDone?: () => void;
+  // S1 (Stage 3/4 redesign, Decision 1): let upload-only callers (Stage 3)
+  // suppress the per-row extract (✨) and view (👁) buttons. Stage 4 leaves
+  // these undefined and inherits the true defaults so its UX is unchanged.
+  showExtractButton?: boolean;
+  showViewButton?: boolean;
 }
 
 // Maps Prisma DocumentStatus enum values to display labels/styles
@@ -87,6 +92,8 @@ export function DocumentList({
   onSelect,
   onRemove,
   onExtractionDone,
+  showExtractButton = true,
+  showViewButton = true,
 }: Props) {
   const [extractingId, setExtractingId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -199,15 +206,17 @@ export function DocumentList({
 
             {/* Action buttons */}
             <div className="flex items-center gap-1 shrink-0">
-              <Button
-                size="sm"
-                variant={isSelected ? "default" : "outline"}
-                className="h-8 px-2"
-                onClick={() => onSelect(d.id)}
-                title="View PDF"
-              >
-                <Eye className="h-3.5 w-3.5" />
-              </Button>
+              {showViewButton && (
+                <Button
+                  size="sm"
+                  variant={isSelected ? "default" : "outline"}
+                  className="h-8 px-2"
+                  onClick={() => onSelect(d.id)}
+                  title="View PDF"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                </Button>
+              )}
               {/* Stop button — only when extraction is in flight. Lets the
                   user unblock themselves from a stale "Extracting…" badge
                   so they can retry, remove, or upload a different document. */}
@@ -227,19 +236,21 @@ export function DocumentList({
                   )}
                 </Button>
               )}
-              <Button
-                size="sm"
-                onClick={() => runExtraction(d)}
-                disabled={isExtracting}
-                className="h-8 px-2"
-                title={isExtracting ? "Extraction in progress" : "Run AI extraction"}
-              >
-                {isExtracting ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Sparkles className="h-3.5 w-3.5" />
-                )}
-              </Button>
+              {showExtractButton && (
+                <Button
+                  size="sm"
+                  onClick={() => runExtraction(d)}
+                  disabled={isExtracting}
+                  className="h-8 px-2"
+                  title={isExtracting ? "Extraction in progress" : "Run AI extraction"}
+                >
+                  {isExtracting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              )}
               <Button
                 size="sm"
                 variant="ghost"

@@ -170,6 +170,8 @@ export function StageDocumentUpload({ caseItem }: StageProps) {
             selectedId={null}
             onSelect={() => {}}
             onRemove={removeDocument}
+            showExtractButton={false}
+            showViewButton={false}
           />
         </div>
       </div>
