@@ -1136,9 +1136,12 @@ router.post(
 );
 
 // Create a new Plans record in Zoho from the case's current data, then
-// link it back. The new record carries Policy_Ref + Plan_Type + Provider;
-// the Plans→Contact lookup is DEFERRED to D5 (Aruna to confirm the
-// CRM-side field name). Once confirmed, add the Contact field here.
+// link it back. Three writes happen here:
+//   1. POST a new Plans record with Policy_Ref + Plan_Type + Provider
+//   2. PATCH the Zoho Task's What_Id so it points at the new Plan
+//   3. Create Plans_X_Clients junction row(s) so the Plan appears under
+//      the client in CRM — uses cached zohoClientOwnerIds / clientZohoId
+//      (multi-client / joint plans get multiple junction rows).
 router.post(
   "/:id/create-plan",
   requireAuth,
@@ -1168,10 +1171,9 @@ router.post(
     if (caseRow.zohoProviderRecordId) {
       fields.Provider = { id: caseRow.zohoProviderRecordId };
     }
-    // TODO(D5): set the Plans→Contact lookup field once Aruna confirms its
-    // API name (likely `Client`, `Contact_Name`, or `Client_Id`). For now
-    // the new Plans record is Contact-orphaned — matches today's manual
-    // workflow exactly.
+    // Plan↔Client linkage is NOT a field on the Plans record itself — it's
+    // a separate row in the Plans_X_Clients junction module, created below
+    // via createPlansXClientsLinks() once the Plan record id is known.
 
     let created: { id: string; name: string | null };
     try {
@@ -1233,7 +1235,6 @@ router.post(
           taskLinkNote,
           plansXClientsNote,
           plansXClientsResult,
-          contactLinkPending: "D5 — Plans→Contact field name unconfirmed",
         } as Prisma.InputJsonValue,
       },
     });
@@ -1245,7 +1246,6 @@ router.post(
       plansXClientsNote,
       plansXClientsCreated: plansXClientsResult.created,
       plansXClientsErrors: plansXClientsResult.errors,
-      contactLinkPending: true,
       case: updated,
     });
   },

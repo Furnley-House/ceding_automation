@@ -3,19 +3,13 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ListChecks,
   Loader2,
-  Plus,
-  Pencil,
-  Power,
-  PowerOff,
   ArrowUp,
   ArrowDown,
-  X,
   GripVertical,
+  Lock,
 } from "lucide-react";
 import { checklistTemplatesApi } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -23,14 +17,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
@@ -95,12 +81,17 @@ interface Template {
   updatedAt: string;
 }
 
+// Editing the canonical checklist is deliberately locked here. The AI
+// extraction layer is trained against the canonical JSON in lockstep —
+// adding / renaming / removing fields without re-training the extractor
+// causes silent quality regressions (the AI starts dropping fields it
+// no longer recognises, or filling stale keys). The Add / Edit / Delete
+// buttons stay disabled until an AI-retraining workflow exists; admins
+// can still re-order the list, which is purely cosmetic and safe.
 export function ChecklistTemplatesPanel() {
   const qc = useQueryClient();
   const [planType, setPlanType] = useState<PlanType>("PENSION");
   const [showInactive, setShowInactive] = useState(true);
-  const [editing, setEditing] = useState<Template | null>(null);
-  const [creating, setCreating] = useState(false);
 
   const { data: templates = [], isLoading } = useQuery({
     queryKey: ["checklist-templates", planType, "all"],
@@ -136,19 +127,6 @@ export function ChecklistTemplatesPanel() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["checklist-templates"] }),
     onError: (e: Error) =>
       toast.error("Reorder failed", { description: e.message }),
-  });
-
-  const toggleActive = useMutation({
-    mutationFn: async (t: Template) => {
-      if (t.isActive) return checklistTemplatesApi.delete(t.id);
-      return checklistTemplatesApi.update(t.id, { isActive: true });
-    },
-    onSuccess: (_, t) => {
-      qc.invalidateQueries({ queryKey: ["checklist-templates"] });
-      toast.success(t.isActive ? "Field deactivated" : "Field reactivated");
-    },
-    onError: (e: Error) =>
-      toast.error("Update failed", { description: e.message }),
   });
 
   // Move a template up/down within the active list. We rebuild displayOrder
@@ -188,15 +166,31 @@ export function ChecklistTemplatesPanel() {
               Checklist Templates
             </h2>
             <p className="text-xs text-muted-foreground mt-0.5 max-w-md">
-              Define the fields each plan type's checklist will collect. Edits
-              here affect <strong>future cases</strong> only — existing cases
-              keep their snapshot.
+              View the field definitions each plan type's checklist will
+              collect, and reorder them. Adding, editing, or deactivating
+              fields is locked here.
             </p>
           </div>
         </div>
-        <Button onClick={() => setCreating(true)} className="gap-2 shrink-0">
-          <Plus className="h-4 w-4" /> Add field
-        </Button>
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1 text-[11px] font-semibold text-warning shrink-0">
+          <Lock className="h-3.5 w-3.5" /> Read-only
+        </span>
+      </div>
+
+      {/* Why-locked banner — explains why Add / Edit / Deactivate are missing
+          so a future admin doesn't think they're staring at a broken UI. */}
+      <div className="rounded-md border border-warning/30 bg-warning/5 p-3 mb-4 flex items-start gap-2.5">
+        <Lock className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+        <div className="text-xs text-foreground">
+          <p className="font-semibold">Checklist editing is locked</p>
+          <p className="text-muted-foreground mt-0.5">
+            The AI extraction layer is trained against this exact field set.
+            Adding, renaming or removing a field without retraining the
+            extractor causes silent quality regressions. Reordering is safe
+            and remains available. To change the field set, coordinate with
+            the AI team on a paired schema + training update.
+          </p>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
@@ -307,6 +301,8 @@ export function ChecklistTemplatesPanel() {
                           </p>
                         )}
                       </div>
+                      {/* Only reorder controls remain — Edit / Deactivate /
+                          Activate are intentionally absent, see lock banner. */}
                       <div className="flex items-center gap-1 shrink-0">
                         <Button
                           variant="outline"
@@ -328,39 +324,6 @@ export function ChecklistTemplatesPanel() {
                         >
                           <ArrowDown className="h-3 w-3" />
                         </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 px-2 gap-1 text-xs"
-                          onClick={() => setEditing(t)}
-                        >
-                          <Pencil className="h-3 w-3" /> Edit
-                        </Button>
-                        {t.isActive ? (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 px-2 gap-1 text-xs text-overdue hover:text-overdue"
-                            onClick={() => {
-                              if (confirm(`Deactivate field "${t.fieldName}"?`)) {
-                                toggleActive.mutate(t);
-                              }
-                            }}
-                            disabled={toggleActive.isPending}
-                          >
-                            <PowerOff className="h-3 w-3" />
-                          </Button>
-                        ) : (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 px-2 gap-1 text-xs text-success hover:text-success"
-                            onClick={() => toggleActive.mutate(t)}
-                            disabled={toggleActive.isPending}
-                          >
-                            <Power className="h-3 w-3" />
-                          </Button>
-                        )}
                       </div>
                     </li>
                   );
@@ -371,371 +334,14 @@ export function ChecklistTemplatesPanel() {
         </div>
       )}
 
-      {creating && (
-        <TemplateEditorDialog
-          open={creating}
-          onOpenChange={setCreating}
-          mode="create"
-          defaultPlanType={planType}
-        />
-      )}
-      {editing && (
-        <TemplateEditorDialog
-          open={!!editing}
-          onOpenChange={(o) => !o && setEditing(null)}
-          mode="edit"
-          template={editing}
-        />
-      )}
+      {/* TemplateEditorDialog (create + edit) and the deactivate / reactivate
+          mutations were removed when this panel went read-only. Restore from
+          git history (look for ChecklistTemplatesPanel.tsx before 16-Jun) once
+          the AI extraction layer supports a paired field-set + retraining
+          workflow — the backend endpoints (POST / PATCH / DELETE on
+          /checklist-templates) still exist and just need their UI re-wired. */}
     </div>
   );
-}
-
-interface TemplateFormState {
-  planType: PlanType;
-  sectionName: string;
-  fieldName: string;
-  fieldKey: string;
-  fieldType: FieldType;
-  isRequired: boolean;
-  conditionalNote: string;
-  dropdownOptions: string[];
-}
-
-function TemplateEditorDialog({
-  open,
-  onOpenChange,
-  mode,
-  template,
-  defaultPlanType,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  mode: "create" | "edit";
-  template?: Template;
-  defaultPlanType?: PlanType;
-}) {
-  const qc = useQueryClient();
-  const [form, setForm] = useState<TemplateFormState>(() => {
-    if (template) {
-      return {
-        planType: template.planType,
-        sectionName: template.sectionName,
-        fieldName: template.fieldName,
-        fieldKey: template.fieldKey,
-        fieldType: template.fieldType,
-        isRequired: template.isRequired,
-        conditionalNote: template.conditionalNote ?? "",
-        dropdownOptions: template.dropdownOptions ?? [],
-      };
-    }
-    return {
-      planType: defaultPlanType ?? "PENSION",
-      sectionName: "",
-      fieldName: "",
-      fieldKey: "",
-      fieldType: "text",
-      isRequired: true,
-      conditionalNote: "",
-      dropdownOptions: [],
-    };
-  });
-  const [optionDraft, setOptionDraft] = useState("");
-
-  const save = useMutation({
-    mutationFn: async () => {
-      const payload: Record<string, unknown> = {
-        sectionName: form.sectionName.trim(),
-        fieldName: form.fieldName.trim(),
-        fieldKey: form.fieldKey.trim(),
-        fieldType: form.fieldType,
-        isRequired: form.isRequired,
-        conditionalNote: form.conditionalNote.trim() || null,
-        dropdownOptions:
-          form.fieldType === "dropdown" ? form.dropdownOptions : [],
-      };
-      if (mode === "create") {
-        payload.planType = form.planType;
-        const res = await checklistTemplatesApi.create(payload);
-        return res.data as Template;
-      }
-      const res = await checklistTemplatesApi.update(template!.id, payload);
-      return res.data as Template;
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["checklist-templates"] });
-      toast.success(mode === "create" ? "Field added" : "Field updated");
-      onOpenChange(false);
-    },
-    onError: (e: unknown) => {
-      const err = e as { response?: { data?: { error?: unknown } }; message?: string };
-      const errorVal = err?.response?.data?.error;
-      const description =
-        typeof errorVal === "string"
-          ? errorVal
-          : (err?.message ?? "Unknown error");
-      toast.error(mode === "create" ? "Create failed" : "Update failed", {
-        description,
-      });
-    },
-  });
-
-  const addOption = () => {
-    const v = optionDraft.trim();
-    if (!v) return;
-    if (form.dropdownOptions.includes(v)) {
-      setOptionDraft("");
-      return;
-    }
-    setForm((f) => ({ ...f, dropdownOptions: [...f.dropdownOptions, v] }));
-    setOptionDraft("");
-  };
-
-  const removeOption = (opt: string) => {
-    setForm((f) => ({
-      ...f,
-      dropdownOptions: f.dropdownOptions.filter((o) => o !== opt),
-    }));
-  };
-
-  const valid =
-    form.sectionName.trim().length > 0 &&
-    form.fieldName.trim().length > 0 &&
-    /^[a-z][a-z0-9_]*$/.test(form.fieldKey.trim()) &&
-    (form.fieldType !== "dropdown" || form.dropdownOptions.length > 0);
-
-  // Auto-derive snake_case key from label when creating
-  const onFieldNameChange = (v: string) => {
-    setForm((f) => {
-      if (mode === "create" && (f.fieldKey === "" || f.fieldKey === toSnake(f.fieldName))) {
-        return { ...f, fieldName: v, fieldKey: toSnake(v) };
-      }
-      return { ...f, fieldName: v };
-    });
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl max-h-[85vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>
-            {mode === "create"
-              ? "Add checklist field"
-              : `Edit ${template?.fieldName ?? "field"}`}
-          </DialogTitle>
-          <DialogDescription>
-            {mode === "create"
-              ? "Defines a new field for the selected plan type's checklist. Future cases will include this field."
-              : "Existing per-case rows keep their stored values. Renaming or changing type is mostly cosmetic at the API layer."}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 py-2">
-          {mode === "create" && (
-            <div>
-              <Label className="text-xs uppercase tracking-wider font-semibold">
-                Plan type *
-              </Label>
-              <Select
-                value={form.planType}
-                onValueChange={(v) =>
-                  setForm({ ...form, planType: v as PlanType })
-                }
-              >
-                <SelectTrigger className="mt-1">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PLAN_TYPES.map((p) => (
-                    <SelectItem key={p} value={p}>
-                      {PLAN_LABELS[p]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-
-          <div className={mode === "create" ? "" : "sm:col-span-2"}>
-            <Label className="text-xs uppercase tracking-wider font-semibold">
-              Section *
-            </Label>
-            <Input
-              value={form.sectionName}
-              onChange={(e) =>
-                setForm({ ...form, sectionName: e.target.value })
-              }
-              placeholder="e.g. Plan Details"
-              className="mt-1"
-              autoFocus
-            />
-          </div>
-
-          <div className="sm:col-span-2">
-            <Label className="text-xs uppercase tracking-wider font-semibold">
-              Field name *
-            </Label>
-            <Input
-              value={form.fieldName}
-              onChange={(e) => onFieldNameChange(e.target.value)}
-              placeholder="e.g. Annual Management Charge"
-              className="mt-1"
-            />
-          </div>
-
-          <div className="sm:col-span-2">
-            <Label className="text-xs uppercase tracking-wider font-semibold">
-              Field key *
-            </Label>
-            <Input
-              value={form.fieldKey}
-              onChange={(e) =>
-                setForm({ ...form, fieldKey: e.target.value.toLowerCase() })
-              }
-              placeholder="e.g. annual_management_charge"
-              className="mt-1 font-mono text-sm"
-              disabled={mode === "edit"}
-            />
-            <p className="text-[10px] text-muted-foreground mt-0.5">
-              {mode === "edit"
-                ? "Field key is locked after creation to keep per-case rows in sync."
-                : "snake_case · lowercase letters, digits, underscores · must be unique per plan type."}
-            </p>
-          </div>
-
-          <div>
-            <Label className="text-xs uppercase tracking-wider font-semibold">
-              Field type *
-            </Label>
-            <Select
-              value={form.fieldType}
-              onValueChange={(v) =>
-                setForm({ ...form, fieldType: v as FieldType })
-              }
-            >
-              <SelectTrigger className="mt-1">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {FIELD_TYPES.map((t) => (
-                  <SelectItem key={t} value={t}>
-                    {FIELD_TYPE_LABELS[t]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div>
-            <Label className="text-xs uppercase tracking-wider font-semibold">
-              Required
-            </Label>
-            <div className="mt-2 flex items-center gap-2">
-              <Switch
-                checked={form.isRequired}
-                onCheckedChange={(v) => setForm({ ...form, isRequired: v })}
-              />
-              <span className="text-sm text-foreground">
-                {form.isRequired ? "Required field" : "Optional"}
-              </span>
-            </div>
-          </div>
-
-          {form.fieldType === "dropdown" && (
-            <div className="sm:col-span-2">
-              <Label className="text-xs uppercase tracking-wider font-semibold">
-                Dropdown options *
-              </Label>
-              <p className="text-[11px] text-muted-foreground mt-0.5">
-                CA team will pick exactly one of these.
-              </p>
-              <div className="flex flex-wrap gap-1.5 mt-2">
-                {form.dropdownOptions.map((opt) => (
-                  <span
-                    key={opt}
-                    className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-md bg-muted text-foreground border border-border"
-                  >
-                    {opt}
-                    <button
-                      type="button"
-                      onClick={() => removeOption(opt)}
-                      className="text-muted-foreground hover:text-foreground"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </span>
-                ))}
-              </div>
-              <div className="flex gap-2 mt-2">
-                <Input
-                  value={optionDraft}
-                  onChange={(e) => setOptionDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      addOption();
-                    }
-                  }}
-                  placeholder="Add option…"
-                  className="h-8 text-sm"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={addOption}
-                  disabled={!optionDraft.trim()}
-                >
-                  Add
-                </Button>
-              </div>
-            </div>
-          )}
-
-          <div className="sm:col-span-2">
-            <Label className="text-xs uppercase tracking-wider font-semibold">
-              Help text (tooltip)
-            </Label>
-            <Textarea
-              value={form.conditionalNote}
-              onChange={(e) =>
-                setForm({ ...form, conditionalNote: e.target.value })
-              }
-              rows={2}
-              placeholder="Guidance shown to the CA team when filling this field."
-              className="mt-1"
-            />
-          </div>
-        </div>
-
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-            disabled={save.isPending}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={() => save.mutate()}
-            disabled={!valid || save.isPending}
-            className="gap-2"
-          >
-            {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-            {mode === "create" ? "Create field" : "Save changes"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function toSnake(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .replace(/_+/g, "_");
 }
 
 function Stat({

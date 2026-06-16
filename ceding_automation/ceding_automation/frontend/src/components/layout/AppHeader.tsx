@@ -1,10 +1,11 @@
 import { Search, ChevronDown, LogOut, RefreshCw, Settings, BarChart3, Contrast } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getCases } from "@/services/api";
 import { useRole, ROLE_LABELS } from "@/hooks/useRole";
 import { useHighContrast } from "@/hooks/useHighContrast";
+import { useAuth } from "@/hooks/useAuth";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,7 +23,21 @@ export function AppHeader() {
   const navigate = useNavigate();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { role, userName, clearRole } = useRole();
+  const { signOut } = useAuth();
+  const qc = useQueryClient();
   const { enabled: highContrast, toggle: toggleHighContrast } = useHighContrast();
+
+  // Full sign-out: clear JWT + persisted role + React Query cache, then
+  // bounce to the root so ProtectedRoute sends the user back to SSO.
+  // The old menu item shared the "Switch role" handler, which only wiped
+  // the role from localStorage but left the JWT live — picking a role
+  // again let the user back in without re-authenticating.
+  const handleSignOut = async () => {
+    await signOut();
+    clearRole();
+    qc.clear();
+    navigate("/", { replace: true });
+  };
 
   const { data: cases = [] } = useQuery({ queryKey: ["cases"], queryFn: getCases });
 
@@ -173,7 +188,7 @@ export function AppHeader() {
               <RefreshCw className="mr-2 h-4 w-4" /> Switch role
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={clearRole}>
+            <DropdownMenuItem onClick={handleSignOut}>
               <LogOut className="mr-2 h-4 w-4" /> Sign out
             </DropdownMenuItem>
           </DropdownMenuContent>

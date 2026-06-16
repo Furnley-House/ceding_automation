@@ -99,6 +99,7 @@ export function StageCaseDetails({ caseItem }: StageProps) {
             policyRef={caseItem.plan_number ?? null}
             planType={caseItem.plan_type}
             provider={caseItem.Provider_group ?? null}
+            clientName={caseItem.client_name ?? null}
           />
         </div>
       )}

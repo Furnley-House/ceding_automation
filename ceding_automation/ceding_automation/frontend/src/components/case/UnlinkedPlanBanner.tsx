@@ -6,8 +6,10 @@
 //     pick a candidate, backend caches it on the case + PATCHes Zoho
 //     Task.What_Id.
 //   • Create new in Zoho — backend POSTs a Plans record with Policy_Ref +
-//     Plan_Type + Provider, links to the Task, caches on the case.
-//     (Plans→Contact link is deferred to D5 — Aruna confirms field name.)
+//     Plan_Type + Provider, PATCHes the Task.What_Id, AND creates the
+//     Plans_X_Clients junction row(s) so the Plan appears under the client
+//     in CRM. The dialog shows the client name so the operator can confirm
+//     who the new Plan will be linked to.
 //
 // Both flows trigger a refetch of the case query on success so the header
 // LinkedPlanField flips to ✓ Linked without a page reload.
@@ -31,11 +33,23 @@ interface Props {
   policyRef: string | null;
   planType: string;
   provider: string | null;
+  /** Client name shown in the Create-new dialog so the operator can see who
+   *  the new Plans record will be linked to. The Plans→Contact link itself
+   *  is established server-side via the Plans_X_Clients junction module
+   *  (using cached zohoClientOwnerIds / clientZohoId on the case). */
+  clientName: string | null;
   /** Optional compact mode for the Stage 9 receipt slot. */
   compact?: boolean;
 }
 
-export function UnlinkedPlanBanner({ caseId, policyRef, planType, provider, compact = false }: Props) {
+export function UnlinkedPlanBanner({
+  caseId,
+  policyRef,
+  planType,
+  provider,
+  clientName,
+  compact = false,
+}: Props) {
   const [linkOpen, setLinkOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
 
@@ -87,6 +101,7 @@ export function UnlinkedPlanBanner({ caseId, policyRef, planType, provider, comp
           policyRef={policyRef}
           planType={planType}
           provider={provider}
+          clientName={clientName}
           onClose={() => setCreateOpen(false)}
         />
       )}
@@ -219,12 +234,14 @@ function CreatePlanDialog({
   policyRef,
   planType,
   provider,
+  clientName,
   onClose,
 }: {
   caseId: string;
   policyRef: string | null;
   planType: string;
   provider: string | null;
+  clientName: string | null;
   onClose: () => void;
 }) {
   const qc = useQueryClient();
@@ -238,13 +255,11 @@ function CreatePlanDialog({
         plansXClientsNote?: string | null;
         plansXClientsCreated?: number;
         plansXClientsErrors?: string[];
-        contactLinkPending: boolean;
       };
       const desc =
         `${data.planName ?? data.planRecordId} created` +
         (data.taskLinkNote ? ` · ${data.taskLinkNote}` : "") +
-        (data.plansXClientsNote ? ` · ${data.plansXClientsNote}` : "") +
-        (data.contactLinkPending ? " · Contact link pending (manual step in Zoho)" : "");
+        (data.plansXClientsNote ? ` · ${data.plansXClientsNote}` : "");
       const hasJunctionErrors = (data.plansXClientsErrors?.length ?? 0) > 0;
       if (hasJunctionErrors) {
         toast.warning("Plans created — some client links failed", { description: desc });
@@ -264,7 +279,8 @@ function CreatePlanDialog({
     <DialogShell onClose={onClose} title="Create new Plans record in Zoho">
       <p className="text-xs text-muted-foreground mb-3">
         The following values will be sent to the Zoho Plans module to create a fresh record. The
-        Zoho Task will be linked automatically via <span className="font-mono">What_Id</span>.
+        Zoho Task will be linked automatically via <span className="font-mono">What_Id</span>,
+        and the new Plan will be linked to the client via the Plans_X_Clients junction module.
       </p>
       <dl className="grid grid-cols-[120px_1fr] gap-x-3 gap-y-2 text-xs mb-3 rounded-md border border-border p-3 bg-muted/30">
         <dt className="text-muted-foreground">Policy Ref</dt>
@@ -273,11 +289,8 @@ function CreatePlanDialog({
         <dd className="text-foreground">{planType}</dd>
         <dt className="text-muted-foreground">Provider</dt>
         <dd className="text-foreground">{provider ?? "—"}</dd>
-        <dt className="text-muted-foreground">Contact link</dt>
-        <dd className="text-warning text-[11px]">
-          Deferred — Plans→Contact field name pending Aruna confirmation. The new record will be
-          Contact-orphaned and needs a one-time manual link in Zoho until then.
-        </dd>
+        <dt className="text-muted-foreground">Client</dt>
+        <dd className="text-foreground">{clientName ?? "—"}</dd>
       </dl>
       <div className="flex justify-end gap-2">
         <Button size="sm" variant="outline" onClick={onClose} disabled={createMutation.isPending}>

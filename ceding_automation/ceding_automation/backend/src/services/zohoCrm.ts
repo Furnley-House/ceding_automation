@@ -376,9 +376,9 @@ export async function searchPlansByPolicyRefStartsWith(
 // flow when no existing Plans record matches the case's Policy Ref.
 // Returns the new record's id (and Name when Zoho echoes it back).
 //
-// Note: Contact link is intentionally OUT of this helper's signature for
-// now — D5 owns the Plans→Contact lookup field name. Once that lands,
-// callers can pass an extra field on the `fields` payload.
+// Plan↔Contact linkage is established separately via the Plans_X_Clients
+// junction module — see createPlansXClientsLinks() below. We deliberately
+// don't carry the client id on the Plans record itself.
 export async function createPlanRecord(
   fields: Record<string, unknown>,
 ): Promise<{ id: string; name: string | null }> {
