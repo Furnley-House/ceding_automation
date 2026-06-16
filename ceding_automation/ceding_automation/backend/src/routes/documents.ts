@@ -202,6 +202,49 @@ router.delete(
   }
 );
 
+// ── Batch Trigger Extraction (Extract All Pending) ───────
+//
+// S3 of the Stage 3/4 redesign (docs/stage3_4_redesign_design.md,
+// Decision 2). Stage 4's "Extract All" button POSTs here. Finds every
+// doc on the case still in UPLOADED status and submits each through
+// submitOrTrigger. Strict scope: UPLOADED only — ERROR docs are NOT
+// retried by this route, the per-doc /extract route below stays as
+// the escape hatch (γ in the design doc) for retrying a specific
+// failure.
+//
+// Per-doc state transitions are identical to the single-doc route
+// directly below: status flips to PROCESSING, processedAt and
+// errorMessage clear, submitOrTrigger handles BFF dispatch and
+// catches its own failures (sets status=ERROR on submission failure).
+// The fire-and-forget catch is therefore safe.
+//
+// Path is 3-segment (after /api/cases): /:caseId/documents/extract-pending.
+// The single-doc /extract route below is 4-segment, so no path-collision
+// regardless of registration order. Registered first for defensive
+// clarity (literal-path before param-path).
+//
+// Loop is sequential: realistic case has 1-5 docs; even 10+ completes
+// in 2-3s total. Not worth parallelising.
+router.post(
+  "/:caseId/documents/extract-pending",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const pending = await prisma.document.findMany({
+      where: { caseId: req.params.caseId, status: "UPLOADED" },
+      select: { id: true },
+    });
+    for (const doc of pending) {
+      await prisma.document.update({
+        where: { id: doc.id },
+        data: { status: "PROCESSING", processedAt: null, errorMessage: null },
+      });
+      submitOrTrigger(doc.id, req.params.caseId, req.user!.id).catch(console.error);
+    }
+    res.json({ count: pending.length, documentIds: pending.map((d) => d.id) });
+  }
+);
+
 // ── Manually Trigger Extraction ─────────────────────────
 router.post(
   "/:caseId/documents/:docId/extract",
