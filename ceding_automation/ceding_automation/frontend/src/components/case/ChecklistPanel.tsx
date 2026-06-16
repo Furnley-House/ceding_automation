@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useChecklistFields, isMissing, type ChecklistRow } from "@/hooks/useChecklistFields";
 import { useDocuments } from "@/hooks/useDocuments";
-import { api } from "@/lib/api";
+import { checklistApi } from "@/lib/api";
 import { FundDetailsTable } from "./FundDetailsTable";
 
 interface Props {
@@ -172,7 +172,7 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
       },
       onResolve: async (chosenValue: string) => {
         try {
-          await api.resolveConflict(caseId, r.id, chosenValue);
+          await checklistApi.resolveConflict(caseId, r.id, chosenValue);
           await refresh();
           toast.success("Conflict resolved", { description: `Set to "${chosenValue}"` });
         } catch (err) {
