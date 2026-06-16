@@ -217,9 +217,17 @@ model Case {
   loaStatus   LOAStatus  @default(NOT_SENT)
   loaSentAt   DateTime?  // exposed to UI as loa_sent_date via flattenCase
   // LOA bookkeeping written from Stage 2 SendLOAWorkspace.
-  loaNotes         String? // free-text note ("Sent via Origo on …", follow-up info, etc.)
-  loaMethod        String? // "origo" | "email" | "courier"
-  loaTrackingRef   String? // courier tracking / Origo case ref
+  // The chosen send-method (origo / email / courier) — drives which set
+  // of method-scoped fields below are authoritative for the case.
+  loaMethod        String?
+  // Per-method notes + references. Each panel on Stage 2 owns its own
+  // textarea / input, so the values don't leak across tabs when the
+  // operator switches methods.
+  loaOrigoRef      String? // Origo reference (after Unipass submission)
+  loaOrigoNotes    String?
+  loaEmailNotes    String? // (no separate ref for email — recipient is canonical)
+  loaCourierRef    String? // courier tracking number
+  loaCourierNotes  String?
   ragStatus   String? // "GREEN", "AMBER", "RED"
 
   // Assignment

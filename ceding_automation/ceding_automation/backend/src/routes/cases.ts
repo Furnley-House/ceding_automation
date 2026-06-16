@@ -363,9 +363,15 @@ router.patch(
     // LOA bookkeeping (Stage 2 SendLOAWorkspace). Accept null explicitly
     // so the UI can clear a previous value — `typeof null === "object"`,
     // so we test the key presence rather than the type.
-    if ("loaNotes" in body) data.loaNotes = body.loaNotes as string | null;
+    //
+    // Per-method fields (added 16 Jun): each panel on Stage 2 owns its own
+    // textarea/input pair. Notes + refs no longer leak across tabs.
     if ("loaMethod" in body) data.loaMethod = body.loaMethod as string | null;
-    if ("loaTrackingRef" in body) data.loaTrackingRef = body.loaTrackingRef as string | null;
+    if ("loaOrigoRef" in body) data.loaOrigoRef = body.loaOrigoRef as string | null;
+    if ("loaOrigoNotes" in body) data.loaOrigoNotes = body.loaOrigoNotes as string | null;
+    if ("loaEmailNotes" in body) data.loaEmailNotes = body.loaEmailNotes as string | null;
+    if ("loaCourierRef" in body) data.loaCourierRef = body.loaCourierRef as string | null;
+    if ("loaCourierNotes" in body) data.loaCourierNotes = body.loaCourierNotes as string | null;
     if ("loaSentDate" in body) {
       // UI field is the date the LOA went out; stored in loaSentAt (DateTime).
       data.loaSentAt = body.loaSentDate ? new Date(body.loaSentDate as string) : null;

@@ -78,10 +78,28 @@ export function SendLOAWorkspace({ caseItem }: Props) {
     ((caseItem as any).loa_method as Method) ??
     (provider?.is_on_origo ? "origo" : "email");
   const [method, setMethod] = useState<Method>(initialMethod);
-  const [trackingRef, setTrackingRef] = useState<string>(
-    (caseItem as any).loa_tracking_ref ?? "",
+
+  // Per-method notes + tracking refs (16 Jun). The DB has three sets of
+  // columns so switching tabs no longer overwrites another tab's values
+  // and reloading the page hydrates each panel independently.
+  //   Origo:   loa_origo_ref     + loa_origo_notes
+  //   Email:                       loa_email_notes
+  //   Courier: loa_courier_ref   + loa_courier_notes
+  const [origoRef, setOrigoRef] = useState<string>(
+    (caseItem as any).loa_origo_ref ?? "",
   );
-  const [notes, setNotes] = useState<string>((caseItem as any).loa_notes ?? "");
+  const [origoNotes, setOrigoNotes] = useState<string>(
+    (caseItem as any).loa_origo_notes ?? "",
+  );
+  const [emailNotes, setEmailNotes] = useState<string>(
+    (caseItem as any).loa_email_notes ?? "",
+  );
+  const [courierRef, setCourierRef] = useState<string>(
+    (caseItem as any).loa_courier_ref ?? "",
+  );
+  const [courierNotes, setCourierNotes] = useState<string>(
+    (caseItem as any).loa_courier_notes ?? "",
+  );
 
   // Belt-and-braces lowercase: services/api.ts:flattenCase already normalises
   // loa_status, but stale React Query cache from before that fix could still
@@ -164,14 +182,30 @@ ProviderHub`;
     }
   };
 
+  // Each save only writes the chosen method's slot. Other methods' values
+  // are left untouched in the DB — handy if the operator submitted via two
+  // channels on the same case (e.g. retry by Courier after Origo failed)
+  // and we want both references preserved for audit.
+  const fieldsForMethod = (m: Method) => {
+    if (m === "origo")
+      return {
+        loa_origo_ref: origoRef || null,
+        loa_origo_notes: origoNotes || null,
+      };
+    if (m === "email") return { loa_email_notes: emailNotes || null };
+    return {
+      loa_courier_ref: courierRef || null,
+      loa_courier_notes: courierNotes || null,
+    };
+  };
+
   const markSent = () => {
     updateMutation.mutate(
       {
         loa_method: method,
         loa_status: "sent",
-        loa_tracking_ref: trackingRef || null,
-        loa_notes: notes || null,
         loa_sent_date: new Date().toISOString().slice(0, 10),
+        ...fieldsForMethod(method),
       },
       { onSuccess: () => toast.success("LOA marked as sent") },
     );
@@ -179,17 +213,14 @@ ProviderHub`;
 
   const markProcessed = () => {
     updateMutation.mutate(
-      { loa_status: "processed", loa_notes: notes || null },
+      { loa_status: "processed", ...fieldsForMethod(method) },
       { onSuccess: () => toast.success("LOA marked as processed") },
     );
   };
 
   const markReceived = () => {
     updateMutation.mutate(
-      {
-        loa_status: "received",
-        loa_notes: notes || null,
-      },
+      { loa_status: "received", ...fieldsForMethod(method) },
       { onSuccess: () => toast.success("LOA received — ready for document upload") },
     );
   };
@@ -257,14 +288,15 @@ ProviderHub`;
         />
       </div>
 
-      {/* Method-specific panels */}
+      {/* Method-specific panels — each owns its own notes + ref state so
+          switching tabs doesn't bleed values across methods. */}
       {method === "origo" && (
         <OrigoPanel
           provider={provider}
-          trackingRef={trackingRef}
-          setTrackingRef={setTrackingRef}
-          notes={notes}
-          setNotes={setNotes}
+          trackingRef={origoRef}
+          setTrackingRef={setOrigoRef}
+          notes={origoNotes}
+          setNotes={setOrigoNotes}
           status={status}
           onSent={markSent}
           onReceived={markReceived}
@@ -283,8 +315,8 @@ ProviderHub`;
           buildMailto={buildMailto}
           buildOutlookWebUrl={buildOutlookWebUrl}
           copy={copy}
-          notes={notes}
-          setNotes={setNotes}
+          notes={emailNotes}
+          setNotes={setEmailNotes}
           status={status}
           onSent={markSent}
           onProcessed={markProcessed}
@@ -302,10 +334,10 @@ ProviderHub`;
 
       {method === "courier" && (
         <CourierPanel
-          trackingRef={trackingRef}
-          setTrackingRef={setTrackingRef}
-          notes={notes}
-          setNotes={setNotes}
+          trackingRef={courierRef}
+          setTrackingRef={setCourierRef}
+          notes={courierNotes}
+          setNotes={setCourierNotes}
           status={status}
           onSent={markSent}
           onProcessed={markProcessed}
