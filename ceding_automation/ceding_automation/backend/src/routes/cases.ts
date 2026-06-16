@@ -14,6 +14,7 @@ import {
   findPlanRecordById,
   searchPlansByPolicyRefStartsWith,
   createPlanRecord,
+  createPlansXClientsLinks,
   linkTaskToPlan,
   mapPlanTypeToZoho,
 } from "../services/zohoCrm";
@@ -1146,6 +1147,7 @@ router.post(
         zohoTaskId: true,
         zohoProviderRecordId: true,
         clientZohoId: true,
+        zohoClientOwnerIds: true,
       },
     });
     if (!caseRow) return res.status(404).json({ error: "Case not found" });
@@ -1181,6 +1183,33 @@ router.post(
       }
     }
 
+    // Plans_X_Clients junction — without this, the new Plan won't appear under
+    // the Client in CRM. Use cached client-owner IDs (multi-client / joint
+    // plans get multiple rows); fall back to clientZohoId for single-client cases.
+    const clientOwnerIds =
+      caseRow.zohoClientOwnerIds && caseRow.zohoClientOwnerIds.length > 0
+        ? caseRow.zohoClientOwnerIds
+        : caseRow.clientZohoId
+          ? [caseRow.clientZohoId]
+          : [];
+    let plansXClientsResult: { created: number; errors: string[] } = { created: 0, errors: [] };
+    if (clientOwnerIds.length > 0) {
+      try {
+        plansXClientsResult = await createPlansXClientsLinks(created.id, clientOwnerIds);
+      } catch (err) {
+        plansXClientsResult = {
+          created: 0,
+          errors: [`Plans_X_Clients call threw: ${(err as Error).message}`],
+        };
+      }
+    }
+    const plansXClientsNote =
+      clientOwnerIds.length === 0
+        ? "No client IDs cached on the case — Plans_X_Clients skipped"
+        : plansXClientsResult.errors.length === 0
+          ? `Plans_X_Clients ${plansXClientsResult.created} of ${clientOwnerIds.length} linked`
+          : `Plans_X_Clients ${plansXClientsResult.created}/${clientOwnerIds.length} — errors: ${plansXClientsResult.errors.join("; ")}`;
+
     const updated = await prisma.case.update({
       where: { id: req.params.id },
       data: { zohoCaseId: created.id, zohoPlanName: created.name },
@@ -1196,6 +1225,8 @@ router.post(
           createdPlan: { id: created.id, name: created.name },
           payload: fields,
           taskLinkNote,
+          plansXClientsNote,
+          plansXClientsResult,
           contactLinkPending: "D5 — Plans→Contact field name unconfirmed",
         } as Prisma.InputJsonValue,
       },
@@ -1205,6 +1236,9 @@ router.post(
       planRecordId: created.id,
       planName: created.name,
       taskLinkNote,
+      plansXClientsNote,
+      plansXClientsCreated: plansXClientsResult.created,
+      plansXClientsErrors: plansXClientsResult.errors,
       contactLinkPending: true,
       case: updated,
     });

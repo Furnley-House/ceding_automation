@@ -235,13 +235,22 @@ function CreatePlanDialog({
         planName: string | null;
         planRecordId: string;
         taskLinkNote: string | null;
+        plansXClientsNote?: string | null;
+        plansXClientsCreated?: number;
+        plansXClientsErrors?: string[];
         contactLinkPending: boolean;
       };
       const desc =
         `${data.planName ?? data.planRecordId} created` +
         (data.taskLinkNote ? ` · ${data.taskLinkNote}` : "") +
+        (data.plansXClientsNote ? ` · ${data.plansXClientsNote}` : "") +
         (data.contactLinkPending ? " · Contact link pending (manual step in Zoho)" : "");
-      toast.success("Plans record created", { description: desc });
+      const hasJunctionErrors = (data.plansXClientsErrors?.length ?? 0) > 0;
+      if (hasJunctionErrors) {
+        toast.warning("Plans created — some client links failed", { description: desc });
+      } else {
+        toast.success("Plans record created", { description: desc });
+      }
       qc.invalidateQueries({ queryKey: ["case", caseId] });
       qc.invalidateQueries({ queryKey: ["cases"] });
       onClose();

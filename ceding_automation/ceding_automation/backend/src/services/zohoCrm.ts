@@ -255,6 +255,12 @@ function planModuleName(): string {
   return process.env.ZOHO_PLAN_MODULE ?? 'Plans';
 }
 
+// Junction module that links Plans to Clients (multi-client / joint plans).
+// Without rows here, a newly-created Plan won't appear under the Client in CRM.
+function plansXClientsModuleName(): string {
+  return process.env.ZOHO_PLANS_X_CLIENTS_MODULE ?? 'Plans_X_Clients';
+}
+
 // App PlanType enum → exact Plans-module pick-list label. Adjust if your
 // CRM uses different labels for any of these.
 export function mapPlanTypeToZoho(planType: string): string {
@@ -407,6 +413,51 @@ export async function createPlanRecord(
     // Best-effort: name backfill failure shouldn't block the create.
   }
   return { id: newId, name };
+}
+
+// Create Plans_X_Clients junction rows so the Plan shows up under its Client(s)
+// in CRM (multi-client / joint plans need one row per client).
+// Returns { created: N, errors: [...] } — never throws so a partial failure
+// doesn't roll back a successful Plans POST.
+export async function createPlansXClientsLinks(
+  planRecordId: string,
+  clientOwnerIds: string[],
+): Promise<{ created: number; errors: string[] }> {
+  const ids = clientOwnerIds.filter((id) => typeof id === "string" && id.trim().length > 0);
+  if (ids.length === 0) return { created: 0, errors: [] };
+
+  const token = await getAccessToken();
+  const url = `${apiBase()}/${plansXClientsModuleName()}`;
+  const rows = ids.map((clientId) => ({
+    Plans: planRecordId,
+    Client_Owners: clientId,
+  }));
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ data: rows }),
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    return { created: 0, errors: [`POST ${plansXClientsModuleName()} failed (${res.status}): ${body}`] };
+  }
+  const parsed = JSON.parse(body) as {
+    data?: Array<{ status?: string; message?: string; details?: { id?: string } }>;
+  };
+  let created = 0;
+  const errors: string[] = [];
+  (parsed.data ?? []).forEach((row, i) => {
+    if (row.status === "success" && row.details?.id) {
+      created++;
+    } else {
+      errors.push(`row ${i} (client ${ids[i]}): ${row.message ?? "unknown error"}`);
+    }
+  });
+  return { created, errors };
 }
 
 // Link a Zoho Task to a Plans record by setting What_Id + $se_module.
