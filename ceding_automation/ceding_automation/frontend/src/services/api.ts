@@ -123,6 +123,16 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
   // always rendering "Not sent".
   const loaSentDate = (c.loa_sent_at as string | null | undefined) ?? null;
 
+  // SendLOAWorkspace + the rest of the LOA flow compares status values in
+  // lowercase ("not_sent" / "sent" / "processed" / "received"), but Prisma
+  // serialises the LOAStatus enum in UPPERCASE ("NOT_SENT" / "SENT" / …).
+  // Without normalisation here every status branch silently misses, the
+  // method panels never render their "Mark sent / processed / received"
+  // buttons, and the operator sees a notes textarea with no action below
+  // it (UAT bug surfaced 16 Jun).
+  const loaStatusLower =
+    typeof c.loa_status === "string" ? c.loa_status.toLowerCase() : null;
+
   return {
     ...c,
     backend_status: rawStatus,       // keep original for API calls
@@ -130,6 +140,7 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
     current_stage: currentStage,
     stages_completed: stagesCompleted,
     loa_sent_date: loaSentDate,
+    loa_status: loaStatusLower ?? c.loa_status,
     Provider_group: provider?.name ?? "",
     // snake_case alias used by Dashboard / Cases list / MyInbox — without
     // this, every row was being bucketed as "Unknown" on the provider donut.

@@ -1,9 +1,10 @@
-import { Search, ChevronDown, LogOut, RefreshCw, Settings, BarChart3 } from "lucide-react";
+import { Search, ChevronDown, LogOut, RefreshCw, Settings, BarChart3, Contrast } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getCases } from "@/services/api";
 import { useRole, ROLE_LABELS } from "@/hooks/useRole";
+import { useHighContrast } from "@/hooks/useHighContrast";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,6 +13,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
 import { NotificationBell } from "./NotificationBell";
 
 export function AppHeader() {
@@ -20,6 +22,7 @@ export function AppHeader() {
   const navigate = useNavigate();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { role, userName, clearRole } = useRole();
+  const { enabled: highContrast, toggle: toggleHighContrast } = useHighContrast();
 
   const { data: cases = [] } = useQuery({ queryKey: ["cases"], queryFn: getCases });
 
@@ -123,6 +126,19 @@ export function AppHeader() {
         </div>
 
         <NotificationBell />
+
+        {/* High contrast toggle */}
+        <div
+          className="flex items-center gap-1.5 px-2 py-1.5 rounded-md hover:bg-muted transition-colors"
+          title="High contrast mode"
+        >
+          <Contrast className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+          <Switch
+            checked={highContrast}
+            onCheckedChange={toggleHighContrast}
+            aria-label="Toggle high contrast mode"
+          />
+        </div>
 
         <DropdownMenu>
           <DropdownMenuTrigger className="flex items-center gap-3 px-3 py-1.5 rounded-md hover:bg-muted transition-colors">

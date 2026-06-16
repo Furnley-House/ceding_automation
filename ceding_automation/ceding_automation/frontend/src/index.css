@@ -379,3 +379,47 @@
     scrollbar-color: hsl(var(--border)) transparent;
   }
 }
+
+/* ===== Furnley House — High Contrast accessibility mode =====
+   Activated by data-contrast="high" on <html> (set by useHighContrast).
+   Overrides CSS variable tokens so every Tailwind utility (text-muted-foreground,
+   text-teal, etc.) inherits the fix automatically — no per-component changes needed.
+   Contrast ratios verified against WCAG 2.1 AA (≥ 4.5:1) on white / near-white
+   backgrounds. Brand fills (buttons, badges, status dots, stepper circles) are
+   intentionally unchanged — only text and icon colours shift.
+   Specificity: :root[...] = (0,2,0) beats any single attribute theme selector (0,1,0). */
+
+:root[data-contrast="high"] {
+  /* Muted labels — ocean default was 210 2% 55% (~3.4:1), others 215 14% 46% (~4.3:1).
+     New value #52606E → 6:1 on white. */
+  --muted-foreground: 210 15% 38%;
+
+  /* Body / value text — darkened slightly across all themes for ≥ 13:1. */
+  --foreground: 209 30% 12%;
+  --card-foreground: 209 30% 12%;
+  --popover-foreground: 209 30% 12%;
+  --secondary-foreground: 210 23% 29%;
+
+  /* Aqua used as text/icon — was #63B1BC (2.3:1), now #2F7C88 (4.6:1).
+     Sidebar uses --sidebar-primary, not --teal, so sidebar fills are unaffected. */
+  --teal: 188 49% 36%;
+}
+
+/* Success text (e.g. "Linked", "Complete") — targeted override so badge
+   background fills remain on the original green. #1C7A3E → 4.6:1 on white. */
+:root[data-contrast="high"] .text-success {
+  color: hsl(142 63% 29%) !important;
+}
+
+/* Warning text (e.g. "Awaiting Documents" labels). #8A5A00 → 4.7:1 on white. */
+:root[data-contrast="high"] .text-warning {
+  color: hsl(39 100% 27%) !important;
+}
+
+/* Boost tiny uppercase labels — biggest legibility win for low-vision users. */
+:root[data-contrast="high"] .meta-label,
+:root[data-contrast="high"] .field-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}

@@ -56,7 +56,9 @@ enum CaseStatus {
 enum LOAStatus {
   NOT_SENT
   SENT
-  SIGNED
+  PROCESSED // provider acknowledged receipt of the LOA
+  RECEIVED  // signed PDF / policy info pack back from provider
+  SIGNED    // legacy — unused by the UI, kept so the enum migration is non-destructive
 }
 
 enum DocumentStatus {

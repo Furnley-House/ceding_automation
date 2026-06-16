@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { updateCase } from "@/services/api";
 import type { CaseRow } from "@/lib/caseHelpers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -83,13 +83,26 @@ export function SendLOAWorkspace({ caseItem }: Props) {
   );
   const [notes, setNotes] = useState<string>((caseItem as any).loa_notes ?? "");
 
-  const status: string = (caseItem as any).loa_status ?? "not_sent";
+  // Belt-and-braces lowercase: services/api.ts:flattenCase already normalises
+  // loa_status, but stale React Query cache from before that fix could still
+  // surface uppercase Prisma values ("NOT_SENT", "SENT", …). The button
+  // branches below all compare against lowercase, so a single mismatch hides
+  // every action button on every method panel.
+  const rawLoaStatus = (caseItem as any).loa_status;
+  const status: string =
+    typeof rawLoaStatus === "string" ? rawLoaStatus.toLowerCase() : "not_sent";
 
   const updateMutation = useMutation({
+    // IMPORTANT: route through updateCase() (services/api.ts) — it applies
+    // camelKeys() to the body before sending. Calling api.patch() directly
+    // here used to send raw snake_case keys (`loa_notes`, `loa_status`, …)
+    // to the backend, which only reads camelCase (`loaNotes`, `loaStatus`,
+    // …) — so every LOA save silently dropped its fields and React Query's
+    // optimistic cache masked the bug until a hard refresh.
     mutationFn: async (updates: Record<string, any>) => {
-      await api.patch(`/cases/${caseItem.id}`, {
+      await updateCase(caseItem.id, {
         ...updates,
-        lastActivityAt: new Date().toISOString(),
+        last_activity_at: new Date().toISOString(),
       });
     },
     onSuccess: () => {

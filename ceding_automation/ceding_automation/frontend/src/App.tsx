@@ -4,6 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { ThemeProvider } from "@/hooks/useTheme";
+import { HighContrastProvider } from "@/hooks/useHighContrast";
 import { RoleProvider } from "@/hooks/useRole";
 import { AuthProvider } from "@/hooks/useAuth";
 import { RoleGuard } from "@/components/RoleGuard";
@@ -29,52 +30,54 @@ const queryClient = new QueryClient({
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <ThemeProvider>
-      <AuthProvider>
-        <RoleProvider>
-          <TooltipProvider>
-            <Toaster />
-            <Sonner position="bottom-left" closeButton />
-            <BrowserRouter>
-              <Routes>
-                <Route path="/" element={<RolePicker />} />
-                {/* Azure AD SSO callback — must be outside RoleGuard */}
-                <Route path="/auth/callback" element={<AuthCallback />} />
-                <Route path="/presentation" element={<Presentation />} />
-                <Route path="/loa-workflow" element={<LOAWorkflow />} />
-                <Route
-                  element={
-                    <RoleGuard>
-                      <AppLayout />
-                    </RoleGuard>
-                  }
-                >
-                  <Route path="/dashboard" element={<Dashboard />} />
-                  <Route path="/cases" element={<Cases />} />
-                  <Route path="/cases/:id" element={<CaseDetail />} />
-                  <Route path="/providers" element={<ProviderDirectory />} />
+      <HighContrastProvider>
+        <AuthProvider>
+          <RoleProvider>
+            <TooltipProvider>
+              <Toaster />
+              <Sonner position="bottom-left" closeButton />
+              <BrowserRouter>
+                <Routes>
+                  <Route path="/" element={<RolePicker />} />
+                  {/* Azure AD SSO callback — must be outside RoleGuard */}
+                  <Route path="/auth/callback" element={<AuthCallback />} />
+                  <Route path="/presentation" element={<Presentation />} />
+                  <Route path="/loa-workflow" element={<LOAWorkflow />} />
                   <Route
-                    path="/audit"
                     element={
-                      <RoleGuard allow={["admin", "paraplanner", "adviser"]}>
-                        <AuditTrail />
+                      <RoleGuard>
+                        <AppLayout />
                       </RoleGuard>
                     }
-                  />
-                  <Route
-                    path="/admin"
-                    element={
-                      <RoleGuard allow={["admin"]}>
-                        <Admin />
-                      </RoleGuard>
-                    }
-                  />
-                </Route>
-                <Route path="*" element={<NotFound />} />
-              </Routes>
-            </BrowserRouter>
-          </TooltipProvider>
-        </RoleProvider>
-      </AuthProvider>
+                  >
+                    <Route path="/dashboard" element={<Dashboard />} />
+                    <Route path="/cases" element={<Cases />} />
+                    <Route path="/cases/:id" element={<CaseDetail />} />
+                    <Route path="/providers" element={<ProviderDirectory />} />
+                    <Route
+                      path="/audit"
+                      element={
+                        <RoleGuard allow={["admin", "paraplanner", "adviser"]}>
+                          <AuditTrail />
+                        </RoleGuard>
+                      }
+                    />
+                    <Route
+                      path="/admin"
+                      element={
+                        <RoleGuard allow={["admin"]}>
+                          <Admin />
+                        </RoleGuard>
+                      }
+                    />
+                  </Route>
+                  <Route path="*" element={<NotFound />} />
+                </Routes>
+              </BrowserRouter>
+            </TooltipProvider>
+          </RoleProvider>
+        </AuthProvider>
+      </HighContrastProvider>
     </ThemeProvider>
   </QueryClientProvider>
 );
