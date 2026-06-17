@@ -88,12 +88,6 @@ router.post(
       },
     });
 
-    // Auto-trigger AI extraction.
-    // When AI_VIA_BFF=true → submit to BFF (passes relative blob path; BFF
-    // resolves via its own managed identity). Otherwise legacy in-process path.
-    // Fire-and-forget — client polls /ai-status or Document.status for updates.
-    submitOrTrigger(doc.id, req.params.caseId, req.user!.id).catch(console.error);
-
     res.status(201).json(doc);
   }
 );
