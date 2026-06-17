@@ -77,6 +77,10 @@ export const documentsApi = {
     api.get(`/cases/${caseId}/documents/${docId}/url`),
   extract: (caseId: string, docId: string) =>
     api.post(`/cases/${caseId}/documents/${docId}/extract`),
+  extractPending: (caseId: string) =>
+    api.post<{ count: number; documentIds: string[] }>(
+      `/cases/${caseId}/documents/extract-pending`,
+    ),
 };
 
 // ── Checklist ────────────────────────────────────────────

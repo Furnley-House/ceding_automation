@@ -6,7 +6,7 @@ import { PdfViewer } from "./PdfViewer";
 import { ChecklistPanel } from "./ChecklistPanel";
 import { Button } from "@/components/ui/button";
 import { Loader2, Sparkles, CircleAlert, RotateCcw } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, documentsApi } from "@/lib/api";
 import { toast } from "sonner";
 
 interface Props {
@@ -43,6 +43,30 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
   // trigger a refetch so newly-extracted fields show up without a manual reload.
   const [checklistRefreshSignal, setChecklistRefreshSignal] = useState(0);
   const [retrying, setRetrying] = useState(false);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+
+  // Pure UPLOADED-count: behaves correctly both pre-S3c (auto-fire on → most
+  // docs already PROCESSING → 0 pending) and post-S3c (uploads stay UPLOADED).
+  // Strict equality — null/undefined status must NOT count as pending.
+  const pendingCount = documents.filter((d) => d.status === "UPLOADED").length;
+
+  const handleExtractAll = async () => {
+    setBatchSubmitting(true);
+    try {
+      const { data } = await documentsApi.extractPending(caseId);
+      toast.success(
+        `Extraction started for ${data.count} document${data.count === 1 ? "" : "s"}`,
+      );
+      refreshDocuments();
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { error?: string } }; message?: string };
+      toast.error("Couldn't start batch extraction", {
+        description: err.response?.data?.error ?? err.message ?? "Please try again",
+      });
+    } finally {
+      setBatchSubmitting(false);
+    }
+  };
 
   // Auto-select the first document
   useEffect(() => {
@@ -160,6 +184,26 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
       <div className="grid lg:grid-cols-2 gap-4">
         {/* Left: documents + viewer */}
         <div className="flex flex-col gap-3 lg:h-[700px]">
+          <div className="flex items-center justify-end">
+            <Button
+              size="sm"
+              onClick={handleExtractAll}
+              disabled={batchSubmitting || pendingCount === 0}
+              className="h-8 gap-1.5"
+              title={
+                pendingCount === 0
+                  ? "No documents pending extraction"
+                  : `Run extraction on ${pendingCount} pending document${pendingCount === 1 ? "" : "s"}`
+              }
+            >
+              {batchSubmitting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
+              )}
+              Extract All ({pendingCount} pending)
+            </Button>
+          </div>
           <div className="rounded-md border border-border bg-card p-2.5 max-h-[200px] overflow-auto">
             <DocumentList
               documents={documents}
