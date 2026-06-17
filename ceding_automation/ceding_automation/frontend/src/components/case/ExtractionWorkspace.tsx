@@ -201,7 +201,7 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
               ) : (
                 <Sparkles className="h-3.5 w-3.5" />
               )}
-              Extract All ({pendingCount} pending)
+              {pendingCount === 0 ? "Extract" : `Extract (${pendingCount})`}
             </Button>
           </div>
           <div className="rounded-md border border-border bg-card p-2.5 max-h-[200px] overflow-auto">
