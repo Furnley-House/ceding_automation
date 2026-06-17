@@ -129,6 +129,78 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     handleExtractionComplete,
   );
 
+  // ── Stage 4 wait detection + smooth progress crawl + 1Hz elapsed timer ──
+  // The BFF pipeline emits stage1→25, stage2→50, stage3→75 pings and a
+  // terminal done→100. Stage 4 runs a ~20s GPT call with NO ping, so the
+  // DB sits at stage3/75 until completion. Without these effects the bar
+  // would freeze at 75% for ~20s, then snap straight to 100%.
+  const [displayedPct, setDisplayedPct] = useState<number | null>(null);
+  const [displayedSeconds, setDisplayedSeconds] = useState(0);
+
+  const inStage4Wait =
+    extractionStatus.status === "processing" &&
+    extractionStatus.progressPct === 75 &&
+    (extractionStatus.stage === "stage3" || extractionStatus.stage === "stage4");
+  const rawStageMatch = extractionStatus.stage?.match(/^stage(\d)$/);
+  const rawStageNum = rawStageMatch ? rawStageMatch[1] : null;
+  const rawLabel = extractionStatus.stage
+    ? STAGE_LABEL[extractionStatus.stage] ?? extractionStatus.stage
+    : null;
+  // During Stage 4 the DB still reads stage3 (Stage 4 emits no ping), but
+  // Stage 3 is done — show the truthful "Extracting values" label.
+  const displayedLabel = inStage4Wait ? STAGE_LABEL.stage4 : rawLabel;
+  const displayedStageNum = inStage4Wait ? "4" : rawStageNum;
+
+  // Reset crawl + timer cleanly when the selected document changes.
+  useEffect(() => {
+    setDisplayedPct(null);
+    setDisplayedSeconds(0);
+  }, [selectedId]);
+
+  // Crawl: outside the Stage 4 wait, mirror the real anchor 1:1 (CSS
+  // transition-all eases the small 25→50→75 hops). Inside the wait, ease
+  // from 75 toward a 95% cap — each 500ms tick closes 10% of the remaining
+  // gap (asymptotic; ~94.7% after 20s). The effect tears down on any
+  // anchor change, so a fresh real value (e.g. 100 on done) wins
+  // immediately and the bar can never undershoot truth with stale crawl.
+  useEffect(() => {
+    if (!inStage4Wait) {
+      setDisplayedPct(extractionStatus.progressPct);
+      return;
+    }
+    setDisplayedPct((prev) => (prev !== null && prev > 75 ? prev : 75));
+    const intervalId = setInterval(() => {
+      setDisplayedPct((prev) => {
+        const base = prev ?? 75;
+        const remaining = 95 - base;
+        if (remaining <= 0.05) return 95;
+        return base + remaining * 0.1;
+      });
+    }, 500);
+    return () => clearInterval(intervalId);
+  }, [inStage4Wait, extractionStatus.progressPct]);
+
+  // 1Hz local timer anchored to server elapsedMs. The hook only polls
+  // every 3s so the local interval drives the display between polls; the
+  // re-sync on each fresh elapsedMs corrects drift.
+  useEffect(() => {
+    if (typeof extractionStatus.elapsedMs !== "number") {
+      setDisplayedSeconds(0);
+      return;
+    }
+    setDisplayedSeconds(Math.floor(extractionStatus.elapsedMs / 1000));
+    if (
+      extractionStatus.status !== "processing" &&
+      extractionStatus.status !== "queued"
+    ) {
+      return;
+    }
+    const intervalId = setInterval(() => {
+      setDisplayedSeconds((s) => s + 1);
+    }, 1000);
+    return () => clearInterval(intervalId);
+  }, [extractionStatus.elapsedMs, extractionStatus.status]);
+
   const handleJumpToSource = (sourcePage: number | null, fieldLabel: string, evidenceSource: string | null) => {
     if (!sourcePage) return;
     // If the field cites a different document, switch to it
@@ -170,6 +242,10 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     extractionStatus,
     retrying,
     handleRetry,
+    displayedPct,
+    displayedLabel,
+    displayedStageNum,
+    displayedSeconds,
   );
 
   return (
@@ -255,6 +331,10 @@ function renderExtractionBanner(
   extraction: ExtractionStatus,
   retrying: boolean,
   onRetry: () => void,
+  displayedPct: number | null,
+  displayedLabel: string | null,
+  displayedStageNum: string | null,
+  displayedSeconds: number,
 ) {
   // No selection → nothing.
   if (!documentStatus) return null;
@@ -291,31 +371,36 @@ function renderExtractionBanner(
     );
   }
 
-  // Active extraction (live BFF status) → progress bar + stage text.
+  // Active extraction (live BFF status) → progress bar + stage text + timer.
+  // Label, stage number, and pct are pre-computed in the parent so the
+  // Stage 4 override + smooth crawl + 1Hz timer all flow in here ready to
+  // render. The bar's CSS transition-all eases small hops (25→50→75) and
+  // the parent's interval feeds incremental values during the Stage 4 wait.
   if (documentStatus === "PROCESSING") {
-    const stageMatch = extraction.stage?.match(/^stage(\d)$/);
-    const stageNum = stageMatch ? stageMatch[1] : null;
-    const stageLabel = extraction.stage
-      ? (STAGE_LABEL[extraction.stage] ?? extraction.stage)
-      : null;
-
     const text =
       extraction.status === "queued"
         ? "Submitted to AI — waiting for pickup…"
-        : stageLabel
-          ? stageNum
-            ? `${stageLabel} (stage ${stageNum}/4)`
-            : stageLabel
+        : displayedLabel
+          ? displayedStageNum
+            ? `${displayedLabel} (stage ${displayedStageNum}/4)`
+            : displayedLabel
           : "Extracting…";
 
-    const pct = typeof extraction.progressPct === "number" ? extraction.progressPct : null;
+    const mm = Math.floor(displayedSeconds / 60);
+    const ss = String(displayedSeconds % 60).padStart(2, "0");
+    const timer = `${mm}:${ss}`;
+
+    const pct = typeof displayedPct === "number" ? displayedPct : null;
 
     return (
       <div className="rounded-md border border-info/30 bg-info/10 p-3">
         <div className="flex items-center gap-3">
           <Loader2 className="h-4 w-4 text-info animate-spin shrink-0" />
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-semibold text-foreground">{text}</p>
+            <p className="text-xs font-semibold text-foreground">
+              {text}
+              <span className="text-muted-foreground font-normal"> · {timer}</span>
+            </p>
             {pct !== null && (
               <div className="mt-1.5 h-1 bg-background rounded overflow-hidden">
                 <div
@@ -326,7 +411,7 @@ function renderExtractionBanner(
             )}
           </div>
           {pct !== null && (
-            <span className="text-[11px] font-semibold text-info shrink-0">{pct}%</span>
+            <span className="text-[11px] font-semibold text-info shrink-0">{Math.round(pct)}%</span>
           )}
         </div>
       </div>
