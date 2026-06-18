@@ -5,9 +5,9 @@
 //
 // Contract: docs/ai-integration-design.md §6.
 
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import * as aiBff from "./aiBffClient";
-import { applyExtractionResult } from "./aiBffApply";
+import { applyExtractionResult, SYSTEM_USER_ID } from "./aiBffApply";
 
 const prisma = new PrismaClient();
 
@@ -55,23 +55,96 @@ async function tick(): Promise<void> {
 }
 
 // Jobs older than JOB_TIMEOUT_MS with no terminal state — give up on them.
-// Single bulk updateMany is cheap and atomic per row.
+// Switched from a single bulk updateMany to a bounded per-doc loop so each
+// timed-out run gets its own AI_EXTRACTION_RUN audit row (Gap 1b). Same
+// selection criteria, same terminal values; PER_TICK_CAP bounds the loop so a
+// deep backlog can't make one tick unbounded — the next tick 10s later
+// catches leftovers. Wrapped by tick()'s outer try/catch.
 async function timeOutStaleJobs(): Promise<void> {
   const cutoff = new Date(Date.now() - JOB_TIMEOUT_MS);
-  const result = await prisma.document.updateMany({
+  const timeoutMessage = "Timed out waiting for BFF after 10 minutes";
+
+  const candidates = await prisma.document.findMany({
     where: {
       aiJobStatus: { in: ["queued", "processing"] },
       aiJobSubmittedAt: { lt: cutoff },
     },
-    data: {
-      status: "ERROR",
-      aiJobStatus: "failed",
-      aiJobError: "Timed out waiting for BFF after 10 minutes",
-      aiJobCompletedAt: new Date(),
+    select: {
+      id: true,
+      caseId: true,
+      aiJobId: true,
+      aiJobSubmittedAt: true,
     },
+    take: PER_TICK_CAP,
   });
-  if (result.count > 0) {
-    console.warn(`[ai-poller] timed out ${result.count} stale BFF job(s)`);
+
+  let settledCount = 0;
+
+  for (const c of candidates) {
+    // Outer try/catch isolates each candidate so a transient DB error on the
+    // per-doc update (lock timeout, connection drop, etc.) doesn't skip the
+    // remaining docs this tick — the failing doc stays unsettled and is
+    // retried on the next tick via findMany's where-clause.
+    try {
+      // Per-doc update with the aiJobCompletedAt:null idempotency guard so a
+      // concurrent PUSH-path settle doesn't get clobbered. count===0 here means
+      // someone else already terminal-flipped this doc — skip the audit row to
+      // avoid double-logging.
+      const settled = await prisma.document.updateMany({
+        where: { id: c.id, aiJobCompletedAt: null },
+        data: {
+          status: "ERROR",
+          aiJobStatus: "failed",
+          aiJobError: timeoutMessage,
+          aiJobCompletedAt: new Date(),
+        },
+      });
+
+      if (settled.count > 0) {
+        settledCount += 1;
+        try {
+          const elapsedMs = c.aiJobSubmittedAt
+            ? Date.now() - c.aiJobSubmittedAt.getTime()
+            : null;
+          await prisma.auditLog.create({
+            data: {
+              caseId: c.caseId,
+              userId: SYSTEM_USER_ID,
+              action: "AI_EXTRACTION_RUN",
+              source: "AI",
+              newValue: `Extraction failed: ${timeoutMessage}`,
+              metadata: {
+                jobId: c.aiJobId,
+                documentId: c.id,
+                bffStatus: "timeout",
+                error: timeoutMessage,
+                elapsedMs,
+              } as Prisma.InputJsonValue,
+            },
+          });
+        } catch (auditErr) {
+          // Audit-write failure must NEVER fail the loop — settling the doc to
+          // ERROR is more important than the audit row, and the other docs in
+          // the loop must still get a chance to settle.
+          console.error(
+            `[ai-poller] timeout audit-log write failed for doc=${c.id} job=${c.aiJobId}:`,
+            auditErr
+          );
+        }
+      }
+    } catch (settleErr) {
+      console.error(
+        `[ai-poller] timeout settle failed for doc=${c.id} job=${c.aiJobId}:`,
+        settleErr
+      );
+      // Don't rethrow — continue the loop so other candidates still get a
+      // chance to settle this tick. This doc remains unsettled and will be
+      // re-picked next tick.
+    }
+  }
+
+  if (settledCount > 0) {
+    console.warn(`[ai-poller] timed out ${settledCount} stale BFF job(s)`);
   }
 }
 
@@ -160,14 +233,59 @@ async function pollOne(documentId: string, jobId: string): Promise<void> {
     } else if (status.status === "failed") {
       // BFF says failed — settle the document here. The write-back path may
       // have already done this; the idempotency guard in PATCH covers that.
-      await prisma.document.updateMany({
+      const errorMessage = "BFF reported failed (no details)";
+      // Fetch caseId + aiJobSubmittedAt BEFORE the update so we can build a
+      // matching audit row (Gap 1a). aiJobSubmittedAt isn't touched by the
+      // update below, but caseId is required and we want elapsedMs derived
+      // from the pre-update timestamp.
+      const docForAudit = await prisma.document.findUnique({
+        where: { id: documentId },
+        select: { caseId: true, aiJobSubmittedAt: true },
+      });
+
+      const settled = await prisma.document.updateMany({
         where: { id: documentId, aiJobCompletedAt: null },
         data: {
           status: "ERROR",
           aiJobCompletedAt: new Date(),
-          aiJobError: "BFF reported failed (no details)",
+          aiJobError: errorMessage,
         },
       });
+
+      // Only audit if WE settled this run (count>0). count===0 means a
+      // concurrent PUSH path already terminal-flipped it and wrote its own
+      // audit row — double-logging would be noise.
+      if (settled.count > 0 && docForAudit) {
+        try {
+          const elapsedMs = docForAudit.aiJobSubmittedAt
+            ? Date.now() - docForAudit.aiJobSubmittedAt.getTime()
+            : null;
+          await prisma.auditLog.create({
+            data: {
+              caseId: docForAudit.caseId,
+              userId: SYSTEM_USER_ID,
+              action: "AI_EXTRACTION_RUN",
+              source: "AI",
+              newValue: `Extraction failed: ${errorMessage}`,
+              metadata: {
+                jobId,
+                documentId,
+                bffStatus: "failed",
+                stage: status.stage ?? null,
+                error: errorMessage,
+                elapsedMs,
+              } as Prisma.InputJsonValue,
+            },
+          });
+        } catch (auditErr) {
+          // Audit-write failure must NEVER fail the poller's core job —
+          // settling the doc to ERROR is more important than the audit row.
+          console.error(
+            `[ai-poller] audit-log write failed for doc=${documentId} job=${jobId}:`,
+            auditErr
+          );
+        }
+      }
     }
   } catch (err) {
     // Bump aiJobLastPolledAt so we back off after a transient failure rather

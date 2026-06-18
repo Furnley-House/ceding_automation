@@ -11,7 +11,7 @@ import { compareFieldValues } from "../utils/compareFieldValues";
 import { mirrorChecklistToCase } from "./caseFieldMirror";
 
 const prisma = new PrismaClient();
-const SYSTEM_USER_ID = "system-ai-bff";
+export const SYSTEM_USER_ID = "system-ai-bff";
 
 // Outcomes the caller can surface to the BFF (and to telemetry).
 export type ApplyFieldOutcome =
@@ -329,6 +329,7 @@ export async function applyExtractionResult(
         fieldsExtracted: result.response.summary.fieldsExtracted,
         fieldsMissing: result.response.summary.fieldsMissing,
         highConfidenceCount: result.response.summary.highConfidenceCount,
+        promptTemplateId: result.promptTemplateId ?? null,
       } as Prisma.InputJsonValue,
     },
   });

@@ -668,6 +668,12 @@ const aiDocWriteBackSchema = z.object({
     .passthrough()
     .optional()
     .nullable(),
+  // Identifier of the Stage 4 prompt template that produced this extraction
+  // (e.g. "stage4_extraction_PENSION_v2"). Pipeline writes it onto the Cosmos
+  // doc; BFF will forward it as a sibling on the write-back body. Persisted
+  // into the AI_EXTRACTION_RUN audit row's metadata (Gap 2) so prompt-version
+  // is retrievable per-run for analysis. Optional — pre-Gap-2 callers omit it.
+  prompt_template_id: z.string().optional().nullable(),
   // Fund Details rows piggy-backed on the doc-status PATCH so they persist
   // atomically with the aiJobCompletedAt flip. Optional — non-fund docs and
   // every pre-existing caller omit this. When present, the handler wraps the
@@ -790,6 +796,7 @@ internalRouter.patch(
         detectedPlanType: body.detected_plan_type ?? null,
         costUsd: body.llm_call_meta?.total_cost_usd ?? null,
         tokens: body.llm_call_meta?.total_tokens ?? null,
+        promptTemplateId: body.prompt_template_id ?? null,
       } as Prisma.InputJsonValue,
     });
 

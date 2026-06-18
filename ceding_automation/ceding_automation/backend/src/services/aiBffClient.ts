@@ -163,6 +163,10 @@ export interface BffJobResult {
   };
   llmCallMeta: { totalTokens: number; totalCostUsd: number };
   completedAt: string;
+  // Identifier of the Stage 4 prompt template that produced this extraction
+  // (e.g. "stage4_extraction_PENSION_v2"). BFF /result now carries this at
+  // the top level; persisted into the PULL audit row's metadata (Gap 2).
+  promptTemplateId: string | null;
 }
 
 // Phase-1 plan types map cleanly to BFF vocabulary. Phase-2 ones (FINAL_SALARY,
@@ -283,6 +287,7 @@ interface RawBffResult {
   };
   llm_call_meta?: { total_tokens?: number; total_cost_usd?: number };
   completed_at: string;
+  prompt_template_id?: string | null;
 }
 
 export async function getJobResult(jobId: string): Promise<BffJobResult> {
@@ -335,6 +340,7 @@ export async function getJobResult(jobId: string): Promise<BffJobResult> {
         totalCostUsd: data.llm_call_meta?.total_cost_usd ?? 0,
       },
       completedAt: data.completed_at,
+      promptTemplateId: data.prompt_template_id ?? null,
     };
   } catch (err) {
     mapAxiosError(jobId, err);
