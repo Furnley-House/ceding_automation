@@ -715,9 +715,15 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
     pickString(task, ['Subject']);
   const planType = inferPlanType(planTypeRaw);
 
+  // Policy reference fallback list — env override first, then well-known
+  // standard / custom field names. `Plan_reference` (lowercase r) is the
+  // operator's canonical custom-field API name on Tasks; `Plan_Number` was
+  // removed when the operator deleted that field from Zoho on 17 Jun.
+  // Zoho field API names are case-sensitive, so both casings are tried for
+  // Plan_Reference / Plan_reference to cover any orgs still using title case.
   const policyRef =
     (policyRefField && pickString(task, [policyRefField])) ||
-    pickString(task, ['Policy_Number', 'Policy_Ref', 'Plan_Number', 'Plan_Reference']);
+    pickString(task, ['Plan_reference', 'Plan_Reference', 'Policy_Ref', 'Policy_Number']);
 
   const zohoDeepLink =
     (deepLinkField && pickString(task, [deepLinkField])) ||

@@ -5,8 +5,9 @@ import { getTemplate, groupBySection, type ChecklistFieldDef } from "@/lib/check
 import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { useChecklistFields, isMissing, type ChecklistRow } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing, fundDetailsStatus, type ChecklistRow } from "@/hooks/useChecklistFields";
 import { useDocuments } from "@/hooks/useDocuments";
+import { useFundLines } from "@/hooks/useFundLines";
 import { checklistApi } from "@/lib/api";
 import { FundDetailsTable } from "./FundDetailsTable";
 
@@ -103,6 +104,13 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
     [grouped, filter, byKey],
   );
 
+  // Fund Details is a separate sub-table — pull its rows so we can fold its
+  // status into the Missing / Needs Review chips alongside the scalar fields.
+  // Without this, a case with zero fund lines reads "All filled" which is
+  // misleading.
+  const { rows: fundLines } = useFundLines(caseId);
+  const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
+
   const stats = useMemo(() => {
     const counts = { high: 0, medium: 0, low: 0, conflict: 0, missing: 0, approved: 0, review: 0 };
     visibleFields.forEach((f) => {
@@ -128,10 +136,14 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
       if (r?.status === "approved") counts.approved++;
       if (r?.status === "review_requested") counts.review++;
     });
-    const total = visibleFields.length;
+    // Fold Fund Details into the buckets as a single logical section.
+    if (fundStatus === "missing") counts.missing++;
+    else if (fundStatus === "review") counts.low++;
+    else if (fundStatus === "filled") counts.high++;
+    const total = visibleFields.length + 1; // +1 for the Fund Details section
     const completion = total === 0 ? 0 : Math.round(((total - counts.missing) / total) * 100);
     return { ...counts, total, completion };
-  }, [visibleFields, byKey]);
+  }, [visibleFields, byKey, fundStatus]);
 
   // Assemble the two-candidate resolver pack for a CONFLICT field. Returns
   // undefined when not conflicted or when the row lacks conflict_values

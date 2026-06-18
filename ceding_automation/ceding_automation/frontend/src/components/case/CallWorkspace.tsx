@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { getProviders } from "@/services/api";
-import { useChecklistFields, isMissing } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing, fundDetailsStatus } from "@/hooks/useChecklistFields";
+import { useFundLines } from "@/hooks/useFundLines";
 import { getTemplate } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -237,39 +238,87 @@ export function CallWorkspace({
     return m;
   }, [template]);
 
-  const missingFields = useMemo(
+  // Iterate the TEMPLATE (with showIf conditional filter) rather than the
+  // raw DB rows. Two reasons:
+  //   - Aligns the count with Stage 4 + Stage 6 — was off-by-one before
+  //     because the backend seeds a placeholder ChecklistField row for the
+  //     `fund_lines` table-typed template, which is filtered out of the
+  //     template builder. The vestigial row is now also stripped at the
+  //     normaliseRows layer, but template-driven iteration is the correct
+  //     conceptual model anyway.
+  //   - Respects conditional fields: a field hidden by `showIf` shouldn't
+  //     be asked about on the call.
+  const byKey = useMemo(() => {
+    const m = new Map<string, (typeof rows)[number]>();
+    rows.forEach((r) => { if (r.field_key) m.set(r.field_key, r); });
+    return m;
+  }, [rows]);
+  const visibleTemplate = useMemo(
     () =>
-      rows
-        // Pulls in: empty values, confidence=MISSING, AND value="MISSING"
-        // (literal string the AI returns when the document says "MISSING").
-        .filter((r) => r.field_key && isMissing(r))
-        .map((r) => ({
-          key: r.field_key!,
-          label: labelByKey.get(r.field_key!)?.label ?? r.field_key!,
-          section: labelByKey.get(r.field_key!)?.section ?? "",
-          hint: labelByKey.get(r.field_key!)?.hint ?? null,
-        })),
-    [rows, labelByKey],
+      template.filter((f) => {
+        if (!f.showIf) return true;
+        const dependent = byKey.get(f.showIf.key)?.value;
+        return dependent ? f.showIf.in.includes(dependent) : false;
+      }),
+    [template, byKey],
   );
 
-  const reviewFields = useMemo(
-    () =>
-      rows
-        .filter(
-          (r) =>
-            r.field_key &&
-            r.value &&
-            (r.confidence === "LOW" || r.status === "review_requested"),
-        )
-        .map((r) => ({
-          key: r.field_key!,
-          label: labelByKey.get(r.field_key!)?.label ?? r.field_key!,
-          section: labelByKey.get(r.field_key!)?.section ?? "",
-          value: r.value ?? "",
-          confidence: (r.confidence as string) ?? "LOW",
-        })),
-    [rows, labelByKey],
-  );
+  // Fund Details — pull rows so we can ask the agent about funds when the
+  // table is empty / incomplete.
+  const { rows: fundLines } = useFundLines(caseId);
+  const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
+
+  const missingFields = useMemo(() => {
+    const list = visibleTemplate
+      .filter((t) => isMissing(byKey.get(t.key)))
+      .map((t) => ({
+        key: t.key,
+        label: t.label,
+        section: t.section,
+        hint: t.hint ?? null,
+      }));
+    // Synthetic Fund Details entry — appears once when the sub-table is
+    // empty (or every row blank). Lets the agent be asked about funds in
+    // the same call without bolting on a separate UI.
+    if (fundStatus === "missing") {
+      list.push({
+        key: "__fund_details__",
+        label: "Fund Details",
+        section: "Fund Details",
+        hint: "Ask the agent for the per-fund breakdown (fund name, ISIN/Sedol, units, price, value, charge).",
+      });
+    }
+    return list;
+  }, [visibleTemplate, byKey, fundStatus]);
+
+  const reviewFields = useMemo(() => {
+    // Switched to template iteration + uppercase confidence match. Status
+    // comes back lowercased via the useChecklistFields adapter.
+    const list = visibleTemplate
+      .map((t) => ({ t, r: byKey.get(t.key) }))
+      .filter(({ r }) => {
+        if (!r || !r.value || isMissing(r)) return false;
+        const c = (r.confidence ?? "").toString().toUpperCase();
+        return c === "LOW" || c === "MEDIUM" || c === "CONFLICT" || r.status === "review_requested";
+      })
+      .map(({ t, r }) => ({
+        key: t.key,
+        label: t.label,
+        section: t.section,
+        value: r!.value ?? "",
+        confidence: ((r!.confidence as string) ?? "LOW").toUpperCase(),
+      }));
+    if (fundStatus === "review") {
+      list.push({
+        key: "__fund_details__",
+        label: "Fund Details",
+        section: "Fund Details",
+        value: "(some rows incomplete or low-confidence)",
+        confidence: "LOW",
+      });
+    }
+    return list;
+  }, [visibleTemplate, byKey, fundStatus]);
 
   const totalQuestions = missingFields.length + reviewFields.length;
 

@@ -68,6 +68,27 @@ function adoptEvidenceFields(row: ChecklistRow): ChecklistRow {
   // only renames keys, not values — so without this every approval looked
   // like it had no effect.
   const status = typeof r.status === "string" ? r.status.toLowerCase() : r.status;
+  // The Prisma column is `isManuallyOverridden` (boolean) plus
+  // `manualEditedById` / `manualEditedAt`. After snakeKeys the wire keys
+  // are `is_manually_overridden` / `manual_edited_at`. The frontend was
+  // written against `manually_edited` — 4 different consumers (Approval
+  // badge, Extract audit-line, Stage 9 XLSX "Manually edited" column,
+  // checklistMerge.ts conflict rule) all read that key and so all silently
+  // saw `false` for every manual override. Alias here once.
+  const rExt = r as ChecklistRow & {
+    is_manually_overridden?: boolean | null;
+    manual_edited_at?: string | null;
+    manual_edited_by_id?: string | null;
+    status?: string | null;
+  };
+  const explicitFlag =
+    (rExt as { manually_edited?: boolean | null }).manually_edited ??
+    rExt.is_manually_overridden ??
+    null;
+  const manuallyEdited =
+    explicitFlag !== null
+      ? explicitFlag
+      : !!rExt.manual_edited_at || rExt.status === "manually_overridden";
   return {
     ...r,
     source_page: sourcePage,
@@ -75,11 +96,28 @@ function adoptEvidenceFields(row: ChecklistRow): ChecklistRow {
     evidence_ref: r.evidence_ref ?? ref,
     notes,
     status,
+    manually_edited: !!manuallyEdited,
   };
 }
 function normaliseRows(raw: unknown): ChecklistRow[] {
   if (!Array.isArray(raw)) return [];
-  return raw.map((r) => adoptEvidenceFields(snakeKeys(r) as ChecklistRow));
+  return raw
+    .map((r) => adoptEvidenceFields(snakeKeys(r) as ChecklistRow))
+    // Drop the vestigial `fund_lines` ChecklistField row. The backend seed
+    // creates one row per template — including the type="table" `fund_lines`
+    // template — but the real fund data lives in the ChecklistFundLine
+    // relation. The placeholder row only confused things: Stage 5 Call
+    // Assist counted it as a missing scalar field (asking the agent "what's
+    // the fund_lines value?"), and it inflated Missing counts by 1 vs
+    // Stage 4 / 6 which read the frontend template (table types stripped).
+    // Filter it out here so every consumer sees the same row set.
+    .filter((r) => {
+      const fk = (r as { field_key?: string }).field_key;
+      const ft = (r as { field_type?: string }).field_type;
+      if (fk === "fund_lines") return false;
+      if (typeof ft === "string" && ft.toLowerCase() === "table") return false;
+      return true;
+    });
 }
 
 // ── isMissing ───────────────────────────────────────────────────
@@ -114,6 +152,33 @@ export function displayValue(row: {
 } | null | undefined): string {
   if (isMissing(row)) return "—";
   return (row?.value ?? "").trim();
+}
+
+// Fund Details status — the table-typed `fund_lines` field doesn't live on
+// ChecklistField (the placeholder row is filtered out above). The real
+// per-fund data is in the ChecklistFundLine relation. This helper rolls a
+// list of fund rows up into a single status token so the Missing / Needs
+// Review counters on Stage 4 / 5 / 6 can include "Fund Details" as a
+// logical section, the way the user expects.
+//
+//   missing — no rows, or every row has an empty value
+//   review  — at least one row has empty value OR confidence LOW/MEDIUM/CONFLICT/MISSING
+//   filled  — every row has a value AND no row is below HIGH confidence
+export type FundDetailsStatus = "missing" | "review" | "filled";
+export interface FundLineLike {
+  value?: string | null;
+  confidence?: string | null;
+}
+export function fundDetailsStatus(rows: FundLineLike[] | null | undefined): FundDetailsStatus {
+  if (!rows || rows.length === 0) return "missing";
+  const anyMissing = rows.some(isMissing);
+  if (anyMissing && rows.every(isMissing)) return "missing";
+  const anyBelowHigh = rows.some((r) => {
+    if (isMissing(r)) return true;
+    const c = (r.confidence ?? "").toString().toUpperCase();
+    return c === "MEDIUM" || c === "LOW" || c === "CONFLICT" || c === "MISSING";
+  });
+  return anyBelowHigh ? "review" : "filled";
 }
 
 export function useChecklistFields({ caseId, template }: UseChecklistArgs) {

@@ -159,6 +159,12 @@ router.get("/:id", requireAuth, async (req: Request, res: Response) => {
         include: { template: true, sourceDocument: { select: { filename: true } } },
         orderBy: { template: { displayOrder: "asc" } },
       },
+      // Eager-include fund lines so the frontend doesn't fire a separate
+      // GET /cases/:id/fund-lines after first paint. Pre-fix, the Fund
+      // Details table appeared after a perceptible delay (its own waterfall
+      // request) and any logic that needed to count fund-line status had
+      // to wait — Stage 4 / 5 / 6 "Missing" chips would briefly disagree.
+      fundLines: { orderBy: { displayOrder: "asc" } },
       chaseAttempts: { orderBy: { attemptedAt: "desc" } },
       comments: {
         include: { author: { select: { name: true, role: true } } },
@@ -1009,31 +1015,40 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   });
   const changedRealData = changes.length > 0;
 
-  // 6. Audit (one summary entry per sync — no enum value for "ZOHO sync",
-  // so we use CASE_UPDATED + source SYSTEM and stash the diff in metadata).
-  await prisma.auditLog.create({
-    data: {
-      caseId: id,
-      userId: req.user!.id,
-      action: "CASE_UPDATED",
-      source: "SYSTEM",
-      newValue: `Synced ${changes.length} field${changes.length === 1 ? "" : "s"} from Zoho`,
-      metadata: {
-        sync: "zoho",
-        zohoTaskId: caseRecord.zohoTaskId,
-        changes,
-        paraplannerSyncNote,
-        providerSyncNote,
-        planSyncNote,
-        cachedZohoIds: {
-          zohoOwnerId: cachedZohoOwnerId,
-          zohoClientOwnerIds: cachedZohoClientOwnerIds,
-          zohoParaplannerId: cachedZohoParaplannerId,
-          zohoProviderRecordId: cachedZohoProviderId,
-        },
-      } as Prisma.InputJsonValue,
-    },
-  });
+  // 6. Audit — only when Zoho actually changed something on the case.
+  //
+  // Previously this fired on every sync (page-load auto-sync + manual
+  // "Refresh from Zoho" button), so the timeline filled up with rows
+  // saying "Synced 0 fields from Zoho · via System" — pure noise. Now we
+  // skip the audit row when no real CRM data changed; the cached Zoho IDs
+  // refresh still happens silently (it's internal bookkeeping, not a CRM
+  // mutation the auditor cares about), and any sync notes are still
+  // returned in the HTTP response for the UI / debugging.
+  if (changedRealData) {
+    await prisma.auditLog.create({
+      data: {
+        caseId: id,
+        userId: req.user!.id,
+        action: "CASE_UPDATED",
+        source: "SYSTEM",
+        newValue: `Synced ${changes.length} field${changes.length === 1 ? "" : "s"} from Zoho`,
+        metadata: {
+          sync: "zoho",
+          zohoTaskId: caseRecord.zohoTaskId,
+          changes,
+          paraplannerSyncNote,
+          providerSyncNote,
+          planSyncNote,
+          cachedZohoIds: {
+            zohoOwnerId: cachedZohoOwnerId,
+            zohoClientOwnerIds: cachedZohoClientOwnerIds,
+            zohoParaplannerId: cachedZohoParaplannerId,
+            zohoProviderRecordId: cachedZohoProviderId,
+          },
+        } as Prisma.InputJsonValue,
+      },
+    });
+  }
 
   res.json({
     synced: true,

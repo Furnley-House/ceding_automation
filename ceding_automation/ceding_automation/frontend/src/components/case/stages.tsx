@@ -28,7 +28,8 @@ import { UnlinkedPlanBanner } from "./UnlinkedPlanBanner";
 import { useDocuments } from "@/hooks/useDocuments";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { useChecklistFields, isMissing, displayValue } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing, displayValue, fundDetailsStatus } from "@/hooks/useChecklistFields";
+import { useFundLines } from "@/hooks/useFundLines";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation } from "react-router-dom";
@@ -275,8 +276,14 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
     [template, byKey],
   );
 
+  // Fund Details rolls into the totals alongside the scalar fields so the
+  // chip counters agree with Stage 4 and so an empty Fund Details table
+  // doesn't read as "All filled".
+  const { rows: fundLines } = useFundLines(caseItem.id);
+  const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
+
   const totals = useMemo(() => {
-    const total = visibleFields.length;
+    const fieldTotal = visibleFields.length;
     let filled = 0;
     let returned = 0;
     visibleFields.forEach((f) => {
@@ -284,6 +291,12 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
       if (!isMissing(r)) filled += 1;
       if (r?.status === "review_requested") returned += 1;
     });
+    // +1 row for Fund Details. Filled when fundStatus is "filled" OR "review"
+    // (the section has data, just not all high-confidence); missing only when
+    // there are no rows / every row is empty.
+    const fundFilled = fundStatus !== "missing";
+    const total = fieldTotal + 1;
+    if (fundFilled) filled += 1;
     const missing = total - filled;
     return {
       total,
@@ -292,7 +305,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
       returned,
       complete: total > 0 && missing === 0 && returned === 0,
     };
-  }, [visibleFields, byKey]);
+  }, [visibleFields, byKey, fundStatus]);
 
   const grouped = useMemo(() => groupBySection(visibleFields), [visibleFields]);
 
