@@ -173,6 +173,7 @@ export function StageDocumentUpload({ caseItem }: StageProps) {
             onRemove={removeDocument}
             showExtractButton={false}
             showViewButton={false}
+            simplifiedBadge
           />
         </div>
       </div>

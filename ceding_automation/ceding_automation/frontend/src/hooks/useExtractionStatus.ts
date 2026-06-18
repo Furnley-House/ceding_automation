@@ -12,6 +12,7 @@ export interface ExtractionStatus {
   progressPct: number | null;
   error: string | null;
   elapsedMs: number | null;
+  submittedAt: string | null;
 }
 
 const EMPTY_STATUS: ExtractionStatus = {
@@ -21,6 +22,7 @@ const EMPTY_STATUS: ExtractionStatus = {
   progressPct: null,
   error: null,
   elapsedMs: null,
+  submittedAt: null,
 };
 
 const BASE_INTERVAL_MS = 3000;
@@ -103,6 +105,8 @@ export function useExtractionStatus(
           error: typeof data.error === "string" ? data.error : null,
           elapsedMs:
             typeof data.elapsedMs === "number" ? data.elapsedMs : null,
+          submittedAt:
+            typeof data.submittedAt === "string" ? data.submittedAt : null,
         };
         setState(next);
 

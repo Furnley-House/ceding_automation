@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDocuments, getSignedUrl } from "@/hooks/useDocuments";
 import { useExtractionStatus, type ExtractionStatus } from "@/hooks/useExtractionStatus";
+import { useExtractionDisplay } from "@/hooks/useExtractionDisplay";
 import { DocumentList } from "./DocumentList";
 import { PdfViewer } from "./PdfViewer";
 import { ChecklistPanel } from "./ChecklistPanel";
@@ -13,14 +14,6 @@ interface Props {
   caseId: string;
   planType: string;
 }
-
-const STAGE_LABEL: Record<string, string> = {
-  stage1: "Reading PDF",
-  stage2: "Detecting provider",
-  stage3: "Mapping fields",
-  stage4: "Extracting values",
-  done: "Finalising",
-};
 
 /**
  * Stage 3 — side-by-side workspace.
@@ -129,77 +122,26 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     handleExtractionComplete,
   );
 
-  // ── Stage 4 wait detection + smooth progress crawl + 1Hz elapsed timer ──
-  // The BFF pipeline emits stage1→25, stage2→50, stage3→75 pings and a
-  // terminal done→100. Stage 4 runs a ~20s GPT call with NO ping, so the
-  // DB sits at stage3/75 until completion. Without these effects the bar
-  // would freeze at 75% for ~20s, then snap straight to 100%.
-  const [displayedPct, setDisplayedPct] = useState<number | null>(null);
-  const [displayedSeconds, setDisplayedSeconds] = useState(0);
+  // Smooth-crawl + label-override + 1Hz timer — shared with per-row badges
+  // in DocumentList. Banner feeds the hook from useExtractionStatus (3s
+  // /ai-status poll); rows feed it from useDocuments list data (5s refresh).
+  // Identical math regardless of source.
+  const display = useExtractionDisplay({
+    progressPct: extractionStatus.progressPct,
+    stage: extractionStatus.stage,
+    status: extractionStatus.status,
+    submittedAt: extractionStatus.submittedAt,
+    resetKey: selectedId,
+  });
 
-  const inStage4Wait =
-    extractionStatus.status === "processing" &&
-    extractionStatus.progressPct === 75 &&
-    (extractionStatus.stage === "stage3" || extractionStatus.stage === "stage4");
-  const rawStageMatch = extractionStatus.stage?.match(/^stage(\d)$/);
-  const rawStageNum = rawStageMatch ? rawStageMatch[1] : null;
-  const rawLabel = extractionStatus.stage
-    ? STAGE_LABEL[extractionStatus.stage] ?? extractionStatus.stage
-    : null;
-  // During Stage 4 the DB still reads stage3 (Stage 4 emits no ping), but
-  // Stage 3 is done — show the truthful "Extracting values" label.
-  const displayedLabel = inStage4Wait ? STAGE_LABEL.stage4 : rawLabel;
-  const displayedStageNum = inStage4Wait ? "4" : rawStageNum;
-
-  // Reset crawl + timer cleanly when the selected document changes.
-  useEffect(() => {
-    setDisplayedPct(null);
-    setDisplayedSeconds(0);
-  }, [selectedId]);
-
-  // Crawl: outside the Stage 4 wait, mirror the real anchor 1:1 (CSS
-  // transition-all eases the small 25→50→75 hops). Inside the wait, ease
-  // from 75 toward a 95% cap — each 500ms tick closes 10% of the remaining
-  // gap (asymptotic; ~94.7% after 20s). The effect tears down on any
-  // anchor change, so a fresh real value (e.g. 100 on done) wins
-  // immediately and the bar can never undershoot truth with stale crawl.
-  useEffect(() => {
-    if (!inStage4Wait) {
-      setDisplayedPct(extractionStatus.progressPct);
-      return;
-    }
-    setDisplayedPct((prev) => (prev !== null && prev > 75 ? prev : 75));
-    const intervalId = setInterval(() => {
-      setDisplayedPct((prev) => {
-        const base = prev ?? 75;
-        const remaining = 95 - base;
-        if (remaining <= 0.05) return 95;
-        return base + remaining * 0.1;
-      });
-    }, 500);
-    return () => clearInterval(intervalId);
-  }, [inStage4Wait, extractionStatus.progressPct]);
-
-  // 1Hz local timer anchored to server elapsedMs. The hook only polls
-  // every 3s so the local interval drives the display between polls; the
-  // re-sync on each fresh elapsedMs corrects drift.
-  useEffect(() => {
-    if (typeof extractionStatus.elapsedMs !== "number") {
-      setDisplayedSeconds(0);
-      return;
-    }
-    setDisplayedSeconds(Math.floor(extractionStatus.elapsedMs / 1000));
-    if (
-      extractionStatus.status !== "processing" &&
-      extractionStatus.status !== "queued"
-    ) {
-      return;
-    }
-    const intervalId = setInterval(() => {
-      setDisplayedSeconds((s) => s + 1);
-    }, 1000);
-    return () => clearInterval(intervalId);
-  }, [extractionStatus.elapsedMs, extractionStatus.status]);
+  // Batch summary anchors — pure status counts off the list. Only shown
+  // when more than one doc is concurrently PROCESSING; single-doc
+  // extractions keep just the per-doc banner.
+  const processingCount = documents.filter((d) => d.status === "PROCESSING").length;
+  const batchTotal = documents.filter(
+    (d) => d.status === "PROCESSING" || d.status === "EXTRACTED" || d.status === "ERROR",
+  ).length;
+  const showBatchSummary = processingCount > 1;
 
   const handleJumpToSource = (sourcePage: number | null, fieldLabel: string, evidenceSource: string | null) => {
     if (!sourcePage) return;
@@ -242,10 +184,10 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     extractionStatus,
     retrying,
     handleRetry,
-    displayedPct,
-    displayedLabel,
-    displayedStageNum,
-    displayedSeconds,
+    display.displayedPct,
+    display.displayedLabel,
+    display.displayedStageNum,
+    display.displayedSeconds,
   );
 
   return (
@@ -254,6 +196,12 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
         {/* <Sparkles className="h-3.5 w-3.5 text-teal" /> */}
         {/* Click 📄 next to any field on the right to jump the PDF to its source page. 
       </div> */}
+
+      {showBatchSummary && (
+        <p className="text-xs text-muted-foreground">
+          Extracting {processingCount} of {batchTotal} documents…
+        </p>
+      )}
 
       {banner}
 

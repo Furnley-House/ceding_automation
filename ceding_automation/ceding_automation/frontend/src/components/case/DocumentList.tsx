@@ -16,7 +16,7 @@ import type { DocumentRow } from "@/hooks/useDocuments";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { useExtractionStatus } from "@/hooks/useExtractionStatus";
+import { useExtractionDisplay } from "@/hooks/useExtractionDisplay";
 
 interface Props {
   documents: DocumentRow[];
@@ -31,6 +31,10 @@ interface Props {
   // these undefined and inherits the true defaults so its UX is unchanged.
   showExtractButton?: boolean;
   showViewButton?: boolean;
+  // Stage 3 only: collapse the badge to a two-state Uploaded / Extracted
+  // pair. Skips ExtractingStatusBadge entirely — no crawl, no timer, no %.
+  // Stage 4 omits this and keeps the live extraction-progress badge.
+  simplifiedBadge?: boolean;
 }
 
 // Maps Prisma DocumentStatus enum values to display labels/styles
@@ -94,6 +98,7 @@ export function DocumentList({
   onExtractionDone,
   showExtractButton = true,
   showViewButton = true,
+  simplifiedBadge = false,
 }: Props) {
   const [extractingId, setExtractingId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -180,8 +185,19 @@ export function DocumentList({
                   {fileName}
                 </p>
                 <div className="flex items-center gap-2 mt-0.5">
-                  {rawStatus === "PROCESSING" ? (
-                    <ExtractingStatusBadge caseId={caseId} documentId={d.id} />
+                  {simplifiedBadge ? (
+                    rawStatus === "EXTRACTED" ? (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-success/15 text-success">
+                        <CheckCircle2 className="h-2.5 w-2.5" />
+                        Extracted
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-muted text-muted-foreground">
+                        Uploaded
+                      </span>
+                    )
+                  ) : rawStatus === "PROCESSING" ? (
+                    <ExtractingStatusBadge row={d} />
                   ) : (
                     <span
                       className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold ${meta.cls}`}
@@ -272,46 +288,43 @@ export function DocumentList({
   );
 }
 
-const STAGE_LABEL: Record<string, string> = {
-  stage1: "Reading PDF",
-  stage2: "Detecting provider",
-  stage3: "Mapping fields",
-  stage4: "Extracting values",
-  done: "Finalising",
-};
-
 /**
- * Per-row badge for PROCESSING documents. Polls /ai-status (3s interval)
- * to surface BFF stage + progress. One poller per processing row — fine
- * for typical case loads (1–3 docs); for >5 concurrent processing docs the
- * polling load becomes noticeable. Acceptable for v1.
+ * Per-row badge for PROCESSING documents. Reads BFF progress straight from
+ * the list row (already refreshed every 5s by useDocuments) and runs it
+ * through the shared crawl/timer/label hook — same display logic as the
+ * banner in ExtractionWorkspace. Zero per-row polling, so N concurrent
+ * extractions cost one list refresh instead of N × /ai-status calls.
  */
-function ExtractingStatusBadge({
-  caseId,
-  documentId,
-}: {
-  caseId: string;
-  documentId: string;
-}) {
-  const status = useExtractionStatus(caseId, documentId);
-  const stageLabel = status.stage ? STAGE_LABEL[status.stage] ?? status.stage : null;
-  const stageMatch = status.stage?.match(/^stage(\d)$/);
-  const stageNum = stageMatch ? stageMatch[1] : null;
-  const text =
-    status.status === "queued"
-      ? "Waiting in queue…"
-      : stageLabel
-        ? stageNum
-          ? `${stageLabel} (${stageNum}/4)`
-          : stageLabel
-        : "Extracting…";
+function ExtractingStatusBadge({ row }: { row: DocumentRow }) {
+  const display = useExtractionDisplay({
+    progressPct: typeof row.ai_job_progress === "number" ? row.ai_job_progress : null,
+    stage: typeof row.ai_job_stage === "string" ? row.ai_job_stage : null,
+    status: typeof row.ai_job_status === "string" ? row.ai_job_status : null,
+    submittedAt:
+      typeof row.ai_job_submitted_at === "string" ? row.ai_job_submitted_at : null,
+    resetKey: row.id,
+  });
+
+  const isQueued = row.ai_job_status === "queued";
+  const text = isQueued
+    ? "Waiting in queue…"
+    : display.displayedLabel
+      ? display.displayedStageNum
+        ? `${display.displayedLabel} (${display.displayedStageNum}/4)`
+        : display.displayedLabel
+      : "Extracting…";
+
+  const mm = Math.floor(display.displayedSeconds / 60);
+  const ss = String(display.displayedSeconds % 60).padStart(2, "0");
+  const timer = `${mm}:${ss}`;
 
   return (
     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-500/15 text-blue-600">
       <Loader2 className="h-2.5 w-2.5 animate-spin" />
       {text}
-      {typeof status.progressPct === "number" && status.progressPct > 0 && (
-        <span className="ml-0.5 opacity-80">· {status.progressPct}%</span>
+      <span className="ml-0.5 opacity-70">· {timer}</span>
+      {typeof display.displayedPct === "number" && display.displayedPct > 0 && (
+        <span className="ml-0.5 opacity-80">· {Math.round(display.displayedPct)}%</span>
       )}
     </span>
   );

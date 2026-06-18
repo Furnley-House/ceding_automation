@@ -16,6 +16,13 @@ export interface DocumentRow {
   avg_confidence?: number | null;
   extracted_data?: unknown | null;
   created_at?: string;
+  // BFF extraction-progress fields — already returned by GET /:caseId/documents
+  // (no `select` clause on the backend), renamed by snakeKeys at runtime.
+  // Typed here so per-row progress UI can consume them without `as any` casts.
+  ai_job_progress?: number | null;
+  ai_job_stage?: string | null;
+  ai_job_status?: string | null;
+  ai_job_submitted_at?: string | null;
   [key: string]: unknown;
 }
 

@@ -86,15 +86,23 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
     [busy, caseId, onUploaded],
   );
 
+  // No `accept` map: react-dropzone's strict MIME pre-filter has been seen
+  // to silently drop legitimate Excel files whose OS-reported MIME is
+  // unexpected (Windows reports `application/octet-stream` for .xls; some
+  // Chromium versions report `application/zip` for .xlsx because .xlsx is
+  // a zip archive). Our own isAcceptedFile (extension OR MIME) and the
+  // backend's multer fileFilter (extension OR MIME) both already accept
+  // the same set — extension fallback makes the dropzone's pre-filter
+  // redundant and fragile. onDropRejected catches anything react-dropzone
+  // does still reject (e.g. limits) so failures are never silent.
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
-    accept: {
-      "application/pdf": [".pdf"],
-      "application/msword": [".doc"],
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
-      "application/vnd.ms-excel": [".xls"],
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
-      "text/plain": [".txt"],
+    onDropRejected: (rejections) => {
+      for (const rej of rejections) {
+        toast.error(`Unsupported file: ${rej.file.name}`, {
+          description: "Allowed: PDF, Word (.doc/.docx), Excel (.xls/.xlsx), plain text (.txt)",
+        });
+      }
     },
     multiple: true,
     noClick: true,
