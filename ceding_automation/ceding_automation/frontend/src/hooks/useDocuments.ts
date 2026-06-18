@@ -23,6 +23,8 @@ export interface DocumentRow {
   ai_job_stage?: string | null;
   ai_job_status?: string | null;
   ai_job_submitted_at?: string | null;
+  ai_job_completed_at?: string | null;
+  extraction_ms?: number | null;
   [key: string]: unknown;
 }
 

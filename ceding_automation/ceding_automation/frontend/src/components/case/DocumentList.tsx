@@ -56,6 +56,34 @@ function getFileName(d: DocumentRow): string {
 }
 
 /**
+ * Format the extraction duration for a completed doc as M:SS (e.g. "0:38",
+ * "1:24"). Prefers the cached extraction_ms; falls back to subtracting the
+ * two timestamps when the cache is null (cancel/timeout paths). Returns null
+ * when neither is available — caller renders just "Extracted" with no time.
+ */
+function formatExtractionDuration(d: DocumentRow): string | null {
+  let ms: number | null = null;
+  if (typeof d.extraction_ms === "number" && d.extraction_ms > 0) {
+    ms = d.extraction_ms;
+  } else if (
+    typeof d.ai_job_submitted_at === "string" &&
+    typeof d.ai_job_completed_at === "string"
+  ) {
+    const submitted = new Date(d.ai_job_submitted_at).getTime();
+    const completed = new Date(d.ai_job_completed_at).getTime();
+    if (Number.isFinite(submitted) && Number.isFinite(completed)) {
+      const delta = completed - submitted;
+      if (delta > 0) ms = delta;
+    }
+  }
+  if (ms === null) return null;
+  const seconds = Math.floor(ms / 1000);
+  const mm = Math.floor(seconds / 60);
+  const ss = String(seconds % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+/**
  * Pick a file-type icon + tint based on extension or MIME. Keeps the doc list
  * scannable when a case has a mix of provider PDFs, Excel illustrations and
  * Word notes.
@@ -162,6 +190,11 @@ export function DocumentList({
         const fileName = getFileName(d);
         const errorMsg = (d as any).error_message ?? (d as any).extraction_error;
         const { Icon: TypeIcon, cls: typeIconCls } = getFileTypeIcon(d);
+        // Display "Extracted · 0:38" once a doc completes — null on non-
+        // EXTRACTED rows or when neither the cached number nor both
+        // timestamps are usable (graceful fallback to just "Extracted").
+        const extractedDuration =
+          rawStatus === "EXTRACTED" ? formatExtractionDuration(d) : null;
 
         return (
           <li
@@ -189,7 +222,7 @@ export function DocumentList({
                     rawStatus === "EXTRACTED" ? (
                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-success/15 text-success">
                         <CheckCircle2 className="h-2.5 w-2.5" />
-                        Extracted
+                        Extracted{extractedDuration ? ` · ${extractedDuration}` : ""}
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-muted text-muted-foreground">
@@ -209,6 +242,7 @@ export function DocumentList({
                         <CircleAlert className="h-2.5 w-2.5" />
                       )}
                       {meta.label}
+                      {extractedDuration ? ` · ${extractedDuration}` : ""}
                     </span>
                   )}
                 </div>
