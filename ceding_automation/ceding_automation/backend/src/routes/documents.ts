@@ -164,6 +164,12 @@ router.get(
 // Hard-delete (rare in production — usually we'd soft-delete instead). The
 // audit row is the only post-hoc evidence the file ever existed, so it's
 // captured before the row is removed and includes the filename + metadata.
+//
+// S5 / Decision 6: cleanup BEFORE document.delete inside one $transaction.
+// The FK is ON DELETE SET NULL — once the doc row is gone, sourceDocumentId
+// on dependent rows is already null, and our updateMany/deleteMany WHEREs
+// would match nothing. Doing it inside the same tx makes the whole thing
+// all-or-nothing: cleanup failure rolls back the delete.
 router.delete(
   "/:caseId/documents/:docId",
   requireAuth,
@@ -172,27 +178,95 @@ router.delete(
     const doc = await prisma.document.findUnique({ where: { id: req.params.docId } });
     if (!doc) return res.status(404).json({ error: "Document not found" });
 
-    await prisma.document.delete({ where: { id: req.params.docId } });
+    const docId = req.params.docId;
+    const documentName = doc.originalName ?? doc.filename ?? doc.id;
 
-    await prisma.auditLog.create({
-      data: {
-        caseId: req.params.caseId,
-        userId: req.user!.id,
-        action: "DOCUMENT_DELETED",
-        source: "MANUAL",
-        oldValue: doc.filename ?? doc.originalName ?? doc.id,
-        metadata: {
-          documentId: doc.id,
-          filename: doc.filename,
-          originalName: doc.originalName,
-          status: doc.status,
-          pageCount: doc.pageCount,
-          uploadedAt: doc.uploadedAt,
-        },
-      },
+    const { revertedFieldCount, deletedFundCount } = await prisma.$transaction(
+      async (tx) => {
+        // 1) Revert AI-only checklist fields whose source just vanished.
+        //    Preserves human-edited (isManuallyOverridden) and adviser-approved
+        //    (isApproved) fields — those survive even when their citation does.
+        const revertedFields = await tx.checklistField.updateMany({
+          where: {
+            sourceDocumentId: docId,
+            isManuallyOverridden: false,
+            isApproved: false,
+          },
+          data: {
+            value: null,
+            confidence: "MISSING",
+            status: "AI_EXTRACTED",
+          },
+        });
+
+        // 2) Delete AI-extracted fund rows from this doc. Mirrors the
+        //    re-extraction cleanup pattern in aiBffApply.applyFundLines —
+        //    MANUALLY_ENTERED / OVERRIDDEN rows are preserved.
+        const deletedFunds = await tx.checklistFundLine.deleteMany({
+          where: {
+            sourceDocumentId: docId,
+            status: "AI_EXTRACTED",
+          },
+        });
+
+        // 3) Now safe to drop the document row. The FK SET NULL cascade
+        //    nulls sourceDocumentId on any remaining dependents (the
+        //    human-preserved fields, manual fund rows). The
+        //    sourceDocumentName snapshot persists on those rows.
+        await tx.document.delete({ where: { id: docId } });
+
+        // 4) Original DOCUMENT_DELETED audit row — unchanged shape.
+        await tx.auditLog.create({
+          data: {
+            caseId: req.params.caseId,
+            userId: req.user!.id,
+            action: "DOCUMENT_DELETED",
+            source: "MANUAL",
+            oldValue: doc.filename ?? doc.originalName ?? doc.id,
+            metadata: {
+              documentId: doc.id,
+              filename: doc.filename,
+              originalName: doc.originalName,
+              status: doc.status,
+              pageCount: doc.pageCount,
+              uploadedAt: doc.uploadedAt,
+            },
+          },
+        });
+
+        // 5) Cleanup-breadcrumb audit row — only if cleanup actually did
+        //    something. Lets the audit timeline distinguish "doc deleted,
+        //    took N rows with it" from "doc deleted, nothing to clean".
+        if (revertedFields.count > 0 || deletedFunds.count > 0) {
+          await tx.auditLog.create({
+            data: {
+              caseId: req.params.caseId,
+              userId: req.user!.id,
+              action: "FIELDS_REVERTED_ON_DOC_DELETE",
+              source: "MANUAL",
+              newValue: `${revertedFields.count} field(s) reverted, ${deletedFunds.count} fund row(s) removed — source document deleted: ${documentName}`,
+              metadata: {
+                documentId: doc.id,
+                revertedFieldCount: revertedFields.count,
+                deletedFundCount: deletedFunds.count,
+                documentName,
+              },
+            },
+          });
+        }
+
+        return {
+          revertedFieldCount: revertedFields.count,
+          deletedFundCount: deletedFunds.count,
+        };
+      }
+    );
+
+    res.json({
+      message: "Document deleted",
+      revertedFieldCount,
+      deletedFundCount,
     });
-
-    res.json({ message: "Document deleted" });
   }
 );
 

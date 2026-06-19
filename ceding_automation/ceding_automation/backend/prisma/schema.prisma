@@ -112,6 +112,7 @@ enum AuditAction {
   FUND_LINE_ADDED
   FUND_LINE_UPDATED
   FUND_LINE_REMOVED
+  FIELDS_REVERTED_ON_DOC_DELETE
 }
 
 enum ContactMethod {
@@ -377,6 +378,11 @@ model ChecklistField {
   // Source citation
   sourceDocumentId String?
   sourceDocument   Document? @relation("FieldSourceDocument", fields: [sourceDocumentId], references: [id])
+  // Snapshot of the source document's filename at extraction time. Persists
+  // after the FK is SET NULL by a doc-delete cascade, so the audit trail can
+  // still name the (now-gone) source. Written alongside sourceDocumentId in
+  // aiBffApply.applyFieldExtraction. (S5 / Decision 6 step 2.)
+  sourceDocumentName String?
   sourcePageNumber Int?
   sourceSection    String? // Table heading or section name in document
   sourceQuote      String? // Raw text snippet extracted

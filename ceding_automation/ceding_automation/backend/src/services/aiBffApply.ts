@@ -183,12 +183,19 @@ export async function applyFieldExtraction(args: {
   // so we don't need a null guard here; if a caller ever violates the
   // type contract, the route-level try/catch on the BFF write-back will
   // contain the failure.
-  const sourceDocExists = await prisma.document.findUnique({
+  // Widened to also pull the filename — needed for the sourceDocumentName
+  // snapshot (S5 / Decision 6 step 2) so the audit trail survives FK SET NULL
+  // on doc delete. Piggybacks the existing FK-validity round-trip; no extra
+  // query.
+  const sourceDoc = await prisma.document.findUnique({
     where: { id: args.documentId },
-    select: { id: true },
+    select: { id: true, originalName: true, filename: true },
   });
-  const safeSourceDocumentId = sourceDocExists ? args.documentId : null;
-  if (!sourceDocExists) {
+  const safeSourceDocumentId = sourceDoc ? args.documentId : null;
+  const safeSourceDocumentName = sourceDoc
+    ? (sourceDoc.originalName ?? sourceDoc.filename ?? null)
+    : null;
+  if (!sourceDoc) {
     console.warn(
       "[applyFieldExtraction] source document not found — writing field value without sourceDocumentId. case=%s field=%s job=%s requestedDocId=%s",
       args.caseId,
@@ -207,6 +214,7 @@ export async function applyFieldExtraction(args: {
       confidence: effectiveConfidence,
       status: "AI_EXTRACTED",
       sourceDocumentId: safeSourceDocumentId,
+      sourceDocumentName: safeSourceDocumentName,
       sourcePageNumber: args.data.sourcePage,
       sourceSection: "BFF",
       sourceQuote: args.data.sourceQuote,
