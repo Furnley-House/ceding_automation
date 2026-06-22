@@ -14,8 +14,21 @@ import { FundDetailsTable } from "./FundDetailsTable";
 interface Props {
   planType: string;
   caseId: string;
-  /** When provided, fields render a 📄 button that calls back with source info */
-  onJumpToSource?: (sourcePage: number | null, fieldLabel: string, evidenceSource: string | null) => void;
+  /** When provided, fields render a 📄 button that calls back with source info.
+   *  sourceDocumentId is the authoritative resolver — the workspace switches
+   *  to that doc before scrolling. evidenceSource (filename) is kept as a
+   *  fallback for legacy rows where the id is null. */
+  onJumpToSource?: (
+    sourcePage: number | null,
+    fieldLabel: string,
+    evidenceSource: string | null,
+    sourceDocumentId: string | null,
+  ) => void;
+  /** Id of the document currently shown in the PDF viewer. Used to compute
+   *  the per-field "from X.pdf" indicator — when a field's source doc differs
+   *  from this id, the ChecklistField surfaces a switch hint. Omit when the
+   *  panel is rendered outside the side-by-side workspace (Stage 6/8). */
+  currentDocumentId?: string | null;
   /**
    * Bumped by an external signal (e.g. AI extraction completing) to force a
    * checklist refetch without remounting the panel. Increment any number
@@ -28,7 +41,7 @@ interface Props {
  * DB-backed checklist. Reads from `checklist_fields`, seeds from the plan-type
  * template on first open, persists every edit and writes audit-log entries.
  */
-export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal }: Props) {
+export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocumentId, refreshSignal }: Props) {
   const template = useMemo(() => getTemplate(planType), [planType]);
   const { canEditChecklist, canApprove, isAdviser } = useRole();
   const { rows, byKey, loading, refresh, updateField, approveAllFilled } = useChecklistFields({
@@ -48,6 +61,16 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
       m.set(d.id, d.original_name ?? d.filename ?? d.id);
     });
     return m;
+  }, [documents]);
+
+  // Set of live doc ids — used to detect "source deleted": a field with a
+  // source_document_id that no longer matches any document in the case (the
+  // source PDF was removed after extraction). The persistent
+  // source_document_name snapshot is what we then show to the user.
+  const liveDocumentIds = useMemo(() => {
+    const s = new Set<string>();
+    documents.forEach((d) => { if (d.id) s.add(d.id); });
+    return s;
   }, [documents]);
 
   // Re-fetch when an external signal arrives (e.g. BFF extraction completed).
@@ -357,6 +380,21 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
             <div className="p-3 grid gap-2 md:grid-cols-2">
               {fields.map((f) => {
                 const r = byKey.get(f.key);
+                // Resolve the per-field source doc state for Part C's
+                // indicator and to feed Part A's id-based jump.
+                //   - sourceDocId  : authoritative FK (may be null on legacy)
+                //   - sourceDocName: persistent snapshot (outlives deletion)
+                //   - deleted      : id present but doc not in the live list
+                //   - different    : id resolves to a doc OTHER than the open one
+                const sourceDocId = r?.source_document_id ?? null;
+                const sourceDocName = r?.source_document_name ?? null;
+                const isSourceDeleted =
+                  !!sourceDocId && !liveDocumentIds.has(sourceDocId);
+                const isFromDifferentDoc =
+                  !!sourceDocId &&
+                  !isSourceDeleted &&
+                  !!currentDocumentId &&
+                  sourceDocId !== currentDocumentId;
                 return (
                   <ChecklistField
                     key={f.key}
@@ -365,9 +403,18 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, refreshSignal
                     onChange={(patch) => handleFieldChange(f, patch)}
                     onJumpToSource={
                       onJumpToSource && r?.source_page
-                        ? () => onJumpToSource(r.source_page ?? null, f.label, r.evidence_source ?? null)
+                        ? () =>
+                            onJumpToSource(
+                              r.source_page ?? null,
+                              f.label,
+                              r.evidence_source ?? null,
+                              sourceDocId,
+                            )
                         : undefined
                     }
+                    sourceDocumentName={sourceDocName}
+                    isFromDifferentDoc={isFromDifferentDoc}
+                    isSourceDeleted={isSourceDeleted}
                     conflict={buildConflict(f)}
                   />
                 );

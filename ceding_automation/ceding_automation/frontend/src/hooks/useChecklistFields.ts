@@ -50,8 +50,14 @@ function adoptEvidenceFields(row: ChecklistRow): ChecklistRow {
     source_document?: { original_name?: string | null; filename?: string | null } | null;
   };
   const sourcePage = r.source_page ?? r.source_page_number ?? null;
+  // Prefer the persistent snapshot column (source_document_name) so the name
+  // survives doc deletion; fall back to the live relation for legacy rows
+  // that pre-date the snapshot field.
   const sourceDocName =
-    r.source_document?.original_name ?? r.source_document?.filename ?? null;
+    r.source_document_name ??
+    r.source_document?.original_name ??
+    r.source_document?.filename ??
+    null;
   // Compose a human-readable reference for the tooltip — "Page 3, Cash Value"
   // when both are present, just "Page 3" otherwise. Fall back to the raw
   // quote if no page exists.
@@ -94,6 +100,12 @@ function adoptEvidenceFields(row: ChecklistRow): ChecklistRow {
     source_page: sourcePage,
     evidence_source: r.evidence_source ?? sourceDocName,
     evidence_ref: r.evidence_ref ?? ref,
+    // Carry the per-field source-doc id + resolved name through to consumers.
+    // The wire already has source_document_id (from the ...f spread server-side);
+    // we just make sure source_document_name has the snapshot-with-relation
+    // fallback applied so the indicator always has *something* to render.
+    source_document_id: r.source_document_id ?? null,
+    source_document_name: sourceDocName,
     notes,
     status,
     manually_edited: !!manuallyEdited,

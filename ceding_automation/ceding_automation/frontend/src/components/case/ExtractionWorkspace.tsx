@@ -143,17 +143,58 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
   ).length;
   const showBatchSummary = processingCount > 1;
 
-  const handleJumpToSource = (sourcePage: number | null, fieldLabel: string, evidenceSource: string | null) => {
+  const handleJumpToSource = (
+    sourcePage: number | null,
+    fieldLabel: string,
+    evidenceSource: string | null,
+    sourceDocumentId: string | null,
+  ) => {
     if (!sourcePage) return;
-    // If the field cites a different document, switch to it
-    if (evidenceSource) {
-      const match = documents.find(
-        (d) => ((d as any).original_name ?? (d as any).file_name) === evidenceSource
-      );
-      if (match && match.id !== selectedId) {
-        setSelectedId(match.id);
-      }
+
+    // Resolve the target document:
+    //   1. Prefer sourceDocumentId — the authoritative per-field FK. This is
+    //      the *only* reliable resolver: filename matching silently fails
+    //      when the source doc was deleted or its name drifted (the exact
+    //      bug testers reported, where Source scrolls the OPEN doc instead).
+    //   2. Fall back to filename match for legacy rows where the id is null
+    //      (pre-snapshot data).
+    //   3. If neither resolves (e.g. the source doc was deleted), skip the
+    //      jump entirely — DO NOT silently scroll the open doc and mislead
+    //      the user. The "source: X (deleted)" indicator on the field
+    //      already explains why nothing happened.
+    let targetId: string | null = null;
+    if (sourceDocumentId) {
+      const byId = documents.find((d) => d.id === sourceDocumentId);
+      if (byId) targetId = byId.id;
     }
+    if (!targetId && evidenceSource) {
+      const byName = documents.find(
+        (d) => ((d as any).original_name ?? (d as any).file_name) === evidenceSource,
+      );
+      if (byName) targetId = byName.id;
+    }
+    if (!targetId) {
+      toast.message("Source document unavailable", {
+        description: "The PDF this value came from is no longer in the case.",
+      });
+      return;
+    }
+
+    if (targetId !== selectedId) {
+      // Switching docs. The page-jump effect in PdfViewer is keyed on
+      // [jumpToPage, numPages] — if we set jumpRequest synchronously, it
+      // runs against the OLD doc's numPages and either scrolls the wrong
+      // PDF or no-ops. Defer one tick so the selectedId change commits and
+      // the new doc URL load kicks off; when numPages updates for the new
+      // doc, the dep array re-fires the jump against the correct PDF.
+      setSelectedId(targetId);
+      setTimeout(() => {
+        setJumpRequest({ page: sourcePage, banner: fieldLabel, nonce: Date.now() });
+      }, 0);
+      return;
+    }
+
+    // Same doc as currently open — jump immediately.
     setJumpRequest({ page: sourcePage, banner: fieldLabel, nonce: Date.now() });
   };
 
@@ -266,6 +307,7 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
             planType={planType}
             caseId={caseId}
             onJumpToSource={handleJumpToSource}
+            currentDocumentId={selectedId}
             refreshSignal={checklistRefreshSignal}
           />
         </div>

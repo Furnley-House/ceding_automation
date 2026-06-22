@@ -17,6 +17,15 @@ export interface ChecklistRow {
   source_page?: number | null;
   evidence_source?: string | null;
   evidence_ref?: string | null;
+  // Per-field FK to the source document. Used by the Source button to switch
+  // the viewer to the *correct* PDF before scrolling — filename-based matching
+  // (evidence_source) silently fails when the source doc was deleted or the
+  // filename drifted, so the id is the reliable resolver.
+  source_document_id?: string | null;
+  // Persistent snapshot of the source doc's filename. Outlives doc deletion
+  // (the live source_document relation goes null, but this stays). Used to
+  // render the "from X.pdf" / "source: X (deleted)" indicator.
+  source_document_name?: string | null;
   extracted_at?: string | null;
   manually_edited?: boolean;
   notes?: string | null;

@@ -56,6 +56,19 @@ interface Props {
   onChange: (next: Partial<ChecklistFieldState>) => void;
   /** When provided, renders a "jump to source" button next to the field */
   onJumpToSource?: () => void;
+  /** Persistent snapshot of the source doc's filename. Survives deletion of
+   *  the underlying document, so the "from X.pdf" / "deleted" hint can keep
+   *  rendering even after the source PDF is removed from the case. */
+  sourceDocumentName?: string | null;
+  /** True when the field's source doc is in the case but NOT currently shown
+   *  in the viewer. Renders a "from X.pdf" pill so the user understands why
+   *  clicking Source will swap the PDF before scrolling. */
+  isFromDifferentDoc?: boolean;
+  /** True when the field has a source_document_id that no longer matches any
+   *  document in the case (the source PDF was deleted post-extraction).
+   *  Renders a muted "(deleted)" indicator; the Source button does nothing
+   *  in this state — handled in ExtractionWorkspace.handleJumpToSource. */
+  isSourceDeleted?: boolean;
   /** When the field is in CONFLICT, renders an inline resolver panel
    *  showing both candidate values + their provenance + "Use this value"
    *  buttons. Undefined for non-conflicted fields (or if the parent
@@ -71,7 +84,16 @@ const CONF_META: Record<Confidence, { label: string; icon: React.ElementType; cl
   CONFLICT: { label: "Conflicting sources", icon: AlertTriangle, cls: "bg-overdue/15 text-overdue border-overdue/40" },
 };
 
-export function ChecklistField({ def, state, onChange, onJumpToSource, conflict }: Props) {
+export function ChecklistField({
+  def,
+  state,
+  onChange,
+  onJumpToSource,
+  sourceDocumentName,
+  isFromDifferentDoc,
+  isSourceDeleted,
+  conflict,
+}: Props) {
   const { canEditChecklist, canApprove, userName } = useRole();
   const [localValue, setLocalValue] = useState(state.value ?? "");
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -299,6 +321,44 @@ export function ChecklistField({ def, state, onChange, onJumpToSource, conflict 
                 </Tooltip>
               </TooltipProvider>
             )}
+
+            {/* Wrong-pdf / deleted-source hint. Three mutually exclusive
+                states (deleted wins over different — a deleted doc is by
+                definition not the open one). When the source IS the open
+                doc, render nothing. */}
+            {isSourceDeleted ? (
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border bg-muted text-muted-foreground border-border text-[10px] font-semibold max-w-[180px] truncate">
+                      source: {sourceDocumentName ?? "unknown"} (deleted)
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p className="text-xs">Source PDF removed</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      The document this value came from is no longer in the case.
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            ) : isFromDifferentDoc && sourceDocumentName ? (
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border bg-info/10 text-info border-info/30 text-[10px] font-semibold max-w-[180px] truncate">
+                      from {sourceDocumentName}
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p className="text-xs">Source is a different PDF</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      Clicking Source switches the viewer to “{sourceDocumentName}”.
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            ) : null}
           </div>
 
           {def.hint && <p className="text-[10px] text-muted-foreground italic mt-0.5">{def.hint}</p>}
