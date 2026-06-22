@@ -17,12 +17,15 @@ interface Props {
   /** When provided, fields render a 📄 button that calls back with source info.
    *  sourceDocumentId is the authoritative resolver — the workspace switches
    *  to that doc before scrolling. evidenceSource (filename) is kept as a
-   *  fallback for legacy rows where the id is null. */
+   *  fallback for legacy rows where the id is null. sourceQuote is the AI's
+   *  verbatim excerpt — PdfViewer uses it to highlight the exact span on
+   *  the jumped-to page (null skips highlight, page-jump still happens). */
   onJumpToSource?: (
     sourcePage: number | null,
     fieldLabel: string,
     evidenceSource: string | null,
     sourceDocumentId: string | null,
+    sourceQuote: string | null,
   ) => void;
   /** Id of the document currently shown in the PDF viewer. Used to compute
    *  the per-field "from X.pdf" indicator — when a field's source doc differs
@@ -409,6 +412,7 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
                               f.label,
                               r.evidence_source ?? null,
                               sourceDocId,
+                              r.source_quote ?? null,
                             )
                         : undefined
                     }

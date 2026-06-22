@@ -29,9 +29,15 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
   } = useDocuments(caseId, { refreshInterval: 5000 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
-  const [jumpRequest, setJumpRequest] = useState<{ page: number; banner: string; nonce: number } | null>(
-    null,
-  );
+  const [jumpRequest, setJumpRequest] = useState<{
+    page: number;
+    banner: string;
+    nonce: number;
+    /** Verbatim excerpt to highlight on the page after the jump. Null when
+     *  the field has no quote (legacy rows or transcript-only fields) — in
+     *  which case PdfViewer just scrolls to the page without highlighting. */
+    quote: string | null;
+  } | null>(null);
   // Counter bumped when extraction completes — passed to ChecklistPanel to
   // trigger a refetch so newly-extracted fields show up without a manual reload.
   const [checklistRefreshSignal, setChecklistRefreshSignal] = useState(0);
@@ -148,6 +154,7 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     fieldLabel: string,
     evidenceSource: string | null,
     sourceDocumentId: string | null,
+    sourceQuote: string | null,
   ) => {
     if (!sourcePage) return;
 
@@ -189,13 +196,23 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
       // doc, the dep array re-fires the jump against the correct PDF.
       setSelectedId(targetId);
       setTimeout(() => {
-        setJumpRequest({ page: sourcePage, banner: fieldLabel, nonce: Date.now() });
+        setJumpRequest({
+          page: sourcePage,
+          banner: fieldLabel,
+          nonce: Date.now(),
+          quote: sourceQuote,
+        });
       }, 0);
       return;
     }
 
     // Same doc as currently open — jump immediately.
-    setJumpRequest({ page: sourcePage, banner: fieldLabel, nonce: Date.now() });
+    setJumpRequest({
+      page: sourcePage,
+      banner: fieldLabel,
+      nonce: Date.now(),
+      quote: sourceQuote,
+    });
   };
 
   const handleRetry = async () => {
@@ -297,6 +314,8 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
               fileName={(selectedDoc as any)?.original_name ?? (selectedDoc as any)?.file_name}
               jumpToPage={jumpRequest?.page ?? null}
               jumpBanner={jumpRequest?.banner ?? null}
+              highlightQuote={jumpRequest?.quote ?? null}
+              jumpNonce={jumpRequest?.nonce ?? null}
             />
           </div>
         </div>

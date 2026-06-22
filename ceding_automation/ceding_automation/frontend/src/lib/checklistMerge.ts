@@ -26,6 +26,12 @@ export interface ChecklistRow {
   // (the live source_document relation goes null, but this stays). Used to
   // render the "from X.pdf" / "source: X (deleted)" indicator.
   source_document_name?: string | null;
+  // Verbatim-ish excerpt the AI cited from the PDF (max 2000 chars per the
+  // BFF contract; 500 chars on the call-transcript path). Used by PdfViewer
+  // to highlight the exact span on the jumped-to page. Previously reached
+  // the wire but was only accessible via the index signature; promoted to
+  // a first-class field so consumers can type against it.
+  source_quote?: string | null;
   extracted_at?: string | null;
   manually_edited?: boolean;
   notes?: string | null;

@@ -106,6 +106,9 @@ function adoptEvidenceFields(row: ChecklistRow): ChecklistRow {
     // fallback applied so the indicator always has *something* to render.
     source_document_id: r.source_document_id ?? null,
     source_document_name: sourceDocName,
+    // Verbatim excerpt the AI cited — surfaced so PdfViewer can locate &
+    // highlight it on the page. Falls through from the wire unchanged.
+    source_quote: r.source_quote ?? null,
     notes,
     status,
     manually_edited: !!manuallyEdited,
