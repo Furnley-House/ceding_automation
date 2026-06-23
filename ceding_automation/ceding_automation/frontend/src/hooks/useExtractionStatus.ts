@@ -110,9 +110,27 @@ export function useExtractionStatus(
         };
         setState(next);
 
-        if (next.status === "completed" || next.status === "failed") {
+        // Additive terminal guard: if the BFF reports stage=done with
+        // progressPct=100 but never flips status to "completed" (observed
+        // multi-doc stall where the write-back transaction rolled back
+        // or the BFF poller wasn't running), treat that as terminal too.
+        // Stops the indefinite "Finalising · 100%" spin and fires the
+        // refresh callback so the doc list can catch up if/when the BFF
+        // eventually settles. Strictly stage==="done" AND pct>=100 — a
+        // still-running stage4 (pct<100) or earlier stage stays in-flight.
+        const reachedFinalising =
+          next.stage === "done" && (next.progressPct ?? 0) >= 100;
+
+        if (
+          next.status === "completed" ||
+          next.status === "failed" ||
+          reachedFinalising
+        ) {
           stopped = true;
-          if (next.status === "completed" && !completeFiredRef.current) {
+          if (
+            (next.status === "completed" || reachedFinalising) &&
+            !completeFiredRef.current
+          ) {
             completeFiredRef.current = true;
             onCompleteRef.current?.();
           }

@@ -43,7 +43,20 @@ export interface ExtractionDisplay {
   displayedSeconds: number;
   displayedLabel: string | null;
   displayedStageNum: string | null;
+  /**
+   * True once raw elapsed exceeds MAX_DISPLAY_SECONDS — by which point the
+   * BFF should have failed the job. displayedSeconds freezes at the cap;
+   * callers can show "Taking longer than expected" alongside the frozen
+   * timer instead of an ever-growing absurd number (1333:36 observed on
+   * a stalled multi-doc run before this cap existed).
+   */
+  isOverdue: boolean;
 }
+
+// Mirrors backend JOB_TIMEOUT_MS (10 min). Past this the BFF's own poller
+// should have settled the job as failed; if it hasn't, the row is stuck
+// and we'd rather freeze the timer than count toward infinity.
+const MAX_DISPLAY_SECONDS = 600;
 
 export function useExtractionDisplay({
   progressPct,
@@ -54,6 +67,7 @@ export function useExtractionDisplay({
 }: ExtractionAnchors): ExtractionDisplay {
   const [displayedPct, setDisplayedPct] = useState<number | null>(null);
   const [displayedSeconds, setDisplayedSeconds] = useState(0);
+  const [isOverdue, setIsOverdue] = useState(false);
 
   // Stage 4 wait detection — resilient form: status processing + pct at
   // the 75% anchor + stage label still on stage3 (last ping) or stage4
@@ -77,6 +91,7 @@ export function useExtractionDisplay({
   useEffect(() => {
     setDisplayedPct(null);
     setDisplayedSeconds(0);
+    setIsOverdue(false);
   }, [resetKey]);
 
   // Crawl: outside the Stage 4 wait → mirror the real anchor 1:1.
@@ -108,6 +123,7 @@ export function useExtractionDisplay({
   useEffect(() => {
     if (!submittedAt) {
       setDisplayedSeconds(0);
+      setIsOverdue(false);
       return;
     }
     const submittedTs =
@@ -116,19 +132,27 @@ export function useExtractionDisplay({
         : submittedAt.getTime();
     if (!Number.isFinite(submittedTs)) {
       setDisplayedSeconds(0);
+      setIsOverdue(false);
       return;
     }
-    const compute = () =>
-      Math.max(0, Math.floor((Date.now() - submittedTs) / 1000));
-    setDisplayedSeconds(compute());
+    const tick = () => {
+      const raw = Math.max(0, Math.floor((Date.now() - submittedTs) / 1000));
+      setIsOverdue(raw > MAX_DISPLAY_SECONDS);
+      setDisplayedSeconds(Math.min(raw, MAX_DISPLAY_SECONDS));
+    };
+    tick();
     if (status !== "processing" && status !== "queued") {
       return;
     }
-    const intervalId = setInterval(() => {
-      setDisplayedSeconds(compute());
-    }, 1000);
+    const intervalId = setInterval(tick, 1000);
     return () => clearInterval(intervalId);
   }, [submittedAt, status]);
 
-  return { displayedPct, displayedSeconds, displayedLabel, displayedStageNum };
+  return {
+    displayedPct,
+    displayedSeconds,
+    displayedLabel,
+    displayedStageNum,
+    isOverdue,
+  };
 }

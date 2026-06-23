@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDocuments, getSignedUrl } from "@/hooks/useDocuments";
 import { useExtractionStatus, type ExtractionStatus } from "@/hooks/useExtractionStatus";
 import { useExtractionDisplay } from "@/hooks/useExtractionDisplay";
@@ -78,11 +78,22 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
   // through the backend to dodge Azure Blob CORS). We have to revoke the
   // previous URL when the selection changes or the component unmounts —
   // otherwise the underlying Blob is pinned in memory for the page lifetime.
+  //
+  // Deps deliberately exclude `documents` — its identity changes every 5s
+  // when useDocuments refreshes, which would otherwise re-fire this effect
+  // and revoke the blob mid-pdf.js load (→ "ERR_FILE_NOT_FOUND" + Headers
+  // "Invalid name" console spam during in-flight extractions). The lookup
+  // below still resolves because selectedId is only set from rows that
+  // already exist in `documents`, and deletion of the selected doc clears
+  // selectedId (onRemove → setSelectedId(null)) which DOES re-fire this.
+  const documentsRef = useRef(documents);
+  documentsRef.current = documents;
+
   useEffect(() => {
     let cancelled = false;
     let createdUrl: string | null = null;
     (async () => {
-      const doc = documents.find((d) => d.id === selectedId);
+      const doc = documentsRef.current.find((d) => d.id === selectedId);
       if (!doc) {
         setPdfUrl((prev) => {
           if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
@@ -105,7 +116,7 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
       cancelled = true;
       if (createdUrl && createdUrl.startsWith("blob:")) URL.revokeObjectURL(createdUrl);
     };
-  }, [selectedId, documents, caseId]);
+  }, [selectedId, caseId]);
 
   const selectedDoc = useMemo(
     () => documents.find((d) => d.id === selectedId) ?? null,
@@ -246,6 +257,7 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     display.displayedLabel,
     display.displayedStageNum,
     display.displayedSeconds,
+    display.isOverdue,
   );
 
   return (
@@ -344,6 +356,7 @@ function renderExtractionBanner(
   displayedLabel: string | null,
   displayedStageNum: string | null,
   displayedSeconds: number,
+  isOverdue: boolean,
 ) {
   // No selection → nothing.
   if (!documentStatus) return null;
@@ -397,7 +410,7 @@ function renderExtractionBanner(
 
     const mm = Math.floor(displayedSeconds / 60);
     const ss = String(displayedSeconds % 60).padStart(2, "0");
-    const timer = `${mm}:${ss}`;
+    const timer = isOverdue ? `${mm}:${ss}+` : `${mm}:${ss}`;
 
     const pct = typeof displayedPct === "number" ? displayedPct : null;
 
@@ -409,6 +422,11 @@ function renderExtractionBanner(
             <p className="text-xs font-semibold text-foreground">
               {text}
               <span className="text-muted-foreground font-normal"> · {timer}</span>
+              {isOverdue && (
+                <span className="text-muted-foreground font-normal italic">
+                  {" "}· taking longer than expected
+                </span>
+              )}
             </p>
             {pct !== null && (
               <div className="mt-1.5 h-1 bg-background rounded overflow-hidden">
