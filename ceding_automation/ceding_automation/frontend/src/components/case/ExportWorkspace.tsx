@@ -17,7 +17,6 @@ import { useRole } from "@/hooks/useRole";
 import { useChecklistFields, isMissing, displayValue } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
-import { UnlinkedPlanBanner } from "./UnlinkedPlanBanner";
 import type { CaseRow } from "@/lib/caseHelpers";
 
 interface AuditRow {
@@ -520,19 +519,6 @@ export function ExportWorkspace({ caseItem }: Props) {
 
       {/* Zoho update receipt (D3) — sourced from the latest CHECKLIST_EXPORTED audit row */}
       <ExportReceiptPanel receipt={receipt} loading={receiptLoading} />
-
-      {/* D4 fallback — if the case still has no linked Plans record, give the
-          CA a direct path to link or create one without leaving the stage. */}
-      {!(caseItem as unknown as { zoho_case_id?: string | null }).zoho_case_id && (
-        <UnlinkedPlanBanner
-          caseId={caseItem.id}
-          policyRef={caseItem.plan_number ?? null}
-          planType={caseItem.plan_type}
-          provider={caseItem.Provider_group ?? null}
-          clientName={caseItem.client_name ?? null}
-          compact
-        />
-      )}
     </div>
   );
 }

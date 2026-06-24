@@ -1146,11 +1146,16 @@ router.post(
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
     const caseRow = await prisma.case.findUnique({
       where: { id: req.params.id },
-      select: { id: true, zohoTaskId: true },
+      // Capture the existing linkage so the audit row can record what we
+      // overwrote — re-linking on Stage 3 deliberately replaces any prior
+      // (often auto-linked, possibly wrong) Plans record.
+      select: { id: true, zohoTaskId: true, zohoCaseId: true, zohoPlanName: true },
     });
     if (!caseRow) return res.status(404).json({ error: "Case not found" });
 
     const { planRecordId } = parsed.data;
+    const previousPlanRecordId = caseRow.zohoCaseId;
+    const previousPlanName = caseRow.zohoPlanName;
     // Fetch the Plans record so we can cache Name + verify the id is real
     // before we touch Task.What_Id. Better to 502 here than half-link.
     let planName: string | null = null;
@@ -1185,8 +1190,17 @@ router.post(
         userId: req.user!.id,
         action: "CASE_UPDATED",
         source: "MANUAL",
+        oldValue: previousPlanRecordId
+          ? `Plans record ${previousPlanName ?? previousPlanRecordId}`
+          : null,
         newValue: `Linked Plans record ${planName ?? planRecordId}`,
-        metadata: { linkedPlan: { id: planRecordId, name: planName }, taskLinkNote } as Prisma.InputJsonValue,
+        metadata: {
+          linkedPlan: { id: planRecordId, name: planName },
+          previousPlan: previousPlanRecordId
+            ? { id: previousPlanRecordId, name: previousPlanName }
+            : null,
+          taskLinkNote,
+        } as Prisma.InputJsonValue,
       },
     });
     res.json({ ok: true, planRecordId, planName, taskLinkNote, case: updated });

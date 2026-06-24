@@ -110,7 +110,7 @@ export function UnlinkedPlanBanner({
 }
 
 // ── Link existing dialog ─────────────────────────────────────
-function LinkExistingPlanDialog({
+export function LinkExistingPlanDialog({
   caseId,
   initialQuery,
   onClose,
@@ -229,7 +229,7 @@ function LinkExistingPlanDialog({
 }
 
 // ── Create new dialog ────────────────────────────────────────
-function CreatePlanDialog({
+export function CreatePlanDialog({
   caseId,
   policyRef,
   planType,
