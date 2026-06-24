@@ -19,6 +19,7 @@ export type ApplyFieldOutcome =
   | "conflict"
   | "preserved" // isApproved or isManuallyOverridden
   | "no-overwrite-missing" // incoming was MISSING; existing value held
+  | "skipped-manual-only" // template flagged manual-entry-only; AI never writes
   | "field-not-found";
 
 export interface ApplyFieldResult {
@@ -49,6 +50,21 @@ export async function applyFieldExtraction(args: {
     include: { template: true },
   });
   if (!field) return { outcome: "field-not-found" };
+
+  // (0) Manual-entry-only guard — some templates are configured so that the
+  // AI BFF must never populate them (e.g. DFM Charge, OCF / Transaction
+  // Costs). We silently skip — no audit row, no conflict — so re-extraction
+  // is safe to run repeatedly without side effects.
+  if (field.template.isManualEntryOnly) {
+    console.log(
+      "[merge-outcome] outcome=skipped-manual-only case=%s field=%s job=%s doc=%s",
+      args.caseId,
+      args.fieldKey,
+      args.jobId,
+      args.documentId,
+    );
+    return { outcome: "skipped-manual-only", fieldId: field.id };
+  }
 
   // (1) Preservation guard — never stomp CA-Team edits or adviser approvals.
   if (field.isApproved || field.isManuallyOverridden) {

@@ -344,6 +344,7 @@ model ChecklistTemplate {
   isRequired      Boolean  @default(true)
   displayOrder    Int
   isActive        Boolean  @default(true)
+  isManualEntryOnly Boolean @default(false) // when true, AI BFF never writes this field — manual entry only
   conditionalNote String? // Tooltip / guidance for CA team
   metadata        Json?   // v1.1 canonical extras: typical_values, normalize_per, allows_defer_to_source, defer_examples, auto_extract_hint, parent_field, accepts_non_applicable_markers, columns, section_order
 
