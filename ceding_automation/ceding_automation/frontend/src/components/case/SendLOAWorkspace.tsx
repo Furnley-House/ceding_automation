@@ -257,6 +257,15 @@ ProviderHub`;
         )}
       </div>
 
+      {/* Status timeline — one row per LOAStatus transition that has a
+          recorded timestamp, in lifecycle order. NOT_SENT and SIGNED never
+          appear. Hidden entirely until at least one timestamp exists. */}
+      <StatusTimeline
+        sentAt={(caseItem as any).loa_sent_date ?? null}
+        processedAt={(caseItem as any).loa_processed_date ?? null}
+        receivedAt={(caseItem as any).loa_received_date ?? null}
+      />
+
       {/* Method selector */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
         <MethodTile
@@ -339,6 +348,54 @@ ProviderHub`;
           pending={updateMutation.isPending}
         />
       )}
+    </div>
+  );
+}
+
+// Read-only LOA status timeline. Renders Sent → Processed → Received rows,
+// skipping any transition without a recorded timestamp. Date+time format
+// matches the rest of the app (cf. ExportWorkspace.formatTs / AuditTimeline).
+function StatusTimeline({
+  sentAt,
+  processedAt,
+  receivedAt,
+}: {
+  sentAt: string | null;
+  processedAt: string | null;
+  receivedAt: string | null;
+}) {
+  const fmt = (iso: string | null): string | null => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return `${d.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    })} ${d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`;
+  };
+  const rows = [
+    { label: "Sent", ts: fmt(sentAt) },
+    { label: "Processed", ts: fmt(processedAt) },
+    { label: "Received", ts: fmt(receivedAt) },
+  ].filter((r) => r.ts !== null);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="rounded-md border border-border bg-card p-3">
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-2">
+        Status timeline
+      </p>
+      <ul className="space-y-1.5">
+        {rows.map((r) => (
+          <li key={r.label} className="flex items-center gap-2 text-xs">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-teal shrink-0" />
+            <span className="font-medium text-foreground w-20">{r.label}</span>
+            <span className="text-muted-foreground tabular-nums">— {r.ts}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

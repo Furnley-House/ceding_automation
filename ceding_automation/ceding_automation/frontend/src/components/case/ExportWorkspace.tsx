@@ -17,7 +17,6 @@ import { useRole } from "@/hooks/useRole";
 import { useChecklistFields, isMissing, displayValue } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
-import { UnlinkedPlanBanner } from "./UnlinkedPlanBanner";
 import type { CaseRow } from "@/lib/caseHelpers";
 
 interface AuditRow {
@@ -219,7 +218,8 @@ export function ExportWorkspace({ caseItem }: Props) {
       numberOfUnits: string | null;
       pricePerUnit: string | null;
       value: string | null;
-      fundCharge: string | null;
+      ocf: string | null;
+      transactionCosts: string | null;
       isWithProfits: boolean;
       status: string;
       confidence: string;
@@ -246,7 +246,8 @@ export function ExportWorkspace({ caseItem }: Props) {
         "Units",
         "Price",
         "Value (£)",
-        "Charge (%)",
+        "OCF (%)",
+        "Transaction Costs (%)",
         "With-profits",
         "Status",
         "Confidence",
@@ -261,7 +262,8 @@ export function ExportWorkspace({ caseItem }: Props) {
         f.numberOfUnits ?? "",
         f.pricePerUnit ?? "",
         f.value ?? "",
-        f.fundCharge ?? "",
+        f.ocf ?? "",
+        f.transactionCosts ?? "",
         f.isWithProfits ? "Yes" : "No",
         f.status,
         f.confidence,
@@ -271,7 +273,7 @@ export function ExportWorkspace({ caseItem }: Props) {
     });
     if (fundLines.length > 0) {
       fundRows.push([]); // blank separator row
-      fundRows.push(["", "", "", "TOTAL", fundTotalValue, "", "", "", "", "", ""]);
+      fundRows.push(["", "", "", "TOTAL", fundTotalValue, "", "", "", "", "", "", ""]);
     }
 
     // ---- Audit sheet ----
@@ -517,19 +519,6 @@ export function ExportWorkspace({ caseItem }: Props) {
 
       {/* Zoho update receipt (D3) — sourced from the latest CHECKLIST_EXPORTED audit row */}
       <ExportReceiptPanel receipt={receipt} loading={receiptLoading} />
-
-      {/* D4 fallback — if the case still has no linked Plans record, give the
-          CA a direct path to link or create one without leaving the stage. */}
-      {!(caseItem as unknown as { zoho_case_id?: string | null }).zoho_case_id && (
-        <UnlinkedPlanBanner
-          caseId={caseItem.id}
-          policyRef={caseItem.plan_number ?? null}
-          planType={caseItem.plan_type}
-          provider={caseItem.Provider_group ?? null}
-          clientName={caseItem.client_name ?? null}
-          compact
-        />
-      )}
     </div>
   );
 }

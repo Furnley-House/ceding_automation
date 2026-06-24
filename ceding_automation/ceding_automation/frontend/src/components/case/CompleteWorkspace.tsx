@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { getCases } from "@/services/api";
 import type { CaseRow } from "@/lib/caseHelpers";
 import { RAG_STYLES, STATUS_LABELS, calculateRag } from "@/lib/caseHelpers";
+import { CaseKpiPanel } from "./CaseKpiPanel";
 
 interface Props {
   caseItem: CaseRow;
@@ -72,6 +73,9 @@ export function CompleteWorkspace({ caseItem }: Props) {
           </span>
         </div>
       </div>
+
+      {/* Case KPIs — client-side derived metrics, above the completion controls. */}
+      <CaseKpiPanel caseItem={caseItem} />
 
       {/* Primary action — "My Inbox" was removed because no role actually
           uses it (CA has no inbox, paraplanner/adviser/admin work from the

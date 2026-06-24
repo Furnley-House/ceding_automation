@@ -1,7 +1,7 @@
 import { useParams, useNavigate, Link, useLocation, useOutletContext } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, AlertTriangle, ExternalLink, RefreshCw } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, AlertTriangle, ExternalLink, RefreshCw, Search, Plus } from "lucide-react";
 import type { AppLayoutContext } from "@/components/layout/AppLayout";
 import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho } from "@/services/api";
 import { CEDING_STAGES, STATUS_LABELS, STATUS_STYLES, RAG_STYLES, calculateRag } from "@/lib/caseHelpers";
@@ -21,6 +21,7 @@ import {
   StageExport,
   StageComplete,
 } from "@/components/case/stages";
+import { LinkExistingPlanDialog, CreatePlanDialog } from "@/components/case/UnlinkedPlanBanner";
 
 const CaseDetail = () => {
   const { id } = useParams();
@@ -141,6 +142,11 @@ const CaseDetail = () => {
   // - The case-header accordion is local to this page; default closed
   //   when arriving on Stage 4, openable on demand.
   const [headerCollapsed, setHeaderCollapsed] = useState<boolean>(false);
+  // Stage-3-only Link/Create-Plan controls in the header. Available whether or
+  // not a plan is already linked, so the CA can re-link to the correct Plans
+  // record once the provider document reveals the real policy number.
+  const [linkPlanOpen, setLinkPlanOpen] = useState(false);
+  const [createPlanOpen, setCreatePlanOpen] = useState(false);
   const sidebarPriorStateRef = useRef<boolean | null>(null);
   useEffect(() => {
     if (viewStage === 4) {
@@ -210,6 +216,10 @@ const CaseDetail = () => {
   );
   const rag = calculateRag(caseItem as any);
   const planSupported = isSupportedPlanType(caseItem.plan_type);
+  // A Plans record is linked once zoho_case_id is cached on the case. Used to
+  // (a) highlight the Stage-3 header Link/Create buttons as a required action
+  // and (b) block advancing Stage 3 → Stage 4 until a plan is linked.
+  const planLinked = !!(caseItem as any).zoho_case_id;
 
   const goToStage = (n: number) => {
     if (n < 1 || n > 10) return;
@@ -293,6 +303,43 @@ const CaseDetail = () => {
                   {caseItem.case_ref}
                 </span>
                 <div className="ml-auto flex items-center gap-3">
+                  {/* Link / Create Plan — Stage 3 (Document Upload) only.
+                      Shown whether or not a plan is already linked so the CA
+                      can re-link once the provider doc confirms the real
+                      policy number. Overwrites case.zohoCaseId server-side. */}
+                  {currentStage === 3 && (
+                    <div className="flex items-center gap-1.5">
+                      {/* When no plan is linked yet, render filled amber so the
+                          CA reads this as a required action (matches the ⚠ Not
+                          linked status line). Relaxes to outline once linked. */}
+                      <Button
+                        size="sm"
+                        variant={planLinked ? "outline" : "default"}
+                        className={`h-7 gap-1 text-xs ${
+                          planLinked
+                            ? ""
+                            : "bg-warning text-warning-foreground hover:bg-warning/90 border-transparent"
+                        }`}
+                        onClick={() => setLinkPlanOpen(true)}
+                        title="Find an existing Plans record by Policy Ref"
+                      >
+                        <Search className="h-3 w-3" /> Link existing
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={planLinked ? "outline" : "default"}
+                        className={`h-7 gap-1 text-xs ${
+                          planLinked
+                            ? ""
+                            : "bg-warning text-warning-foreground hover:bg-warning/90 border-transparent"
+                        }`}
+                        onClick={() => setCreatePlanOpen(true)}
+                        title="Create a new Plans record in Zoho if none exists"
+                      >
+                        <Plus className="h-3 w-3" /> Create new
+                      </Button>
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
@@ -449,6 +496,14 @@ const CaseDetail = () => {
 
           {planSupported && <StageComponent caseItem={caseItem as any} />}
 
+          {/* Stage 3 gate — a Plans record must be linked before advancing to
+              Stage 4. The helper sits directly above the complete button. */}
+          {isCA && currentStage === 3 && !planLinked && (
+            <p className="text-xs text-muted-foreground text-right pt-4">
+              Link a Plans record before continuing — use Link existing or + Create new in the case header above.
+            </p>
+          )}
+
           {/* Stage navigation */}
           <div className="flex items-center justify-between pt-4 border-t border-border">
             <Button
@@ -463,7 +518,16 @@ const CaseDetail = () => {
               Step {currentStage} of 10 · {CEDING_STAGES[currentStage - 1]?.label ?? ""}
             </p>
             {isCA && currentStage < 10 ? (
-              <Button onClick={completeAndNext} className="gap-2" disabled={!planSupported}>
+              <Button
+                onClick={completeAndNext}
+                className="gap-2"
+                disabled={!planSupported || (currentStage === 3 && !planLinked)}
+                title={
+                  currentStage === 3 && !planLinked
+                    ? "Link a Plans record before continuing — use Link existing or + Create new in the case header above."
+                    : undefined
+                }
+              >
                 {currentStage === 9 ? "Mark ceding complete" : "Mark complete & continue"}
                 <ChevronRight className="h-4 w-4" />
               </Button>
@@ -482,6 +546,24 @@ const CaseDetail = () => {
           </div>
         </main>
       </div>
+
+      {linkPlanOpen && (
+        <LinkExistingPlanDialog
+          caseId={id!}
+          initialQuery={(caseItem.plan_number as string | null | undefined) ?? ""}
+          onClose={() => setLinkPlanOpen(false)}
+        />
+      )}
+      {createPlanOpen && (
+        <CreatePlanDialog
+          caseId={id!}
+          policyRef={(caseItem.plan_number as string | null | undefined) ?? null}
+          planType={caseItem.plan_type}
+          provider={caseItem.Provider_group ?? null}
+          clientName={caseItem.client_name ?? null}
+          onClose={() => setCreatePlanOpen(false)}
+        />
+      )}
     </div>
   );
 };
@@ -520,7 +602,7 @@ function LinkedPlanField({
   // gracefully fall back to whichever piece is available.
   let valueText: string;
   if (!linked) {
-    valueText = "No unique Plans record · click Refresh from Zoho";
+    valueText = "No unique Plans record";
   } else if (planName && policyRef) {
     valueText = `${planName} (${policyRef})`;
   } else if (planName) {

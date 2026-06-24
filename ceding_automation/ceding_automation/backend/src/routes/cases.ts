@@ -17,6 +17,7 @@ import {
   createPlansXClientsLinks,
   linkTaskToPlan,
   mapPlanTypeToZoho,
+  planProviderField,
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
 
@@ -382,6 +383,12 @@ router.patch(
       // UI field is the date the LOA went out; stored in loaSentAt (DateTime).
       data.loaSentAt = body.loaSentDate ? new Date(body.loaSentDate as string) : null;
     }
+    if ("loaProcessedDate" in body) {
+      data.loaProcessedAt = body.loaProcessedDate ? new Date(body.loaProcessedDate as string) : null;
+    }
+    if ("loaReceivedDate" in body) {
+      data.loaReceivedAt = body.loaReceivedDate ? new Date(body.loaReceivedDate as string) : null;
+    }
     // loaStatus arrives lowercase ("sent"/"processed"/"received"/"not_sent").
     // Map to the Prisma LOAStatus enum. (SIGNED is in the enum but no UI
     // surface ever sends it — leaving the branch out keeps this honest.)
@@ -389,10 +396,17 @@ router.patch(
       const upper = body.loaStatus.toUpperCase();
       if ((Object.values(LOAStatus) as string[]).includes(upper)) {
         data.loaStatus = upper as LOAStatus;
-        // Auto-stamp loaSentAt when the status flips to SENT and the UI
-        // didn't supply an explicit loaSentDate.
+        // Auto-stamp the matching timestamp when status flips, unless the UI
+        // supplied an explicit date for that transition. SIGNED is legacy
+        // and intentionally has no timestamp.
         if (upper === "SENT" && !("loaSentDate" in body)) {
           data.loaSentAt = data.loaSentAt ?? new Date();
+        }
+        if (upper === "PROCESSED" && !("loaProcessedDate" in body)) {
+          data.loaProcessedAt = data.loaProcessedAt ?? new Date();
+        }
+        if (upper === "RECEIVED" && !("loaReceivedDate" in body)) {
+          data.loaReceivedAt = data.loaReceivedAt ?? new Date();
         }
       }
     }
@@ -452,6 +466,25 @@ router.patch(
           newValue: String(data.status),
           source: "MANUAL",
           metadata: body as Prisma.InputJsonValue,
+        },
+      });
+    } else if (data.loaStatus) {
+      // LOA status transitions get their own action so the audit trail (and
+      // Stage 2 timeline) can reconstruct the full LOA lifecycle. Metadata
+      // carries ALL THREE timestamps so each row is self-describing.
+      await prisma.auditLog.create({
+        data: {
+          caseId: req.params.id,
+          userId: req.user!.id,
+          action: "LOA_STATUS_UPDATED",
+          newValue: String(data.loaStatus),
+          source: "MANUAL",
+          metadata: {
+            loaStatus: updated.loaStatus,
+            loaSentAt: updated.loaSentAt,
+            loaProcessedAt: updated.loaProcessedAt,
+            loaReceivedAt: updated.loaReceivedAt,
+          } as Prisma.InputJsonValue,
         },
       });
     } else {
@@ -534,7 +567,11 @@ router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (
     where: { id: req.params.id },
     data: {
       loaStatus,
+      // Auto-stamp the matching timestamp on each transition. SIGNED is
+      // legacy and intentionally has no timestamp.
       loaSentAt: loaStatus === "SENT" ? new Date() : undefined,
+      loaProcessedAt: loaStatus === "PROCESSED" ? new Date() : undefined,
+      loaReceivedAt: loaStatus === "RECEIVED" ? new Date() : undefined,
     },
   });
 
@@ -545,6 +582,13 @@ router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (
       action: "LOA_STATUS_UPDATED",
       newValue: loaStatus,
       source: "MANUAL",
+      // All three timestamps so the audit row preserves the full timeline.
+      metadata: {
+        loaStatus: updated.loaStatus,
+        loaSentAt: updated.loaSentAt,
+        loaProcessedAt: updated.loaProcessedAt,
+        loaReceivedAt: updated.loaReceivedAt,
+      } as Prisma.InputJsonValue,
     },
   });
 
@@ -1103,11 +1147,16 @@ router.post(
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
     const caseRow = await prisma.case.findUnique({
       where: { id: req.params.id },
-      select: { id: true, zohoTaskId: true },
+      // Capture the existing linkage so the audit row can record what we
+      // overwrote — re-linking on Stage 3 deliberately replaces any prior
+      // (often auto-linked, possibly wrong) Plans record.
+      select: { id: true, zohoTaskId: true, zohoCaseId: true, zohoPlanName: true },
     });
     if (!caseRow) return res.status(404).json({ error: "Case not found" });
 
     const { planRecordId } = parsed.data;
+    const previousPlanRecordId = caseRow.zohoCaseId;
+    const previousPlanName = caseRow.zohoPlanName;
     // Fetch the Plans record so we can cache Name + verify the id is real
     // before we touch Task.What_Id. Better to 502 here than half-link.
     let planName: string | null = null;
@@ -1142,8 +1191,17 @@ router.post(
         userId: req.user!.id,
         action: "CASE_UPDATED",
         source: "MANUAL",
+        oldValue: previousPlanRecordId
+          ? `Plans record ${previousPlanName ?? previousPlanRecordId}`
+          : null,
         newValue: `Linked Plans record ${planName ?? planRecordId}`,
-        metadata: { linkedPlan: { id: planRecordId, name: planName }, taskLinkNote } as Prisma.InputJsonValue,
+        metadata: {
+          linkedPlan: { id: planRecordId, name: planName },
+          previousPlan: previousPlanRecordId
+            ? { id: previousPlanRecordId, name: previousPlanName }
+            : null,
+          taskLinkNote,
+        } as Prisma.InputJsonValue,
       },
     });
     res.json({ ok: true, planRecordId, planName, taskLinkNote, case: updated });
@@ -1172,6 +1230,7 @@ router.post(
         zohoProviderRecordId: true,
         clientZohoId: true,
         zohoClientOwnerIds: true,
+        provider: { select: { name: true } },
       },
     });
     if (!caseRow) return res.status(404).json({ error: "Case not found" });
@@ -1179,13 +1238,41 @@ router.post(
       return res.status(400).json({ error: "Case has no Policy Ref — cannot create a Plans record without it." });
     }
 
+    // Provider fallback (L3.1 fix) — the sync caches zohoProviderRecordId but
+    // findProviderRecordByName returns null on any name mismatch, so it's
+    // frequently empty. Resolve live here so a new Plan still carries Provider.
+    let resolvedProviderRecordId = caseRow.zohoProviderRecordId;
+    if (!resolvedProviderRecordId && caseRow.provider?.name) {
+      try {
+        const hit = await findProviderRecordByName(caseRow.provider.name);
+        if (hit) {
+          resolvedProviderRecordId = hit.id;
+          await prisma.case.update({
+            where: { id: req.params.id },
+            data: { zohoProviderRecordId: hit.id },
+          });
+        }
+      } catch {
+        // Best-effort — create proceeds without Provider rather than failing.
+      }
+    }
+
     const fields: Record<string, unknown> = {
       Policy_Ref: caseRow.policyRef,
       Plan_Type: mapPlanTypeToZoho(caseRow.planType),
     };
-    if (caseRow.zohoProviderRecordId) {
-      fields.Provider = { id: caseRow.zohoProviderRecordId };
+    // Field API name configurable via ZOHO_PLAN_PROVIDER_FIELD (default "Provider").
+    if (resolvedProviderRecordId) {
+      fields[planProviderField()] = { id: resolvedProviderRecordId };
     }
+    // Diagnostic logging (survives — this bug class recurs).
+    console.log(
+      "[plan-provider] create-plan case=%s policyRef=%s cachedProviderId=%s payloadSent=%s",
+      req.params.id,
+      caseRow.policyRef,
+      resolvedProviderRecordId,
+      JSON.stringify(fields[planProviderField()] ?? null),
+    );
     // Plan↔Client linkage is NOT a field on the Plans record itself — it's
     // a separate row in the Plans_X_Clients junction module, created below
     // via createPlansXClientsLinks() once the Plan record id is known.

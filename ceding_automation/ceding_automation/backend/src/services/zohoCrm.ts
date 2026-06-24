@@ -520,6 +520,17 @@ function providerNameField(): string {
   return process.env.ZOHO_PROVIDER_NAME_FIELD ?? 'Name';
 }
 
+// API name of the Provider lookup field ON THE PLANS MODULE. Zoho custom-module
+// field API names don't always match the display label, so if Provider keeps
+// coming back empty on the Plans record after a successful PATCH (200 OK, no
+// visible change), the likely cause is a wrong field API name here — set
+// ZOHO_PLAN_PROVIDER_FIELD to the real one (e.g. "Plan_Provider",
+// "Provider_Lookup"). Verify via Setup → Modules → Plans → Provider → API Name,
+// or by GETting an existing Plans record that has Provider populated.
+export function planProviderField(): string {
+  return process.env.ZOHO_PLAN_PROVIDER_FIELD ?? 'Provider';
+}
+
 export async function findProviderRecordByName(
   providerName: string,
 ): Promise<{ id: string; record: Record<string, unknown> } | null> {

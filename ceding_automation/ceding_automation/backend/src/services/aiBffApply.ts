@@ -19,6 +19,7 @@ export type ApplyFieldOutcome =
   | "conflict"
   | "preserved" // isApproved or isManuallyOverridden
   | "no-overwrite-missing" // incoming was MISSING; existing value held
+  | "skipped-manual-only" // template flagged manual-entry-only; AI never writes
   | "field-not-found";
 
 export interface ApplyFieldResult {
@@ -49,6 +50,21 @@ export async function applyFieldExtraction(args: {
     include: { template: true },
   });
   if (!field) return { outcome: "field-not-found" };
+
+  // (0) Manual-entry-only guard — some templates are configured so that the
+  // AI BFF must never populate them (e.g. DFM Charge, OCF / Transaction
+  // Costs). We silently skip — no audit row, no conflict — so re-extraction
+  // is safe to run repeatedly without side effects.
+  if (field.template.isManualEntryOnly) {
+    console.log(
+      "[merge-outcome] outcome=skipped-manual-only case=%s field=%s job=%s doc=%s",
+      args.caseId,
+      args.fieldKey,
+      args.jobId,
+      args.documentId,
+    );
+    return { outcome: "skipped-manual-only", fieldId: field.id };
+  }
 
   // (1) Preservation guard — never stomp CA-Team edits or adviser approvals.
   if (field.isApproved || field.isManuallyOverridden) {
@@ -367,9 +383,10 @@ export async function applyExtractionResult(
 //     documents on the same case are preserved.
 //   - Inserts one row per fund_lines entry: fundName, isinSedolCiti (ISIN
 //     preferred, SEDOL fallback), numberOfUnits, pricePerUnit, value (from
-//     valueGbp), fundCharge (from fundChargePercent), isWithProfits,
-//     honest per-row confidence (MISSING fallback), sourceDocumentId,
-//     displayOrder=idx, status=AI_EXTRACTED.
+//     valueGbp), isWithProfits, honest per-row confidence (MISSING fallback),
+//     sourceDocumentId, displayOrder=idx, status=AI_EXTRACTED.
+//   - OCF and Transaction Costs are manual-entry only and intentionally NOT
+//     populated by AI — they are left null on AI-inserted rows.
 //   - Writes one FUND_LINE_ADDED audit log entry (count = rows inserted).
 //
 // `fundLines` accepts the BffJobResult.response.fundLines shape (camelCase,
@@ -425,10 +442,8 @@ export async function applyFundLines(
       pricePerUnit:
         f.pricePerUnit != null ? new Prisma.Decimal(f.pricePerUnit) : null,
       value: f.valueGbp != null ? new Prisma.Decimal(f.valueGbp) : null,
-      fundCharge:
-        f.fundChargePercent != null
-          ? new Prisma.Decimal(f.fundChargePercent)
-          : null,
+      // OCF and Transaction Costs are intentionally NOT set here — they are
+      // manual-entry-only columns and the AI BFF never supplies them.
       isWithProfits: f.isWithProfits ?? false,
       // Honest per-row confidence from the LLM. Falls back to MISSING if
       // the BFF omitted it — never invent HIGH.

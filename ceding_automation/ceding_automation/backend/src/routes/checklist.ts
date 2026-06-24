@@ -708,6 +708,11 @@ router.patch(
         skipped: "no-overwrite-with-missing",
       });
     }
+    if (result.outcome === "skipped-manual-only") {
+      // Template is manual-entry-only — AI never writes it. No-op success so
+      // the BFF can tally it without treating it as an error.
+      return res.json({ ok: true, fieldId: field.id, skipped: "manual-entry-only" });
+    }
     if (result.outcome === "field-not-found") {
       return res.status(404).json({ error: "Field not found" });
     }

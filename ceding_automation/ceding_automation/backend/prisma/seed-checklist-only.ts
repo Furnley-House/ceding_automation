@@ -83,6 +83,7 @@ async function run() {
             conditionalNote: f.note ?? null,
             isRequired: f.required,
             isActive: true,
+            isManualEntryOnly: f.manual_entry_only ?? false,
           };
           if (hasMeta) data.metadata = meta;
 
