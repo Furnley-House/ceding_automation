@@ -151,14 +151,16 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     resetKey: selectedId,
   });
 
-  // Batch summary anchors — pure status counts off the list. Only shown
-  // when more than one doc is concurrently PROCESSING; single-doc
-  // extractions keep just the per-doc banner.
+  // Batch summary anchors — pure status counts off the list. Shown while
+  // ANY doc is still processing AND the batch is multi-doc (batchTotal>1),
+  // so "Extracting 1 of 2 documents…" stays visible when the second doc
+  // is still finishing after the first one completed. Single-doc runs
+  // (batchTotal === 1) still skip the summary in favour of the banner.
   const processingCount = documents.filter((d) => d.status === "PROCESSING").length;
   const batchTotal = documents.filter(
     (d) => d.status === "PROCESSING" || d.status === "EXTRACTED" || d.status === "ERROR",
   ).length;
-  const showBatchSummary = processingCount > 1;
+  const showBatchSummary = processingCount >= 1 && batchTotal > 1;
 
   const handleJumpToSource = (
     sourcePage: number | null,
@@ -248,6 +250,13 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
   // ── Banner content for the selected document's extraction state ─────────
   // We render a banner when the selected doc is mid-extraction or in a
   // terminal state we still want to call out (failed / just-completed).
+  // Multi-doc mode: hide the big per-doc PROCESSING bar (it tracks only
+  // the selected doc and disappears when that one finishes — misleading
+  // when other docs are still running). Per-row bars in DocumentList +
+  // the "Extracting N of M documents…" text already cover multi-doc.
+  // The failed/error banner branch is NOT gated — a single errored doc
+  // still surfaces with its Retry button even in multi-doc.
+  const isMultiDoc = batchTotal > 1;
   const banner = renderExtractionBanner(
     selectedStatus,
     extractionStatus,
@@ -258,6 +267,7 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     display.displayedStageNum,
     display.displayedSeconds,
     display.isOverdue,
+    isMultiDoc,
   );
 
   return (
@@ -357,6 +367,7 @@ function renderExtractionBanner(
   displayedStageNum: string | null,
   displayedSeconds: number,
   isOverdue: boolean,
+  isMultiDoc: boolean,
 ) {
   // No selection → nothing.
   if (!documentStatus) return null;
@@ -398,7 +409,11 @@ function renderExtractionBanner(
   // Stage 4 override + smooth crawl + 1Hz timer all flow in here ready to
   // render. The bar's CSS transition-all eases small hops (25→50→75) and
   // the parent's interval feeds incremental values during the Stage 4 wait.
+  //
+  // Multi-doc: suppressed here — per-row bars + batch summary text cover
+  // multi-doc progress. Only the single-doc PROCESSING path renders.
   if (documentStatus === "PROCESSING") {
+    if (isMultiDoc) return null;
     const text =
       extraction.status === "queued"
         ? "Submitted to AI — waiting for pickup…"

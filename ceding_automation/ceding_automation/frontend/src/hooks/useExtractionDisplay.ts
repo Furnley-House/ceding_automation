@@ -101,7 +101,18 @@ export function useExtractionDisplay({
   // (e.g. 100 on done) wins immediately — never undershoots truth.
   useEffect(() => {
     if (!inStage4Wait) {
-      setDisplayedPct(progressPct);
+      // Monotonic mirror: a raw anchor of 75 arriving after the crawl
+      // has eased to ~90 (the brief window when stage flips from
+      // "stage3" to "done" before pct is updated to 100) would otherwise
+      // snap the bar backwards 90→75→100. Math.max holds the higher
+      // value until truth (100) catches up. Reset between runs is
+      // handled by the resetKey effect above (clears prev to null), so
+      // a stale high value can never carry into a new extraction.
+      setDisplayedPct((prev) =>
+        prev !== null && progressPct !== null
+          ? Math.max(prev, progressPct)
+          : progressPct,
+      );
       return;
     }
     setDisplayedPct((prev) => (prev !== null && prev > 75 ? prev : 75));
