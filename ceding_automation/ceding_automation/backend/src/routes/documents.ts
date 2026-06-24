@@ -20,31 +20,26 @@ const prisma = new PrismaClient();
 
 // Multer – store in memory, then stream to Azure Blob
 //
-// File-type rule: accept on EITHER a recognised MIME OR a recognised file
-// extension. Browsers / OSes report `application/octet-stream` for legacy
-// Office files on Windows even when the extension is .doc / .xls — without
-// the extension fallback those uploads fail with a misleading "Unsupported
-// file type" 400, and any subsequent files in the same multi-file batch
-// never make it past the frontend's `for await` loop.
-const ALLOWED_MIME_TYPES = [
-  "application/pdf",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.ms-excel",
-  "text/plain",
-];
-const ALLOWED_EXTENSIONS_RE = /\.(pdf|doc|docx|xls|xlsx|txt)$/i;
+// PDF only. Word/Excel/plain-text were accepted historically, but the AI BFF
+// can only extract from PDFs end-to-end — other formats just produced failed
+// extractions, so this gate now matches reality. Accept on EITHER the
+// application/pdf MIME OR the .pdf extension (belt-and-braces). A non-PDF is
+// flagged on the request so the route can answer with a precise 415 rather
+// than a generic 500 from a thrown fileFilter error.
+const ALLOWED_MIME_TYPES = ["application/pdf"];
+const ALLOWED_EXTENSIONS_RE = /\.pdf$/i;
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max
-  fileFilter: (_req, file, cb) => {
+  fileFilter: (req, file, cb) => {
     const mimeOk = ALLOWED_MIME_TYPES.includes(file.mimetype);
     const extOk = ALLOWED_EXTENSIONS_RE.test(file.originalname ?? "");
     if (mimeOk || extOk) {
       cb(null, true);
     } else {
-      cb(new Error(`Unsupported file type: ${file.mimetype} (${file.originalname})`));
+      (req as Request & { fileTypeRejected?: string }).fileTypeRejected =
+        `${file.mimetype} (${file.originalname})`;
+      cb(null, false);
     }
   },
 });
@@ -56,7 +51,16 @@ router.post(
   requireRole(["CA_TEAM", "ADMIN"]),
   upload.single("file"),
   async (req: Request, res: Response) => {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    if (!req.file) {
+      // multer's fileFilter skipped a non-PDF — answer with a precise 415.
+      const rejected = (req as Request & { fileTypeRejected?: string }).fileTypeRejected;
+      if (rejected) {
+        return res
+          .status(415)
+          .json({ error: `Unsupported file type: ${rejected}. Only PDF files are accepted.` });
+      }
+      return res.status(400).json({ error: "No file uploaded" });
+    }
 
     const caseRecord = await prisma.case.findUnique({ where: { id: req.params.caseId } });
     if (!caseRecord) return res.status(404).json({ error: "Case not found" });

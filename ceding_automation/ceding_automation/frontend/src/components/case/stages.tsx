@@ -143,7 +143,7 @@ export function StageDocumentUpload({ caseItem }: StageProps) {
       num={3}
       icon={Upload}
       title="Document Upload"
-      description="Upload the policy pack(s) received from the provider — PDF, Word, Excel, or plain text. Multi-file supported."
+      description="Upload the policy pack(s) received from the provider — PDF only. Multiple PDFs supported."
     >
       <div className="space-y-4">
         <DocumentUploader caseId={caseItem.id} onUploaded={refresh} />

@@ -12,19 +12,13 @@ interface Props {
 
 const MAX_BYTES = 20 * 1024 * 1024; // 20 MB (backend allows up to 50 MB; UI is intentionally stricter)
 
-// Per FR-06: accept PDF, Word (.doc/.docx), Excel (.xls/.xlsx) and plain text.
-// Some browsers / OSes report `application/octet-stream` for legacy Office
-// files instead of the real MIME type, so we accept the file when EITHER the
-// extension OR the MIME is recognised.
-const ALLOWED_EXTENSIONS = [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt"] as const;
-const ALLOWED_MIME_TYPES = [
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "text/plain",
-];
+// PDF only. Word/Excel/plain-text were advertised before, but only PDF
+// extraction works end-to-end through the AI BFF — accepting other formats
+// just produced failed extractions, so the UI now matches reality. Accept on
+// EITHER the .pdf extension OR the application/pdf MIME (belt-and-braces; PDF
+// MIME is normally reliable but the extension fallback costs nothing).
+const ALLOWED_EXTENSIONS = [".pdf"] as const;
+const ALLOWED_MIME_TYPES = ["application/pdf"];
 const EXTENSION_RE = new RegExp(`(${ALLOWED_EXTENSIONS.join("|").replace(/\./g, "\\.")})$`, "i");
 
 function isAcceptedFile(f: File): boolean {
@@ -44,9 +38,7 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
           return false;
         }
         if (!isAcceptedFile(f)) {
-          toast.error(`${f.name} is not a supported format`, {
-            description: "Allowed: PDF, Word (.doc/.docx), Excel (.xls/.xlsx), plain text (.txt)",
-          });
+          toast.error("Only PDF files are accepted on this step.");
           return false;
         }
         return true;
@@ -86,21 +78,19 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
     [busy, caseId, onUploaded],
   );
 
-  // No `accept` map: react-dropzone's strict MIME pre-filter has been seen
-  // to silently drop legitimate Excel files whose OS-reported MIME is
-  // unexpected (Windows reports `application/octet-stream` for .xls; some
-  // Chromium versions report `application/zip` for .xlsx because .xlsx is
-  // a zip archive). Our own isAcceptedFile (extension OR MIME) and the
-  // backend's multer fileFilter (extension OR MIME) both already accept
-  // the same set — extension fallback makes the dropzone's pre-filter
-  // redundant and fragile. onDropRejected catches anything react-dropzone
-  // does still reject (e.g. limits) so failures are never silent.
+  // Restrict the native file picker + drag-drop to PDF. Unlike the old
+  // Office formats (whose OS-reported MIME was unreliable), application/pdf
+  // is reported consistently, so the dropzone pre-filter is safe here. Our
+  // isAcceptedFile and the backend multer filter enforce the same PDF-only
+  // rule; onDropRejected surfaces anything react-dropzone rejects so a
+  // wrong-format drop never fails silently.
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
+    accept: { "application/pdf": [".pdf"] },
     onDropRejected: (rejections) => {
       for (const rej of rejections) {
-        toast.error(`Unsupported file: ${rej.file.name}`, {
-          description: "Allowed: PDF, Word (.doc/.docx), Excel (.xls/.xlsx), plain text (.txt)",
+        toast.error(`${rej.file.name} was rejected`, {
+          description: "Only PDF files are accepted on this step.",
         });
       }
     },
@@ -121,7 +111,7 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
         {isDragActive ? "Drop the documents here…" : "Drop policy documents here"}
       </p>
       <p className="text-xs text-muted-foreground mb-4">
-        PDF · Word (.doc/.docx) · Excel (.xls/.xlsx) · Plain text (.txt) · 20 MB max each
+        PDF · 20 MB max each
       </p>
       <Button type="button" onClick={open} disabled={busy} variant="outline" size="sm">
         {busy ? (

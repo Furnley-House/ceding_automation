@@ -3,11 +3,12 @@
 //   - readOnly mode → tidy table with totals (Stage 6 Review, Stage 8 Approval)
 //   - editable mode → CA can add / edit / delete rows (Stage 4 Extract & Fill)
 import { useMemo, useState } from "react";
-import { Plus, Trash2, Loader2 } from "lucide-react";
+import { Plus, Trash2, Loader2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { useFundLines, type FundLine, type FundLineDraft } from "@/hooks/useFundLines";
+import { FundDetailsImportDialog } from "./FundDetailsImportDialog";
 
 function gbp(n: string | number | null | undefined): string {
   if (n === null || n === undefined || n === "") return "—";
@@ -41,9 +42,10 @@ interface Props {
 }
 
 export function FundDetailsTable({ caseId, readOnly = false }: Props) {
-  const { rows, summary, loading, error, addRow, updateRow, deleteRow } = useFundLines(caseId);
+  const { rows, summary, loading, error, refresh, addRow, updateRow, deleteRow } = useFundLines(caseId);
   const [draft, setDraft] = useState<FundLineDraft | null>(null);
   const [saving, setSaving] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const sorted = useMemo(
     () =>
@@ -256,26 +258,44 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
               </Button>
             </>
           ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() =>
-                setDraft({
-                  fundName: "",
-                  isinSedolCiti: "",
-                  numberOfUnits: "",
-                  pricePerUnit: "",
-                  value: "",
-                  ocf: "",
-                  transactionCosts: "",
-                })
-              }
-              className="h-7 gap-1 text-xs"
-            >
-              <Plus className="h-3.5 w-3.5" /> Add fund row
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setImportOpen(true)}
+                className="h-7 gap-1 text-xs"
+              >
+                <Upload className="h-3.5 w-3.5" /> Import from Excel
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  setDraft({
+                    fundName: "",
+                    isinSedolCiti: "",
+                    numberOfUnits: "",
+                    pricePerUnit: "",
+                    value: "",
+                    ocf: "",
+                    transactionCosts: "",
+                  })
+                }
+                className="h-7 gap-1 text-xs"
+              >
+                <Plus className="h-3.5 w-3.5" /> Add fund row
+              </Button>
+            </>
           )}
         </div>
+      )}
+
+      {importOpen && (
+        <FundDetailsImportDialog
+          caseId={caseId}
+          onClose={() => setImportOpen(false)}
+          onImported={refresh}
+        />
       )}
     </div>
   );

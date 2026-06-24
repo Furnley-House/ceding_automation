@@ -111,6 +111,8 @@ export const checklistApi = {
 // ── Fund Lines ───────────────────────────────────────────
 export const fundLinesApi = {
   list: (caseId: string) => api.get(`/cases/${caseId}/fund-lines`),
+  bulk: (caseId: string, body: { rows: Record<string, unknown>[]; replace?: boolean }) =>
+    api.post(`/cases/${caseId}/fund-lines/bulk`, body),
 };
 
 // ── Providers ────────────────────────────────────────────
