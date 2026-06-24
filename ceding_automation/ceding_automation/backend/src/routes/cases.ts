@@ -17,6 +17,7 @@ import {
   createPlansXClientsLinks,
   linkTaskToPlan,
   mapPlanTypeToZoho,
+  planProviderField,
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
 
@@ -1229,6 +1230,7 @@ router.post(
         zohoProviderRecordId: true,
         clientZohoId: true,
         zohoClientOwnerIds: true,
+        provider: { select: { name: true } },
       },
     });
     if (!caseRow) return res.status(404).json({ error: "Case not found" });
@@ -1236,13 +1238,41 @@ router.post(
       return res.status(400).json({ error: "Case has no Policy Ref — cannot create a Plans record without it." });
     }
 
+    // Provider fallback (L3.1 fix) — the sync caches zohoProviderRecordId but
+    // findProviderRecordByName returns null on any name mismatch, so it's
+    // frequently empty. Resolve live here so a new Plan still carries Provider.
+    let resolvedProviderRecordId = caseRow.zohoProviderRecordId;
+    if (!resolvedProviderRecordId && caseRow.provider?.name) {
+      try {
+        const hit = await findProviderRecordByName(caseRow.provider.name);
+        if (hit) {
+          resolvedProviderRecordId = hit.id;
+          await prisma.case.update({
+            where: { id: req.params.id },
+            data: { zohoProviderRecordId: hit.id },
+          });
+        }
+      } catch {
+        // Best-effort — create proceeds without Provider rather than failing.
+      }
+    }
+
     const fields: Record<string, unknown> = {
       Policy_Ref: caseRow.policyRef,
       Plan_Type: mapPlanTypeToZoho(caseRow.planType),
     };
-    if (caseRow.zohoProviderRecordId) {
-      fields.Provider = { id: caseRow.zohoProviderRecordId };
+    // Field API name configurable via ZOHO_PLAN_PROVIDER_FIELD (default "Provider").
+    if (resolvedProviderRecordId) {
+      fields[planProviderField()] = { id: resolvedProviderRecordId };
     }
+    // Diagnostic logging (survives — this bug class recurs).
+    console.log(
+      "[plan-provider] create-plan case=%s policyRef=%s cachedProviderId=%s payloadSent=%s",
+      req.params.id,
+      caseRow.policyRef,
+      resolvedProviderRecordId,
+      JSON.stringify(fields[planProviderField()] ?? null),
+    );
     // Plan↔Client linkage is NOT a field on the Plans record itself — it's
     // a separate row in the Plans_X_Clients junction module, created below
     // via createPlansXClientsLinks() once the Plan record id is known.

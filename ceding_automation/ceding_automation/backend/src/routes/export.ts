@@ -15,7 +15,9 @@ import { uploadToWorkDrive } from "../services/workdrive";
 import {
   updatePlanRecord,
   findPlanRecordByPolicyRef,
+  findProviderRecordByName,
   mapPlanTypeToZoho,
+  planProviderField,
 } from "../services/zohoCrm";
 
 const router = Router();
@@ -98,8 +100,10 @@ function buildPlanFields(
   }
 
   // ─ Provider lookup (custom Providers module) ─
+  // Field API name is configurable (ZOHO_PLAN_PROVIDER_FIELD) — if Provider
+  // keeps not landing despite a populated id, the field name is the suspect.
   if (caseRecord.zohoProviderRecordId) {
-    setIf("Provider", { id: caseRecord.zohoProviderRecordId });
+    setIf(planProviderField(), { id: caseRecord.zohoProviderRecordId });
   }
 
   // ─ Simple scalars ─
@@ -247,12 +251,62 @@ router.post(
         ? `No Plans record found with Policy_Ref="${caseRecord.policyRef}". Either create the record in CRM first or set zohoCaseId on the case manually.`
         : "Case has no policyRef and no zohoCaseId — nothing to match against.";
     } else if (planRecordId) {
+      // Provider fallback (L3.1 fix). The sync caches zohoProviderRecordId, but
+      // findProviderRecordByName returns null on any name mismatch / missing
+      // Providers record, so the cache is frequently empty and Provider then
+      // silently never lands on the Plans record. Resolve live here as a
+      // fallback and persist it, so Provider gets sent even when sync couldn't
+      // cache it (and future exports skip the search).
+      if (!caseRecord.zohoProviderRecordId && caseRecord.provider?.name) {
+        try {
+          const hit = await findProviderRecordByName(caseRecord.provider.name);
+          if (hit) {
+            caseRecord.zohoProviderRecordId = hit.id;
+            await prisma.case.update({
+              where: { id: caseId },
+              data: { zohoProviderRecordId: hit.id },
+            });
+            console.log(
+              "[plan-provider] export resolved provider live case=%s name=%s -> %s",
+              caseId, caseRecord.provider.name, hit.id,
+            );
+          } else {
+            console.warn(
+              "[plan-provider] export could NOT resolve provider case=%s name=%s (no unique Providers record)",
+              caseId, caseRecord.provider.name,
+            );
+          }
+        } catch (err) {
+          console.warn(
+            "[plan-provider] export provider resolution failed case=%s: %s",
+            caseId, err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+
       const fields = buildPlanFields(caseRecord, fieldsByKey);
+      // Diagnostic logging (survives — this bug class recurs). Shows whether
+      // Provider made it into the payload at all.
+      console.log(
+        "[plan-provider] case=%s policyRef=%s cachedProviderId=%s payloadSent=%s",
+        caseId,
+        caseRecord.policyRef,
+        caseRecord.zohoProviderRecordId,
+        JSON.stringify(fields[planProviderField()] ?? null),
+      );
       if (Object.keys(fields).length === 0) {
         zohoError = "No fields to update — checklist values are empty.";
       } else {
         try {
-          await updatePlanRecord(planRecordId, fields);
+          const resp = await updatePlanRecord(planRecordId, fields);
+          // Log the post-write response shape so we can see whether Zoho
+          // accepted Provider (vs silently ignoring an unknown field name).
+          console.log(
+            "[plan-provider] updatePlanRecord ok case=%s record=%s respKeys=%s",
+            caseId,
+            planRecordId,
+            JSON.stringify(Object.keys((resp as { data?: unknown[] })?.data?.[0] ?? resp ?? {})),
+          );
           zohoUpdate = {
             ok: true,
             fieldsUpdated: Object.keys(fields).length,
