@@ -122,6 +122,10 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
   // DateTime column. Alias here so those reads find a value instead of
   // always rendering "Not sent".
   const loaSentDate = (c.loa_sent_at as string | null | undefined) ?? null;
+  // Same aliasing for the PROCESSED / RECEIVED transition timestamps so the
+  // Stage 2 status timeline can render them.
+  const loaProcessedDate = (c.loa_processed_at as string | null | undefined) ?? null;
+  const loaReceivedDate = (c.loa_received_at as string | null | undefined) ?? null;
 
   // SendLOAWorkspace + the rest of the LOA flow compares status values in
   // lowercase ("not_sent" / "sent" / "processed" / "received"), but Prisma
@@ -140,6 +144,8 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
     current_stage: currentStage,
     stages_completed: stagesCompleted,
     loa_sent_date: loaSentDate,
+    loa_processed_date: loaProcessedDate,
+    loa_received_date: loaReceivedDate,
     loa_status: loaStatusLower ?? c.loa_status,
     Provider_group: provider?.name ?? "",
     // snake_case alias used by Dashboard / Cases list / MyInbox — without

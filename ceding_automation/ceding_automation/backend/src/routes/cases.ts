@@ -382,6 +382,12 @@ router.patch(
       // UI field is the date the LOA went out; stored in loaSentAt (DateTime).
       data.loaSentAt = body.loaSentDate ? new Date(body.loaSentDate as string) : null;
     }
+    if ("loaProcessedDate" in body) {
+      data.loaProcessedAt = body.loaProcessedDate ? new Date(body.loaProcessedDate as string) : null;
+    }
+    if ("loaReceivedDate" in body) {
+      data.loaReceivedAt = body.loaReceivedDate ? new Date(body.loaReceivedDate as string) : null;
+    }
     // loaStatus arrives lowercase ("sent"/"processed"/"received"/"not_sent").
     // Map to the Prisma LOAStatus enum. (SIGNED is in the enum but no UI
     // surface ever sends it — leaving the branch out keeps this honest.)
@@ -389,10 +395,17 @@ router.patch(
       const upper = body.loaStatus.toUpperCase();
       if ((Object.values(LOAStatus) as string[]).includes(upper)) {
         data.loaStatus = upper as LOAStatus;
-        // Auto-stamp loaSentAt when the status flips to SENT and the UI
-        // didn't supply an explicit loaSentDate.
+        // Auto-stamp the matching timestamp when status flips, unless the UI
+        // supplied an explicit date for that transition. SIGNED is legacy
+        // and intentionally has no timestamp.
         if (upper === "SENT" && !("loaSentDate" in body)) {
           data.loaSentAt = data.loaSentAt ?? new Date();
+        }
+        if (upper === "PROCESSED" && !("loaProcessedDate" in body)) {
+          data.loaProcessedAt = data.loaProcessedAt ?? new Date();
+        }
+        if (upper === "RECEIVED" && !("loaReceivedDate" in body)) {
+          data.loaReceivedAt = data.loaReceivedAt ?? new Date();
         }
       }
     }
@@ -452,6 +465,25 @@ router.patch(
           newValue: String(data.status),
           source: "MANUAL",
           metadata: body as Prisma.InputJsonValue,
+        },
+      });
+    } else if (data.loaStatus) {
+      // LOA status transitions get their own action so the audit trail (and
+      // Stage 2 timeline) can reconstruct the full LOA lifecycle. Metadata
+      // carries ALL THREE timestamps so each row is self-describing.
+      await prisma.auditLog.create({
+        data: {
+          caseId: req.params.id,
+          userId: req.user!.id,
+          action: "LOA_STATUS_UPDATED",
+          newValue: String(data.loaStatus),
+          source: "MANUAL",
+          metadata: {
+            loaStatus: updated.loaStatus,
+            loaSentAt: updated.loaSentAt,
+            loaProcessedAt: updated.loaProcessedAt,
+            loaReceivedAt: updated.loaReceivedAt,
+          } as Prisma.InputJsonValue,
         },
       });
     } else {
@@ -534,7 +566,11 @@ router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (
     where: { id: req.params.id },
     data: {
       loaStatus,
+      // Auto-stamp the matching timestamp on each transition. SIGNED is
+      // legacy and intentionally has no timestamp.
       loaSentAt: loaStatus === "SENT" ? new Date() : undefined,
+      loaProcessedAt: loaStatus === "PROCESSED" ? new Date() : undefined,
+      loaReceivedAt: loaStatus === "RECEIVED" ? new Date() : undefined,
     },
   });
 
@@ -545,6 +581,13 @@ router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (
       action: "LOA_STATUS_UPDATED",
       newValue: loaStatus,
       source: "MANUAL",
+      // All three timestamps so the audit row preserves the full timeline.
+      metadata: {
+        loaStatus: updated.loaStatus,
+        loaSentAt: updated.loaSentAt,
+        loaProcessedAt: updated.loaProcessedAt,
+        loaReceivedAt: updated.loaReceivedAt,
+      } as Prisma.InputJsonValue,
     },
   });
 

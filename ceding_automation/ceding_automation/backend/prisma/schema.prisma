@@ -217,6 +217,8 @@ model Case {
   status      CaseStatus @default(STAGE_1_LOA_PREP)
   loaStatus   LOAStatus  @default(NOT_SENT)
   loaSentAt   DateTime?  // exposed to UI as loa_sent_date via flattenCase
+  loaProcessedAt DateTime? // stamped when loaStatus → PROCESSED
+  loaReceivedAt  DateTime? // stamped when loaStatus → RECEIVED
   // LOA bookkeeping written from Stage 2 SendLOAWorkspace.
   // The chosen send-method (origo / email / courier) — drives which set
   // of method-scoped fields below are authoritative for the case.
