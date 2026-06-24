@@ -545,7 +545,9 @@ model ChecklistFundLine {
   numberOfUnits Decimal? @db.Decimal(20, 6)
   pricePerUnit  Decimal? @db.Decimal(20, 6)
   value         Decimal? @db.Decimal(20, 2)
-  fundCharge    Decimal? @db.Decimal(8, 4) // stored as percentage e.g. 0.7500 = 0.75%
+  // Manual-entry only — AI BFF intentionally does not populate these.
+  ocf              Decimal? @db.Decimal(8, 4) // ongoing charges figure, stored as percentage e.g. 0.7500 = 0.75%
+  transactionCosts Decimal? @db.Decimal(8, 4) // stored as percentage e.g. 0.0900 = 0.09%
 
   // Flag: this row is a with-profits holding (subject to MVR / bonus rate / PPFM rules)
   isWithProfits Boolean @default(false)

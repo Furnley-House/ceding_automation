@@ -11,7 +11,8 @@ export interface FundLine {
   numberOfUnits: string | null;   // Prisma Decimal serialised as string
   pricePerUnit: string | null;
   value: string | null;
-  fundCharge: string | null;
+  ocf: string | null;
+  transactionCosts: string | null;
   isWithProfits: boolean;
   sourceDocumentId: string | null;
   sourcePageNumber: number | null;
@@ -35,7 +36,8 @@ export interface FundLineDraft {
   numberOfUnits?: string | number | null;
   pricePerUnit?: string | number | null;
   value?: string | number | null;
-  fundCharge?: string | number | null;
+  ocf?: string | number | null;
+  transactionCosts?: string | number | null;
   isWithProfits?: boolean;
 }
 

@@ -246,7 +246,8 @@
           { "key": "number_of_units", "label": "Number of units", "type": "number" },
           { "key": "price_per_unit", "label": "Price per unit", "type": "currency" },
           { "key": "value", "label": "Value", "type": "currency" },
-          { "key": "fund_charge", "label": "Fund charge", "type": "percent" }
+          { "key": "ocf", "label": "OCF", "type": "percent" },
+          { "key": "transaction_costs", "label": "Transaction Costs", "type": "percent" }
         ]
       },
       {
@@ -645,7 +646,8 @@
           { "key": "number_of_units", "label": "Number of units", "type": "number" },
           { "key": "price_per_unit", "label": "Price per unit", "type": "currency" },
           { "key": "value", "label": "Value", "type": "currency" },
-          { "key": "fund_charge", "label": "Fund charge", "type": "percent" }
+          { "key": "ocf", "label": "OCF", "type": "percent" },
+          { "key": "transaction_costs", "label": "Transaction Costs", "type": "percent" }
         ]
       },
       {
@@ -1150,7 +1152,8 @@
           { "key": "number_of_units", "label": "Number of units", "type": "number" },
           { "key": "price_per_unit", "label": "Price per unit", "type": "currency" },
           { "key": "value", "label": "Value", "type": "currency" },
-          { "key": "fund_charge", "label": "Fund charge", "type": "percent" }
+          { "key": "ocf", "label": "OCF", "type": "percent" },
+          { "key": "transaction_costs", "label": "Transaction Costs", "type": "percent" }
         ]
       },
       {

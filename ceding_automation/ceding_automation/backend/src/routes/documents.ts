@@ -705,7 +705,8 @@ const fundLineWireSchema = z.object({
   number_of_units: z.number().optional().nullable(),
   price_per_unit: z.number().optional().nullable(),
   value_gbp: z.number().optional().nullable(),
-  fund_charge_percent: z.number().optional().nullable(),
+  // OCF / Transaction Costs are manual-entry only — not part of the BFF
+  // contract, so no wire field here.
   is_with_profits: z.boolean().optional(),
   confidence: z.enum(["HIGH", "MEDIUM", "LOW", "MISSING"]).optional(),
 });
@@ -843,7 +844,6 @@ internalRouter.patch(
             numberOfUnits: fl.number_of_units ?? null,
             pricePerUnit: fl.price_per_unit ?? null,
             valueGbp: fl.value_gbp ?? null,
-            fundChargePercent: fl.fund_charge_percent ?? null,
             isWithProfits: fl.is_with_profits ?? false,
             confidence: fl.confidence ?? "MISSING",
           }))

@@ -367,9 +367,10 @@ export async function applyExtractionResult(
 //     documents on the same case are preserved.
 //   - Inserts one row per fund_lines entry: fundName, isinSedolCiti (ISIN
 //     preferred, SEDOL fallback), numberOfUnits, pricePerUnit, value (from
-//     valueGbp), fundCharge (from fundChargePercent), isWithProfits,
-//     honest per-row confidence (MISSING fallback), sourceDocumentId,
-//     displayOrder=idx, status=AI_EXTRACTED.
+//     valueGbp), isWithProfits, honest per-row confidence (MISSING fallback),
+//     sourceDocumentId, displayOrder=idx, status=AI_EXTRACTED.
+//   - OCF and Transaction Costs are manual-entry only and intentionally NOT
+//     populated by AI — they are left null on AI-inserted rows.
 //   - Writes one FUND_LINE_ADDED audit log entry (count = rows inserted).
 //
 // `fundLines` accepts the BffJobResult.response.fundLines shape (camelCase,
@@ -425,10 +426,8 @@ export async function applyFundLines(
       pricePerUnit:
         f.pricePerUnit != null ? new Prisma.Decimal(f.pricePerUnit) : null,
       value: f.valueGbp != null ? new Prisma.Decimal(f.valueGbp) : null,
-      fundCharge:
-        f.fundChargePercent != null
-          ? new Prisma.Decimal(f.fundChargePercent)
-          : null,
+      // OCF and Transaction Costs are intentionally NOT set here — they are
+      // manual-entry-only columns and the AI BFF never supplies them.
       isWithProfits: f.isWithProfits ?? false,
       // Honest per-row confidence from the LLM. Falls back to MISSING if
       // the BFF omitted it — never invent HIGH.

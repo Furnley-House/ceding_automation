@@ -219,7 +219,8 @@ export function ExportWorkspace({ caseItem }: Props) {
       numberOfUnits: string | null;
       pricePerUnit: string | null;
       value: string | null;
-      fundCharge: string | null;
+      ocf: string | null;
+      transactionCosts: string | null;
       isWithProfits: boolean;
       status: string;
       confidence: string;
@@ -246,7 +247,8 @@ export function ExportWorkspace({ caseItem }: Props) {
         "Units",
         "Price",
         "Value (£)",
-        "Charge (%)",
+        "OCF (%)",
+        "Transaction Costs (%)",
         "With-profits",
         "Status",
         "Confidence",
@@ -261,7 +263,8 @@ export function ExportWorkspace({ caseItem }: Props) {
         f.numberOfUnits ?? "",
         f.pricePerUnit ?? "",
         f.value ?? "",
-        f.fundCharge ?? "",
+        f.ocf ?? "",
+        f.transactionCosts ?? "",
         f.isWithProfits ? "Yes" : "No",
         f.status,
         f.confidence,
@@ -271,7 +274,7 @@ export function ExportWorkspace({ caseItem }: Props) {
     });
     if (fundLines.length > 0) {
       fundRows.push([]); // blank separator row
-      fundRows.push(["", "", "", "TOTAL", fundTotalValue, "", "", "", "", "", ""]);
+      fundRows.push(["", "", "", "TOTAL", fundTotalValue, "", "", "", "", "", "", ""]);
     }
 
     // ---- Audit sheet ----

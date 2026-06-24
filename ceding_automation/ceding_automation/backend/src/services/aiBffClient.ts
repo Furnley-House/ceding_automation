@@ -138,11 +138,10 @@ export interface BffJobResult {
     detectedProvider: { name: string; canonical: string; confidence: string };
     detectedPlanType: string;
     fields: BffExtractedField[];
-    // 9-field shape mirroring the BFF /result reshape (extract.py) and the
-    // pipeline's FundLine Pydantic model. Earlier 4-field stub
-    // (units/price/value) silently dropped ISIN/SEDOL/charge/with-profits/
-    // confidence; widened so the corresponding ChecklistFundLine columns
-    // (already present in the DB) actually get populated.
+    // Shape mirroring the BFF /result reshape (extract.py) and the pipeline's
+    // FundLine Pydantic model. OCF and Transaction Costs are deliberately NOT
+    // part of this contract — they are manual-entry-only columns on the Fund
+    // Details table and the AI BFF never populates them.
     fundLines: Array<{
       fundName: string;
       isin: string | null;
@@ -150,7 +149,6 @@ export interface BffJobResult {
       numberOfUnits: number | null;
       pricePerUnit: number | null;
       valueGbp: number | null;
-      fundChargePercent: number | null;
       isWithProfits: boolean;
       confidence: BffConfidence;
     }>;
@@ -274,7 +272,6 @@ interface RawBffResult {
       number_of_units: number | null;
       price_per_unit: number | null;
       value_gbp: number | null;
-      fund_charge_percent: number | null;
       is_with_profits: boolean;
       confidence: BffConfidence;
     }>;
@@ -323,7 +320,6 @@ export async function getJobResult(jobId: string): Promise<BffJobResult> {
           numberOfUnits: f.number_of_units ?? null,
           pricePerUnit: f.price_per_unit ?? null,
           valueGbp: f.value_gbp ?? null,
-          fundChargePercent: f.fund_charge_percent ?? null,
           isWithProfits: f.is_with_profits ?? false,
           confidence: f.confidence,
         })),

@@ -127,7 +127,8 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
                 <th className="text-right px-3 py-2 font-semibold">Units</th>
                 <th className="text-right px-3 py-2 font-semibold">Price</th>
                 <th className="text-right px-3 py-2 font-semibold">Value</th>
-                <th className="text-right px-3 py-2 font-semibold">Charge</th>
+                <th className="text-right px-3 py-2 font-semibold">OCF</th>
+                <th className="text-right px-3 py-2 font-semibold">Transaction Costs</th>
                 {!readOnly && <th className="px-3 py-2 w-8" />}
               </tr>
             </thead>
@@ -150,7 +151,8 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
                   <td className="px-3 py-2 text-right tabular-nums font-semibold text-foreground">
                     {gbp(r.value)}
                   </td>
-                  <td className="px-3 py-2 text-right tabular-nums">{pct(r.fundCharge)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{pct(r.ocf)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{pct(r.transactionCosts)}</td>
                   {!readOnly && (
                     <td className="px-2 py-2">
                       <button
@@ -216,9 +218,19 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
                   <td className="px-2 py-1">
                     <Input
                       type="number"
-                      step="0.01"
-                      value={(draft.fundCharge as string) ?? ""}
-                      onChange={(e) => setDraft({ ...draft, fundCharge: e.target.value })}
+                      step="0.0001"
+                      value={(draft.ocf as string) ?? ""}
+                      onChange={(e) => setDraft({ ...draft, ocf: e.target.value })}
+                      placeholder="0"
+                      className="h-7 text-xs text-right"
+                    />
+                  </td>
+                  <td className="px-2 py-1">
+                    <Input
+                      type="number"
+                      step="0.0001"
+                      value={(draft.transactionCosts as string) ?? ""}
+                      onChange={(e) => setDraft({ ...draft, transactionCosts: e.target.value })}
                       placeholder="0"
                       className="h-7 text-xs text-right"
                     />
@@ -254,7 +266,8 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
                   numberOfUnits: "",
                   pricePerUnit: "",
                   value: "",
-                  fundCharge: "",
+                  ocf: "",
+                  transactionCosts: "",
                 })
               }
               className="h-7 gap-1 text-xs"
