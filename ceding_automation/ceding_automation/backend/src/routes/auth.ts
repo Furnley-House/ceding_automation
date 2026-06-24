@@ -72,7 +72,10 @@ router.get("/azure", (req: Request, res: Response) => {
     response_type: "code",
     redirect_uri: azureRedirectUri(),
     response_mode: "query",
-    scope: "openid profile email User.Read",
+    // offline_access is required for Microsoft to return a refresh_token
+    // in the code-exchange step. We persist that on the User row and use
+    // it from POST /auth/refresh to silently mint new app JWTs.
+    scope: "openid profile email offline_access User.Read",
     state,
   });
 
@@ -142,6 +145,11 @@ router.get("/azure/callback", async (req: Request, res: Response) => {
       throw new Error("Azure AD did not return an email address. Check the app registration scopes.");
     }
 
+    // Capture the Microsoft refresh_token so /auth/refresh can use it
+    // later. Will be null if the user denied offline_access consent or the
+    // app reg doesn't permit it.
+    const msRefreshToken = (tokens.refresh_token as string | undefined) ?? null;
+
     // Look up our app user by email
     let user = await prisma.user.findUnique({
       where: { email },
@@ -177,20 +185,27 @@ router.get("/azure/callback", async (req: Request, res: Response) => {
           role: "CA_TEAM",
           status: "ACTIVE",
           ssoId: azureOid,
+          ssoRefreshToken: msRefreshToken,
         },
         select: { id: true, email: true, name: true, role: true, status: true, ssoId: true },
       });
     } else if (user.status === "INACTIVE") {
       const msg = encodeURIComponent("Your account is inactive. Contact an admin.");
       return res.redirect(`${fe}/auth/callback?error=${msg}`);
-    } else if (azureOid && user.ssoId !== azureOid) {
-      // Backfill / refresh ssoId so the admin panel "Sign-in" column lights up
-      // for users who pre-existed before SSO wiring.
-      try {
-        await prisma.user.update({ where: { id: user.id }, data: { ssoId: azureOid } });
-      } catch {
-        // Non-blocking — if the update fails (e.g. ssoId collision) we just
-        // skip it. The user can still sign in.
+    } else {
+      // Existing user: refresh the stored Microsoft refresh_token (rotates
+      // every sign-in) and backfill ssoId if missing. Non-blocking — if the
+      // update fails (e.g. ssoId collision) we just skip it and the user
+      // can still sign in.
+      const updateData: Record<string, unknown> = {};
+      if (msRefreshToken) updateData.ssoRefreshToken = msRefreshToken;
+      if (azureOid && user.ssoId !== azureOid) updateData.ssoId = azureOid;
+      if (Object.keys(updateData).length > 0) {
+        try {
+          await prisma.user.update({ where: { id: user.id }, data: updateData });
+        } catch {
+          /* non-blocking */
+        }
       }
     }
 
@@ -211,6 +226,114 @@ router.get("/azure/callback", async (req: Request, res: Response) => {
     const msg = encodeURIComponent((err as Error).message ?? "SSO failed");
     res.redirect(`${fe}/auth/callback?error=${msg}`);
   }
+});
+
+// ── Silent token refresh ────────────────────────────────────────────────────
+//
+// When the app JWT expires the frontend's 401 interceptor calls here BEFORE
+// dropping the user back to the SSO redirect. We accept a (possibly expired)
+// JWT, decode the userId, use the user's stored Microsoft refresh_token to
+// mint new Microsoft tokens, then issue a fresh app JWT.
+//
+// Replaces the old behaviour where any 401 mid-extraction kicked the user to
+// the login screen and silently lost the in-flight task.
+//
+// Microsoft rotates the refresh_token on every use, so we persist the rotated
+// one back to the user row. If Microsoft refuses the refresh (revoked /
+// expired / consent withdrawn), the frontend falls through to full SSO.
+router.post("/refresh", async (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) return res.status(401).json({ error: "No token" });
+  const token = authHeader.split(" ")[1];
+
+  // Decode without enforcing expiry — the whole point is to refresh an
+  // expired token. The signature check still ensures the token is one we
+  // issued (so a random JWT can't trigger refreshes for arbitrary users).
+  let userId: string;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!, {
+      ignoreExpiration: true,
+    }) as { userId: string };
+    userId = decoded.userId;
+  } catch {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      status: true,
+      ssoRefreshToken: true,
+    },
+  });
+  if (!user) return res.status(401).json({ error: "User not found" });
+  if (user.status === "INACTIVE") return res.status(401).json({ error: "User inactive" });
+  if (!user.ssoRefreshToken) {
+    // Pre-offline_access users have no stored refresh_token; they need to
+    // do a full SSO round-trip to bootstrap one.
+    return res.status(401).json({ error: "No refresh token on record — sign in again" });
+  }
+
+  // Use Microsoft refresh_token to get new tokens
+  let msTokens: Record<string, unknown>;
+  try {
+    const tokenRes = await fetch(
+      `https://login.microsoftonline.com/${azureTenant()}/oauth2/v2.0/token`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: azureClientId(),
+          client_secret: azureClientSecret(),
+          refresh_token: user.ssoRefreshToken,
+          grant_type: "refresh_token",
+          scope: "openid profile email offline_access User.Read",
+        }).toString(),
+      },
+    );
+    msTokens = (await tokenRes.json()) as Record<string, unknown>;
+  } catch (err) {
+    return res
+      .status(502)
+      .json({ error: `Microsoft refresh failed: ${(err as Error).message}` });
+  }
+
+  if (!msTokens.refresh_token || !msTokens.id_token) {
+    // Microsoft refused — refresh_token was revoked / expired / consent
+    // withdrawn. Wipe the stale token so we don't keep retrying it; force
+    // the user through a full SSO round-trip.
+    await prisma.user
+      .update({ where: { id: user.id }, data: { ssoRefreshToken: null } })
+      .catch(() => {});
+    return res.status(401).json({
+      error: "Microsoft refused refresh — sign in again",
+      detail: msTokens.error ?? null,
+    });
+  }
+
+  // Persist the rotated refresh_token. If this fails (race / concurrent
+  // refresh) we still issue the new app JWT — the next /refresh will use
+  // the most recently rotated token from whichever request raced ours.
+  await prisma.user
+    .update({
+      where: { id: user.id },
+      data: { ssoRefreshToken: msTokens.refresh_token as string },
+    })
+    .catch(() => {});
+
+  // Issue new app JWT (same expiry as fresh sign-in)
+  const appToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, {
+    expiresIn: (process.env.JWT_EXPIRES_IN ?? "8h") as jwt.SignOptions["expiresIn"],
+  });
+
+  res.json({
+    token: appToken,
+    user: { id: user.id, email: user.email, name: user.name, role: user.role },
+  });
 });
 
 export { router as authRoutes };

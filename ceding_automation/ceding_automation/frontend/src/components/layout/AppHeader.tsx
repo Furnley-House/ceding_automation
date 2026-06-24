@@ -6,6 +6,11 @@ import { getCases } from "@/services/api";
 import { useRole, ROLE_LABELS } from "@/hooks/useRole";
 import { useHighContrast } from "@/hooks/useHighContrast";
 import { useAuth } from "@/hooks/useAuth";
+
+// Hide the "Switch role" back-door menu item in prod so users can't bypass
+// the SSO-only flow. Same flag the RolePicker / RoleGuard use.
+const DEMO_LOGIN_DISABLED =
+  String(import.meta.env.VITE_DISABLE_DEMO_LOGIN).toLowerCase() === "true";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -184,9 +189,11 @@ export function AppHeader() {
             <DropdownMenuItem onClick={() => navigate("/admin")} disabled={role !== "admin"}>
               <Settings className="mr-2 h-4 w-4" /> Admin Panel
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={clearRole}>
-              <RefreshCw className="mr-2 h-4 w-4" /> Switch role
-            </DropdownMenuItem>
+            {!DEMO_LOGIN_DISABLED && (
+              <DropdownMenuItem onClick={clearRole}>
+                <RefreshCw className="mr-2 h-4 w-4" /> Switch role
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={handleSignOut}>
               <LogOut className="mr-2 h-4 w-4" /> Sign out
