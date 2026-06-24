@@ -10,6 +10,8 @@ import {
   CheckCircle2,
   Download,
   Sparkles,
+  MessageSquare,
+  AlertTriangle,
 } from "lucide-react";
 import { Mail } from "lucide-react";
 import { SendLOAWorkspace } from "./SendLOAWorkspace";
@@ -21,13 +23,18 @@ import { AuditTimeline } from "./AuditTimeline";
 import { ApprovalWorkspace } from "./ApprovalWorkspace";
 import { ExportWorkspace } from "./ExportWorkspace";
 import { CompleteWorkspace } from "./CompleteWorkspace";
+import { FundDetailsTable } from "./FundDetailsTable";
 import { useDocuments } from "@/hooks/useDocuments";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { useChecklistFields } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing, displayValue, fundDetailsStatus } from "@/hooks/useChecklistFields";
+import { useFundLines } from "@/hooks/useFundLines";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { casesApi } from "@/lib/api";
+import { useNavigate, useLocation } from "react-router-dom";
+import { casesApi, checklistApi } from "@/lib/api";
+import { useRole } from "@/hooks/useRole";
+import { Pencil, FlaskConical } from "lucide-react";
 import { toast } from "sonner";
 interface StageProps {
   caseItem: CaseRow;
@@ -86,7 +93,7 @@ export function StageCaseDetails({ caseItem }: StageProps) {
     >
       <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
         <Detail label="Client name" value={caseItem.client_name} />
-        <Detail label="Provider" value={caseItem.provider_name} />
+        <Detail label="Provider" value={caseItem.Provider_group} />
         <Detail label="Plan type" value={caseItem.plan_type} />
         <Detail label="Policy reference" value={caseItem.plan_number} mono />
         <Detail label="Zoho CRM task" value={(caseItem as any).zoho_task_id ?? "—"} mono />
@@ -130,13 +137,13 @@ export function StageSendLOA({ caseItem }: StageProps) {
 
 export function StageDocumentUpload({ caseItem }: StageProps) {
   // (Stage 3 — see StageSendLOA above for stage 2)
-  const { documents, removeDocument, refresh } = useDocuments(caseItem.id);
+  const { documents, removeDocument, refresh } = useDocuments(caseItem.id, { refreshInterval: 5000 });
   return (
     <StagePanel
       num={3}
       icon={Upload}
       title="Document Upload"
-      description="Upload the policy pack(s) received from the provider — PDFs, multi-file supported."
+      description="Upload the policy pack(s) received from the provider — PDF only. Multiple PDFs supported."
     >
       <div className="space-y-4">
         <DocumentUploader caseId={caseItem.id} onUploaded={refresh} />
@@ -151,6 +158,9 @@ export function StageDocumentUpload({ caseItem }: StageProps) {
             selectedId={null}
             onSelect={() => {}}
             onRemove={removeDocument}
+            showExtractButton={false}
+            showViewButton={false}
+            simplifiedBadge
           />
         </div>
       </div>
@@ -164,7 +174,7 @@ export function StageAIExtraction({ caseItem }: StageProps) {
       num={4}
       icon={Cpu}
       title="Extract & Fill Gaps"
-      description="Side-by-side viewer — Gemini reads each PDF, populates the checklist, and links every value to its source page. Fill any remaining gaps inline."
+      description=""
     >
       <ExtractionWorkspace caseId={caseItem.id} planType={caseItem.plan_type} />
     </StagePanel>
@@ -183,8 +193,10 @@ export function StageCallAssist({ caseItem }: StageProps) {
         caseId={caseItem.id}
         planType={caseItem.plan_type}
         clientName={caseItem.client_name}
-        providerName={caseItem.provider_name}
+        providerName={caseItem.Provider_group}
         planNumber={caseItem.plan_number}
+        providerPhoneMain={caseItem.provider_phone_main}
+        providerPhoneCeding={caseItem.provider_phone_ceding}
       />
     </StagePanel>
   );
@@ -192,20 +204,98 @@ export function StageCallAssist({ caseItem }: StageProps) {
 
 export function StageReviewChecklist({ caseItem }: StageProps) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { isCA, isAdmin } = useRole();
   const template = useMemo(() => getTemplate(caseItem.plan_type), [caseItem.plan_type]);
-  const { rows, loading } = useChecklistFields({ caseId: caseItem.id, template });
+  const { rows, loading, refresh, updateField } = useChecklistFields({ caseId: caseItem.id, template });
 
-  type ReviewFilter = "all" | "filled" | "missing";
+  type ReviewFilter = "all" | "filled" | "missing" | "returned";
   const [filter, setFilter] = useState<ReviewFilter>("all");
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
 
-  const totals = useMemo(() => {
-    const total = rows.length;
-    const filled = rows.filter((r) => r.value && r.value.trim().length > 0).length;
-    const missing = total - filled;
-    return { total, filled, missing, complete: total > 0 && missing === 0 };
+  const goToStage = (n: number) => {
+    navigate(location.pathname, { state: { goToStage: n }, replace: false });
+  };
+
+  const fillTestData = useMutation({
+    mutationFn: async () => {
+      const res = await checklistApi.fillTestData(caseItem.id);
+      return res.data as { filled: number; message: string };
+    },
+    onSuccess: (d) => {
+      toast.success(d.message ?? "Filled missing fields with test data");
+      refresh();
+      qc.invalidateQueries({ queryKey: ["case", caseItem.id] });
+    },
+    onError: (e: Error) => toast.error("Test-fill failed", { description: e.message }),
+  });
+
+  const openEditor = (key: string, currentValue: string | null | undefined) => {
+    setEditingKey(key);
+    setEditValue(currentValue ?? "");
+  };
+  const saveEditor = async () => {
+    if (!editingKey) return;
+    const v = editValue.trim();
+    await updateField(editingKey, { value: v || null });
+    toast.success("Field saved");
+    setEditingKey(null);
+    setEditValue("");
+  };
+
+  const byKey = useMemo(() => {
+    const m = new Map<string, (typeof rows)[number]>();
+    rows.forEach((r) => { if (r.field_key) m.set(r.field_key, r); });
+    return m;
   }, [rows]);
 
-  const grouped = useMemo(() => groupBySection(template), [template]);
+  // Mirror ChecklistPanel: only count template fields whose showIf condition
+  // is satisfied. Counting raw DB rows pulls in stale/legacy fields and gives
+  // a different total than Extract & Fill Gaps and the Excel export.
+  const visibleFields = useMemo(
+    () =>
+      template.filter((f) => {
+        if (!f.showIf) return true;
+        const dependent = byKey.get(f.showIf.key)?.value;
+        return dependent ? f.showIf.in.includes(dependent) : false;
+      }),
+    [template, byKey],
+  );
+
+  // Fund Details rolls into the totals alongside the scalar fields so the
+  // chip counters agree with Stage 4 and so an empty Fund Details table
+  // doesn't read as "All filled".
+  const { rows: fundLines } = useFundLines(caseItem.id);
+  const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
+
+  const totals = useMemo(() => {
+    const fieldTotal = visibleFields.length;
+    let filled = 0;
+    let returned = 0;
+    visibleFields.forEach((f) => {
+      const r = byKey.get(f.key);
+      if (!isMissing(r)) filled += 1;
+      if (r?.status === "review_requested") returned += 1;
+    });
+    // +1 row for Fund Details. Filled when fundStatus is "filled" OR "review"
+    // (the section has data, just not all high-confidence); missing only when
+    // there are no rows / every row is empty.
+    const fundFilled = fundStatus !== "missing";
+    const total = fieldTotal + 1;
+    if (fundFilled) filled += 1;
+    const missing = total - filled;
+    return {
+      total,
+      filled,
+      missing,
+      returned,
+      complete: total > 0 && missing === 0 && returned === 0,
+    };
+  }, [visibleFields, byKey, fundStatus]);
+
+  const grouped = useMemo(() => groupBySection(visibleFields), [visibleFields]);
 
   const filteredGrouped = useMemo(() => {
     if (filter === "all") return grouped;
@@ -213,26 +303,27 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
       .map(({ section, fields }) => ({
         section,
         fields: fields.filter((f) => {
-          const row = rows.find((r) => r.field_key === f.key);
-          const isFilled = !!row?.value && row.value.trim().length > 0;
-          return filter === "filled" ? isFilled : !isFilled;
+          const r = byKey.get(f.key);
+          const missing = isMissing(r);
+          if (filter === "filled") return !missing;
+          if (filter === "missing") return missing;
+          if (filter === "returned") return r?.status === "review_requested";
+          return true;
         }),
       }))
       .filter((g) => g.fields.length > 0);
-  }, [grouped, rows, filter]);
+  }, [grouped, byKey, filter]);
 
   const sendMutation = useMutation({
     mutationFn: async () => {
-      if (!caseItem.owner_id || !caseItem.owner_name) {
-        throw new Error(
-          "No paraplanner is assigned to this case from CRM. Re-import the task from Zoho CRM with an assignee.",
-        );
-      }
-      await casesApi.updateStatus(caseItem.id, "in_review");
+      const res = await casesApi.updateStatus(caseItem.id, "in_review");
+      return res.data as { paralPlannerId?: string | null };
     },
     onSuccess: () => {
-      toast.success(`Sent to ${caseItem.owner_name} for approval`);
+      const paraplannerName = caseItem.paraplanner_name ?? "the paraplanner";
+      toast.success(`Sent to ${paraplannerName} for approval`);
       qc.invalidateQueries({ queryKey: ["case", caseItem.id] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -245,8 +336,68 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
       description="Final review of the completed checklist before handing off for paraplanner approval."
     >
       <div className="space-y-4">
+        {/* CA quick actions */}
+        {(isCA || isAdmin) && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card p-2.5">
+            <span className="text-[11px] uppercase tracking-wider font-bold text-muted-foreground pr-1">
+              CA actions
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => goToStage(4)}
+              className="h-7 gap-1.5 text-xs"
+            >
+              <Pencil className="h-3.5 w-3.5" /> Edit fields (Stage 4)
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => goToStage(5)}
+              className="h-7 gap-1.5 text-xs"
+            >
+              <Phone className="h-3.5 w-3.5" /> Call provider (Stage 5)
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => fillTestData.mutate()}
+              disabled={fillTestData.isPending || totals.missing === 0}
+              className="h-7 gap-1.5 text-xs ml-auto"
+              title="Testing only: bulk-fill any missing field with type-aware dummy data"
+            >
+              <FlaskConical className="h-3.5 w-3.5" />
+              {fillTestData.isPending ? "Filling…" : `Fill ${totals.missing} missing (test)`}
+            </Button>
+          </div>
+        )}
+
+        {/* Returned-for-re-review banner */}
+        {totals.returned > 0 && (
+          <div className="rounded-md border border-warning/40 bg-warning/10 p-3 flex items-start gap-3">
+            <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-foreground">
+                {totals.returned} field{totals.returned === 1 ? "" : "s"} returned by{" "}
+                {caseItem.paraplanner_name ?? "paraplanner"} for re-review
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Read the comment on each flagged field, correct the value (or do a follow-up call
+                on Stage 5 Call Assist), then re-send for approval.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setFilter("returned")}
+              className="text-xs font-semibold text-warning hover:underline shrink-0"
+            >
+              Show flagged →
+            </button>
+          </div>
+        )}
+
         {/* Summary tiles */}
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-4 gap-3">
           <SummaryTile
             label="Total fields"
             value={totals.total}
@@ -266,6 +417,13 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
             tone={totals.missing > 0 ? "warning" : "muted"}
             active={filter === "missing"}
             onClick={() => setFilter(filter === "missing" ? "all" : "missing")}
+          />
+          <SummaryTile
+            label="Returned"
+            value={totals.returned}
+            tone={totals.returned > 0 ? "warning" : "muted"}
+            active={filter === "returned"}
+            onClick={() => setFilter(filter === "returned" ? "all" : "returned")}
           />
         </div>
         {filter !== "all" && (
@@ -290,7 +448,11 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
           <div className="rounded-md border border-dashed border-border bg-muted/20 p-8 text-center">
             <p className="text-sm font-medium text-foreground">No fields match this filter</p>
             <p className="text-xs text-muted-foreground mt-1">
-              {filter === "missing" ? "Every field is filled — nice!" : "Nothing filled yet."}
+              {filter === "missing"
+                ? "Every field is filled — nice!"
+                : filter === "returned"
+                ? "Nothing has been sent back for re-review."
+                : "Nothing filled yet."}
             </p>
           </div>
         ) : (
@@ -302,21 +464,46 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
                 </div>
                 <ul className="divide-y divide-border">
                   {fields.map((f) => {
-                    const row = rows.find((r) => r.field_key === f.key);
-                    const filled = !!row?.value && row.value.trim().length > 0;
+                    const row = byKey.get(f.key);
+                    const missing = isMissing(row);
+                    const filled = !missing;
+                    const returned = row?.status === "review_requested";
+                    const editable = (isCA || isAdmin) && (returned || missing);
                     return (
-                      <li key={f.key} className="flex items-start gap-3 px-3 py-2 text-sm">
-                        <span className="mt-0.5 shrink-0">
-                          {filled ? (
-                            <CheckCircle2 className="h-4 w-4 text-success" />
-                          ) : (
-                            <span className="inline-block h-2 w-2 rounded-full bg-warning" />
+                      <li
+                        key={f.key}
+                        className={`flex flex-col gap-1 px-3 py-2 text-sm ${returned ? "bg-warning/5" : ""}`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <span className="mt-0.5 shrink-0">
+                            {returned ? (
+                              <AlertTriangle className="h-4 w-4 text-warning" />
+                            ) : filled ? (
+                              <CheckCircle2 className="h-4 w-4 text-success" />
+                            ) : (
+                              <span className="inline-block h-2 w-2 rounded-full bg-warning" />
+                            )}
+                          </span>
+                          <span className="text-muted-foreground min-w-[180px]">{f.label}</span>
+                          <span className={`flex-1 ${filled ? "text-foreground" : "italic text-warning"}`}>
+                            {filled ? displayValue(row) : "Missing"}
+                          </span>
+                          {editable && (
+                            <button
+                              type="button"
+                              onClick={() => openEditor(f.key, row?.value)}
+                              className="text-[11px] text-teal hover:underline font-semibold shrink-0"
+                            >
+                              Edit
+                            </button>
                           )}
-                        </span>
-                        <span className="text-muted-foreground min-w-[180px]">{f.label}</span>
-                        <span className={`flex-1 ${filled ? "text-foreground" : "italic text-warning"}`}>
-                          {filled ? row!.value : "Missing"}
-                        </span>
+                        </div>
+                        {returned && row?.notes && (
+                          <div className="ml-7 flex items-start gap-1 text-[11px] text-foreground bg-muted/50 px-2 py-1 rounded">
+                            <MessageSquare className="h-3 w-3 mt-0.5 shrink-0 text-warning" />
+                            <span className="italic">{row.notes}</span>
+                          </div>
+                        )}
                       </li>
                     );
                   })}
@@ -326,45 +513,118 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
           </div>
         )}
 
-        {/* Send for approval */}
+        {/* Fund Details sub-table — read-only at Stage 6.
+            CA can still edit it back on Stage 4 if anything needs a tweak. */}
+        <FundDetailsTable caseId={caseItem.id} readOnly />
+
+        {/* Send for approval — always visible, button enabled even when
+            incomplete so CA can hand off mid-flight (paraplanner will see
+            the gaps and either ask the CA to fill them or send them back). */}
         <div className="rounded-md border border-border bg-muted/30 p-4">
-          {totals.complete ? (
-            <div className="flex items-start gap-3">
+          <div className="flex items-start gap-3">
+            {totals.complete ? (
               <CheckCircle2 className="h-5 w-5 text-success shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <p className="text-sm font-semibold text-foreground">Checklist complete</p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Send to{" "}
-                  <strong className="text-foreground">
-                    {caseItem.owner_name ?? "the assigned paraplanner"}
-                  </strong>{" "}
-                  (assigned via CRM import) for approval.
-                </p>
-              </div>
-              <Button
-                onClick={() => sendMutation.mutate()}
-                disabled={sendMutation.isPending || !caseItem.owner_id}
-                className="gap-2 shrink-0"
-              >
-                <Send className="h-4 w-4" />
-                {sendMutation.isPending ? "Sending…" : "Send for approval"}
-              </Button>
-            </div>
-          ) : (
-            <div className="flex items-start gap-3">
+            ) : (
               <span className="inline-block h-2.5 w-2.5 rounded-full bg-warning mt-1.5 shrink-0" />
-              <div className="flex-1">
-                <p className="text-sm font-semibold text-foreground">
-                  {totals.missing} field{totals.missing === 1 ? "" : "s"} still missing
+            )}
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-foreground">
+                {totals.complete
+                  ? "Checklist complete"
+                  : (() => {
+                      const parts: string[] = [];
+                      if (totals.missing > 0)
+                        parts.push(`${totals.missing} field${totals.missing === 1 ? "" : "s"} still missing`);
+                      if (totals.returned > 0)
+                        parts.push(`${totals.returned} returned for re-review`);
+                      return parts.join(" · ");
+                    })()}
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {totals.complete ? (
+                  <>
+                    Send to{" "}
+                    <strong className="text-foreground">
+                      {caseItem.paraplanner_name ?? "the assigned paraplanner"}
+                    </strong>{" "}
+                    for approval.
+                  </>
+                ) : (
+                  <>
+                    You can still send to{" "}
+                    <strong className="text-foreground">
+                      {caseItem.paraplanner_name ?? "the assigned paraplanner"}
+                    </strong>{" "}
+                    — they'll see the gaps and can send fields back via Stage 8. Ideally
+                    fill the missing ones in <strong>Extract & Fill Gaps</strong> or{" "}
+                    <strong>Call Assist</strong> first.
+                  </>
+                )}
+              </p>
+            </div>
+            <Button
+              onClick={() => sendMutation.mutate()}
+              disabled={sendMutation.isPending}
+              variant={totals.complete ? "default" : "outline"}
+              className="gap-2 shrink-0"
+            >
+              <Send className="h-4 w-4" />
+              {sendMutation.isPending
+                ? "Sending…"
+                : totals.complete
+                ? "Send for approval"
+                : "Send anyway"}
+            </Button>
+          </div>
+        </div>
+
+        {/* Inline edit dialog for returned / missing fields */}
+        {editingKey && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+            onClick={() => setEditingKey(null)}
+          >
+            <div
+              className="bg-card border border-border rounded-lg shadow-lg w-[420px] max-w-[90vw] p-4 space-y-3"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div>
+                <p className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">
+                  {template.find((t) => t.key === editingKey)?.section ?? ""}
                 </p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Go back to <strong>Extract & Fill Gaps</strong> or <strong>Call Assist</strong> to complete every
-                  field. Approval can only be requested once the checklist is fully populated.
-                </p>
+                <h3 className="text-sm font-bold text-foreground">
+                  {template.find((t) => t.key === editingKey)?.label ?? editingKey}
+                </h3>
+              </div>
+              <textarea
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                rows={3}
+                autoFocus
+                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm font-mono"
+                placeholder="Enter value…"
+              />
+              {byKey.get(editingKey)?.notes && (
+                <div className="flex items-start gap-1 text-[11px] text-foreground bg-muted/50 px-2 py-1 rounded">
+                  <MessageSquare className="h-3 w-3 mt-0.5 shrink-0 text-warning" />
+                  <span className="italic">
+                    Paraplanner note: {byKey.get(editingKey)?.notes}
+                  </span>
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => setEditingKey(null)}>
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={saveEditor}>
+                  Save
+                </Button>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </StagePanel>
   );

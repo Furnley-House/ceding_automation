@@ -15,7 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 
-interface Provider {
+export interface Provider {
   id: string;
   name: string;
   phone_main?: string;

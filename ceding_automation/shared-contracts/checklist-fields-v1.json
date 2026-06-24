@@ -1,0 +1,1591 @@
+{
+  "version": "1.1.0",
+  "source_of_truth": "Furnley House Ceding Checklist (Ceding_Checklist_-_Blank.xlsx, latest version confirmed with Reva on 2026-05-29)",
+  "scope": "UAT MVP — ISA, GIA, Pension only. Bond/Final Salary/Protection deferred to Phase 2.",
+  "naming_convention": "lowercase snake_case, semantically stable across plan types where the concept is identical",
+  "shared_keys_note": "Several keys intentionally repeat across plan types because the underlying concept is the same — e.g. provider_name, plan_number, current_value, transfer_value, fund_lines, advice_charges.",
+  "fund_lines_note": "fund_lines is a structured table, not a single value. The backend persists rows in ChecklistFundLine; the BFF extracts an array of fund objects.",
+  "validation_history": {
+    "isa": [
+      "Octopus (Christopher Beeken)",
+      "Redmayne Bentley (Fiona Sinclair)",
+      "Aegon (Margaret Ann Ellis)"
+    ],
+    "gia": [
+      "Evelyn Partners (Jane Lindley) — source PDF only, no filled checklist yet"
+    ],
+    "pension": [
+      "Aviva (Lesley Downham) — 63/63 field match"
+    ]
+  },
+  "multi_account_provider_note": "Some providers (e.g. Evelyn Partners, other wealth managers) issue ONE consolidated PDF covering both ISA and GIA. For UAT, the CA should upload the same PDF to TWO separate cases (one per plan type). The BFF then filters by Account Code during Stage 4 extraction. Post-UAT: implement automatic multi-case split.",
+  "value_normalization": {
+    "currency": {
+      "accepts": [
+        "£X,XXX.XX",
+        "£X.XX",
+        "X.XX (plain number)",
+        "No",
+        "N/A",
+        "None",
+        "Not applicable"
+      ],
+      "store_as": "decimal (number) OR null if Not Applicable marker present",
+      "display_as": "£X,XXX.XX",
+      "non_applicable_markers": [
+        "No",
+        "N/A",
+        "n/a",
+        "None",
+        "Not applicable",
+        "-"
+      ]
+    },
+    "percent": {
+      "accepts": [
+        "0.31%",
+        "0.0031",
+        "0.31",
+        "31bps",
+        "No",
+        "N/A",
+        "None",
+        "Not applicable"
+      ],
+      "store_as": "decimal between 0 and 1, OR null if Not Applicable marker present",
+      "display_as": "X.XX%",
+      "non_applicable_markers": [
+        "No",
+        "N/A",
+        "n/a",
+        "None",
+        "Not applicable",
+        "-"
+      ]
+    },
+    "date": {
+      "accepts": [
+        "DD/MM/YYYY",
+        "YYYY-MM-DD",
+        "DD-MMM-YYYY",
+        "DD MMM YYYY"
+      ],
+      "store_as": "ISO-8601 YYYY-MM-DD",
+      "display_as": "DD/MM/YYYY"
+    }
+  },
+  "structural_notes": {
+    "contribution_history_format": "contributions_4yr_history is a text field expected to contain tax-year rows in the format 'YYYY/YY: £X.XX' separated by newlines. Empty years should be marked '-'. Future v2.x may upgrade this to a structured 4-row table.",
+    "fund_charges_weighted_calculation": "Computed by the CA using the Weighted Average Calculator. Requires per-fund TER from fund_lines[]. Often blank or 'No' when provider does not supply per-fund TER (Aviva, some pension cases).",
+    "with_profits_section_conditional": "All With-Profit Fund fields apply ONLY if the plan holds with-profit funds. For non-WP cases, fields will be blank or N/A — this is correct, not missing data.",
+    "protected_tax_free_cash_conditional": "PENSION-only section. Applies ONLY if pension started before 06/04/2006 (A-Day). For newer pensions, fields are blank — correct."
+  },
+  "plans": {
+    "ISA": [
+      {
+        "key": "provider_name",
+        "label": "Provider Name",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 1,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "provider_contact",
+        "label": "Provider Telephone number & Email address",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 2,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "plan_number",
+        "label": "Plan number",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 3,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "isa_type",
+        "label": "Type of ISA (Stocks & Shares / Cash / Lifetime)",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 4,
+        "type": "dropdown",
+        "required": true,
+        "options": [
+          "Stocks & Shares",
+          "Cash",
+          "Lifetime",
+          "Junior",
+          "Help to Buy"
+        ]
+      },
+      {
+        "key": "start_date",
+        "label": "Start Date",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 5,
+        "type": "date",
+        "required": true,
+        "normalize_per": "date"
+      },
+      {
+        "key": "is_flexible_isa",
+        "label": "Is this a 'Flexible ISA'?",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 6,
+        "type": "boolean",
+        "required": true
+      },
+      {
+        "key": "total_investment",
+        "label": "Total Investment",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 7,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "ongoing_regular_contributions",
+        "label": "Amount of ongoing regular contributions",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 8,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "current_year_subscriptions",
+        "label": "Current year subscriptions (Allowance used this tax year)",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 9,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "withdrawal_details",
+        "label": "Withdrawals details (Regular / Lumpsum / Ongoing amount)",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 10,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "current_value",
+        "label": "Current Value (with date)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 11,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "current_value_as_of",
+        "label": "Current Value — date of valuation",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 12,
+        "type": "date",
+        "required": false,
+        "normalize_per": "date",
+        "auto_extract_hint": "When provider PDF states value 'as at DD/MM/YYYY', extract the date into this sibling field. If not present, leave null and CA will fill from system data.",
+        "parent_field": "current_value"
+      },
+      {
+        "key": "transfer_value",
+        "label": "Transfer Value (if higher than CV disclose why)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 13,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "transfer_value_as_of",
+        "label": "Transfer Value — date of valuation",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 14,
+        "type": "date",
+        "required": false,
+        "normalize_per": "date",
+        "auto_extract_hint": "When provider PDF states value 'as at DD/MM/YYYY', extract the date into this sibling field. If not present, leave null and CA will fill from system data.",
+        "parent_field": "transfer_value"
+      },
+      {
+        "key": "fund_lines",
+        "label": "Fund Details (per fund: name, ISIN, units, price, value, charge)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 15,
+        "type": "table",
+        "required": true,
+        "columns": [
+          { "key": "fund_name", "label": "Fund Name", "type": "text" },
+          { "key": "isin_sedol", "label": "ISIN/Sedol/City code", "type": "text" },
+          { "key": "number_of_units", "label": "Number of units", "type": "number" },
+          { "key": "price_per_unit", "label": "Price per unit", "type": "currency" },
+          { "key": "value", "label": "Value", "type": "currency" },
+          { "key": "fund_charge", "label": "Fund charge", "type": "percent" }
+        ]
+      },
+      {
+        "key": "fund_range_link",
+        "label": "Range of funds available for investment (link to fund list)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 16,
+        "type": "text",
+        "required": true,
+        "note": "CAs use this field for any of: URL, comma-separated fund list, or descriptive text like '250 funds available'. Type=text accommodates all three patterns."
+      },
+      {
+        "key": "restricted_funds",
+        "label": "Are any of the funds held restricted for trading? Provide details.",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 17,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_fund_names_isin",
+        "label": "If invested in with-profit fund — Fund Names & ISIN",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 18,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_ppfm",
+        "label": "PPFM",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 19,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_historical_bonus_rate",
+        "label": "Historical bonus rate",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 20,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_market_value_reduction",
+        "label": "Market Value Reduction (MVR)",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 21,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "platform_charge",
+        "label": "Platform Charge",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 22,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "fund_charges_weighted",
+        "label": "Fund charges (Weighted average)",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 23,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "transactional_fund_charge",
+        "label": "Transactional Fund Charge",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 24,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "advice_charges",
+        "label": "Advice charges",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 25,
+        "type": "text",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "exit_charge",
+        "label": "Exit charge / Penalty on transfer",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 26,
+        "type": "text",
+        "required": true,
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ]
+      },
+      {
+        "key": "other_charges",
+        "label": "Any other charges (e.g. switch charge, Bid offer spread)",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 27,
+        "type": "text",
+        "required": true,
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ]
+      },
+      {
+        "key": "any_guarantees",
+        "label": "Any Guarantees applicable",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 28,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "origo_option_available",
+        "label": "Origo Option available",
+        "section": "Benefits & Options Available",
+        "section_order": 7,
+        "display_order": 29,
+        "type": "boolean",
+        "required": true
+      },
+      {
+        "key": "discharge_forms",
+        "label": "Discharge forms",
+        "section": "Benefits & Options Available",
+        "section_order": 7,
+        "display_order": 30,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "transfer_systems",
+        "label": "Transfer systems",
+        "section": "Benefits & Options Available",
+        "section_order": 7,
+        "display_order": 31,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "isa_aps_transfer",
+        "label": "Do you allow an ISA APS transfer for the client's spouses beneficiary?",
+        "section": "Benefits & Options Available",
+        "section_order": 7,
+        "display_order": 32,
+        "type": "boolean",
+        "required": true
+      },
+      {
+        "key": "in_specie_transfer_out",
+        "label": "Are in-specie transfers available if transferring away?",
+        "section": "Benefits & Options Available",
+        "section_order": 7,
+        "display_order": 33,
+        "type": "boolean",
+        "required": true
+      },
+      {
+        "key": "other_notes",
+        "label": "Other Notes",
+        "section": "Notes",
+        "section_order": 8,
+        "display_order": 34,
+        "type": "text_long",
+        "required": true
+      }
+    ],
+    "GIA": [
+      {
+        "key": "single_or_joint",
+        "label": "Single or Joint client",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 1,
+        "type": "dropdown",
+        "required": true,
+        "options": [
+          "Single",
+          "Joint"
+        ]
+      },
+      {
+        "key": "provider_name",
+        "label": "Provider Name",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 2,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "provider_contact",
+        "label": "Provider Telephone number & Email address",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 3,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "plan_number",
+        "label": "Plan number",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 4,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "start_date",
+        "label": "Start Date",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 5,
+        "type": "date",
+        "required": true,
+        "normalize_per": "date"
+      },
+      {
+        "key": "total_contributions",
+        "label": "Total Contributions",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 6,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "ongoing_regular_contributions",
+        "label": "Amount of ongoing regular contributions",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 7,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "withdrawal_details",
+        "label": "Withdrawals details",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 8,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "current_year_contributions",
+        "label": "Contributions made this tax year",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 9,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "gain_loss_percent",
+        "label": "Gain / Loss % currently on plan",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 10,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "current_value",
+        "label": "Current Value (with date)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 11,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "current_value_as_of",
+        "label": "Current Value — date of valuation",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 12,
+        "type": "date",
+        "required": false,
+        "normalize_per": "date",
+        "auto_extract_hint": "When provider PDF states value 'as at DD/MM/YYYY', extract the date into this sibling field. If not present, leave null and CA will fill from system data.",
+        "parent_field": "current_value"
+      },
+      {
+        "key": "transfer_value",
+        "label": "Transfer Value",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 13,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "transfer_value_as_of",
+        "label": "Transfer Value — date of valuation",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 14,
+        "type": "date",
+        "required": false,
+        "normalize_per": "date",
+        "auto_extract_hint": "When provider PDF states value 'as at DD/MM/YYYY', extract the date into this sibling field. If not present, leave null and CA will fill from system data.",
+        "parent_field": "transfer_value"
+      },
+      {
+        "key": "transfer_value_variance_reason",
+        "label": "If transfer value differs from current value — reason",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 15,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "fund_lines",
+        "label": "Fund Details (per fund)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 16,
+        "type": "table",
+        "required": true,
+        "columns": [
+          { "key": "fund_name", "label": "Fund Name", "type": "text" },
+          { "key": "isin_sedol", "label": "ISIN/Sedol/City code", "type": "text" },
+          { "key": "number_of_units", "label": "Number of units", "type": "number" },
+          { "key": "price_per_unit", "label": "Price per unit", "type": "currency" },
+          { "key": "value", "label": "Value", "type": "currency" },
+          { "key": "fund_charge", "label": "Fund charge", "type": "percent" }
+        ]
+      },
+      {
+        "key": "fund_range_link",
+        "label": "Range of funds available for investment (link)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 17,
+        "type": "text",
+        "required": true,
+        "note": "CAs use this field for any of: URL, comma-separated fund list, or descriptive text like '250 funds available'. Type=text accommodates all three patterns."
+      },
+      {
+        "key": "restricted_funds",
+        "label": "Are any of the funds held restricted for trading?",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 18,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_fund_names_isin",
+        "label": "If invested in with-profit fund — Fund Names & ISIN",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 19,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_ppfm",
+        "label": "PPFM",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 20,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_historical_bonus_rate",
+        "label": "Historical bonus rate",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 21,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_market_value_reduction",
+        "label": "Market Value Reduction (MVR)",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 22,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "platform_charge",
+        "label": "Platform Charge / Wrapper charge",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 23,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "fund_charges_weighted",
+        "label": "Fund charges (Weighted average) + Base cost of funds",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 24,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "transactional_fund_charge",
+        "label": "Transactional Fund Charge",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 25,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "advice_charges",
+        "label": "Advice charges",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 26,
+        "type": "text",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "exit_charge",
+        "label": "Exit charge / Penalty on transfer",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 27,
+        "type": "text",
+        "required": true,
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ]
+      },
+      {
+        "key": "adviser_setup_fees",
+        "label": "Setup fees paid to adviser (required — offset against CGT)",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 28,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "other_charges",
+        "label": "Any other charges (e.g. switch charge, Bid offer spread)",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 29,
+        "type": "text",
+        "required": true,
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ]
+      },
+      {
+        "key": "any_guarantees",
+        "label": "Any Guarantees applicable",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 30,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "origo_option_available",
+        "label": "Origo Option available",
+        "section": "Benefits & Options Available",
+        "section_order": 7,
+        "display_order": 31,
+        "type": "boolean",
+        "required": true
+      },
+      {
+        "key": "discharge_forms",
+        "label": "Discharge forms",
+        "section": "Benefits & Options Available",
+        "section_order": 7,
+        "display_order": 32,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "cgt_gain_loss_report",
+        "label": "Provide unrealised and realised gain report for CGT",
+        "section": "Benefits & Options Available",
+        "section_order": 7,
+        "display_order": 33,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "in_specie_transfer_out",
+        "label": "Are in-specie transfers available if transferring away?",
+        "section": "Benefits & Options Available",
+        "section_order": 7,
+        "display_order": 34,
+        "type": "boolean",
+        "required": true
+      },
+      {
+        "key": "other_notes",
+        "label": "Other Notes",
+        "section": "Notes",
+        "section_order": 8,
+        "display_order": 35,
+        "type": "text_long",
+        "required": true
+      }
+    ],
+    "PENSION": [
+      {
+        "key": "provider_name",
+        "label": "Provider Name",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 1,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "provider_contact",
+        "label": "Provider Telephone number & Email address",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 2,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "plan_number",
+        "label": "Plan number",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 3,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "pension_type",
+        "label": "Type of pension (Personal Pension / SIPP / Other)",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 4,
+        "type": "dropdown",
+        "required": true,
+        "options": [
+          "Personal Pension",
+          "SIPP",
+          "Stakeholder",
+          "Workplace/Group",
+          "EPP",
+          "SSAS",
+          "Section 32",
+          "Other"
+        ]
+      },
+      {
+        "key": "scheme_name",
+        "label": "Name of Policy / Scheme",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 5,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "contract_or_trust_based",
+        "label": "Is the plan Contract based or Trust based?",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 6,
+        "type": "dropdown",
+        "required": true,
+        "options": [
+          "Contract",
+          "Trust",
+          "Unknown"
+        ]
+      },
+      {
+        "key": "status",
+        "label": "Status — Inforce-Active (ongoing contribution) / Paid up",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 7,
+        "type": "text",
+        "required": true,
+        "typical_values": [
+          "Inforce - Active",
+          "Paid up",
+          "Paid Up but Active",
+          "Unknown"
+        ],
+        "note": "Free-text. Common values listed in typical_values. CAs sometimes use mixed states like 'Paid Up but Active'."
+      },
+      {
+        "key": "start_date",
+        "label": "Start Date",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 8,
+        "type": "date",
+        "required": true,
+        "normalize_per": "date"
+      },
+      {
+        "key": "normal_retirement_date",
+        "label": "Normal Retirement Date / Age / Protected Retirement Age",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 9,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "inherited_pension",
+        "label": "Inherited Pension (if yes — full or part? taxable?)",
+        "section": "Basic Details",
+        "section_order": 1,
+        "display_order": 10,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "regular_contribution_personal",
+        "label": "Ongoing regular contributions — personal (Gross or Net)",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 11,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "regular_contribution_employee",
+        "label": "Ongoing regular contributions — employee",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 12,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "regular_contribution_employer",
+        "label": "Ongoing regular contributions — employer",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 13,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "withdrawal_details",
+        "label": "Withdrawals details (Regular / Lumpsum / Ongoing)",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 14,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "percent_crystallised",
+        "label": "% Crystallised",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 15,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "tax_free_cash_taken",
+        "label": "Tax free cash taken (£ and %)",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 16,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "contributions_4yr_history",
+        "label": "Contributions: this tax year + previous 3 tax years (proof required)",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 17,
+        "type": "text_long",
+        "required": true
+      },
+      {
+        "key": "contributions_breakdown_employer_personal",
+        "label": "Breakdown of employer & personal across 4 years",
+        "section": "Transaction History",
+        "section_order": 2,
+        "display_order": 18,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "current_value",
+        "label": "Current Value (with date)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 19,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "current_value_as_of",
+        "label": "Current Value — date of valuation",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 20,
+        "type": "date",
+        "required": false,
+        "normalize_per": "date",
+        "auto_extract_hint": "When provider PDF states value 'as at DD/MM/YYYY', extract the date into this sibling field. If not present, leave null and CA will fill from system data.",
+        "parent_field": "current_value"
+      },
+      {
+        "key": "transfer_value",
+        "label": "Transfer Value (if higher than CV, state any bonuses)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 21,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "transfer_value_as_of",
+        "label": "Transfer Value — date of valuation",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 22,
+        "type": "date",
+        "required": false,
+        "normalize_per": "date",
+        "auto_extract_hint": "When provider PDF states value 'as at DD/MM/YYYY', extract the date into this sibling field. If not present, leave null and CA will fill from system data.",
+        "parent_field": "transfer_value"
+      },
+      {
+        "key": "loyalty_bonuses",
+        "label": "Are there any loyalty or other bonuses applied?",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 23,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "crystallised_uncrystallised",
+        "label": "Crystallised & Uncrystallised split",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 24,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "fund_lines",
+        "label": "Fund Details (per fund)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 25,
+        "type": "table",
+        "required": true,
+        "columns": [
+          { "key": "fund_name", "label": "Fund Name", "type": "text" },
+          { "key": "isin_sedol", "label": "ISIN/Sedol/City code", "type": "text" },
+          { "key": "number_of_units", "label": "Number of units", "type": "number" },
+          { "key": "price_per_unit", "label": "Price per unit", "type": "currency" },
+          { "key": "value", "label": "Value", "type": "currency" },
+          { "key": "fund_charge", "label": "Fund charge", "type": "percent" }
+        ]
+      },
+      {
+        "key": "fund_range_link",
+        "label": "Range of funds available for investment (link)",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 26,
+        "type": "text",
+        "required": true,
+        "note": "CAs use this field for any of: URL, comma-separated fund list, or descriptive text like '250 funds available'. Type=text accommodates all three patterns."
+      },
+      {
+        "key": "restricted_funds",
+        "label": "Are any of the funds held restricted for trading?",
+        "section": "Valuation & Fund Details",
+        "section_order": 3,
+        "display_order": 27,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_fund_names_isin",
+        "label": "If invested in with-profit fund — Fund Names & ISIN",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 28,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_guaranteed_growth_rate",
+        "label": "Guaranteed Growth Rate (if applicable)",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 29,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_ppfm",
+        "label": "PPFM",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 30,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_historical_bonus_rate",
+        "label": "Historical bonus rate",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 31,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_market_value_reduction",
+        "label": "Market Value Reduction (MVR)",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 32,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "wp_terminal_bonus",
+        "label": "Terminal Bonus",
+        "section": "With-Profit Funds",
+        "section_order": 4,
+        "display_order": 33,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "platform_charge",
+        "label": "Platform Charge / Plan charges",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 34,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "wrapper_charge",
+        "label": "Wrapper charges",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 35,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "fund_charges_weighted",
+        "label": "Fund charges (Weighted average)",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 36,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "transactional_fund_charge",
+        "label": "Transactional Fund Charge",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 37,
+        "type": "percent",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "advice_charges",
+        "label": "Advice charges",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 38,
+        "type": "text",
+        "required": true,
+        "normalize_per": "percent",
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ],
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "exit_charge",
+        "label": "Exit charge / Penalty on transfer",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 39,
+        "type": "text",
+        "required": true,
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ]
+      },
+      {
+        "key": "charge_discount",
+        "label": "Discount on charges or any other discounts?",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 40,
+        "type": "text",
+        "required": true,
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ]
+      },
+      {
+        "key": "other_charges",
+        "label": "Any other charges (e.g. switch, Bid offer spread)",
+        "section": "Charges",
+        "section_order": 5,
+        "display_order": 41,
+        "type": "text",
+        "required": true,
+        "allows_defer_to_source": true,
+        "defer_examples": [
+          "Please see KIID",
+          "See attached charges schedule",
+          "See online doc",
+          "Refer to Key Investor Information Document"
+        ]
+      },
+      {
+        "key": "guaranteed_minimum_pension",
+        "label": "Guaranteed Minimum Pension (GMP)",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 42,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "guaranteed_annuity_rate",
+        "label": "Guaranteed Annuity Rate (GAR)",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 43,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "guaranteed_income",
+        "label": "Guaranteed Income",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 44,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "guaranteed_capital_value",
+        "label": "Guaranteed Capital Value",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 45,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "any_guarantees",
+        "label": "Any other Guarantees applicable",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 46,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "protected_tax_free_cash",
+        "label": "Protected Tax-Free cash",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 47,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "waiver_of_premiums",
+        "label": "Waiver of Premiums / Contributions",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 48,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "additional_life_cover",
+        "label": "Additional Life Cover",
+        "section": "Guarantees",
+        "section_order": 6,
+        "display_order": 49,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "a_day_value",
+        "label": "A-Day Value",
+        "section": "Protected Tax-Free Cash (Pre-A-Day)",
+        "section_order": 7,
+        "display_order": 50,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "a_day_tax_free_cash",
+        "label": "A-Day tax free cash",
+        "section": "Protected Tax-Free Cash (Pre-A-Day)",
+        "section_order": 7,
+        "display_order": 51,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "current_tax_free_cash",
+        "label": "Tax free cash on current basis",
+        "section": "Protected Tax-Free Cash (Pre-A-Day)",
+        "section_order": 7,
+        "display_order": 52,
+        "type": "currency",
+        "required": true,
+        "normalize_per": "currency",
+        "accepts_non_applicable_markers": true
+      },
+      {
+        "key": "drawdown_facility_available",
+        "label": "Is drawdown facility available?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 53,
+        "type": "boolean",
+        "required": true
+      },
+      {
+        "key": "drawdown_options",
+        "label": "Drawdown options (FAD / UFPLS / Annuity in-house / Annuity OMO)",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 54,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "internal_transfer_for_fad",
+        "label": "If FAD unavailable — can plan transfer internally to one that can?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 55,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "origo_option_available",
+        "label": "Origo Option available OR discharge forms required?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 56,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "partial_transfer_available",
+        "label": "Partial transfer facility — how much must stay for plan to remain open?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 57,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "lifestyling",
+        "label": "Lifestyling — available? active?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 58,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "death_benefits",
+        "label": "Death Benefits (Pay out of Fund value / Beneficiary drawdown)",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 59,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "benefits_before_75",
+        "label": "Does client have to take benefits from plan prior to age 75?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 60,
+        "type": "boolean",
+        "required": true
+      },
+      {
+        "key": "former_protected_rights",
+        "label": "Former Protected Rights? Value?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 61,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "pension_sharing_order",
+        "label": "Pension sharing order / earmarking / bankruptcy?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 62,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "external_transfer_in_allowed",
+        "label": "Can external plans be transferred in?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 63,
+        "type": "boolean",
+        "required": true
+      },
+      {
+        "key": "named_beneficiaries",
+        "label": "Named beneficiaries and % split each",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 64,
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "in_specie_transfer_out",
+        "label": "Are in-specie transfers available if transferring away?",
+        "section": "Benefits & Options Available",
+        "section_order": 8,
+        "display_order": 65,
+        "type": "boolean",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+# Shell scripts must keep LF endings — Windows CRLF in a #!/usr/bin/env bash
+# shebang silently breaks execution under Linux (in ACR builds, container
+# runtime, CI). Without this rule, Git's core.autocrlf on Windows checkouts
+# would store .sh files as CRLF.
+*.sh text eol=lf

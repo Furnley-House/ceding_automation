@@ -1,8 +1,7 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { updateCase } from "@/services/api";
 import type { CaseRow } from "@/lib/caseHelpers";
-import { providers as seedProviders, type Provider } from "@/data/seedData";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -17,30 +16,45 @@ import {
   Copy,
   RotateCw,
 } from "lucide-react";
+import { ProviderPicker } from "./ProviderPicker";
 
 type Method = "origo" | "email" | "courier";
+
+// DB Provider shape as it reaches this component (snake_case — the API
+// returns camelCase but services/api.ts:getCaseById runs the response
+// through a recursive snakeKeys() before it gets here).
+type DbProvider = {
+  id: string;
+  name: string;
+  email_main: string | null;
+  email_ceding_dept: string | null;
+  phone_main: string | null;
+  phone_ceding_dept: string | null;
+  postal_address: string | null;
+  loa_format: string;
+  is_on_origo: boolean;
+  plan_type_prefixes: string[];
+  notes: string | null;
+  isActive: boolean;
+};
 
 interface Props {
   caseItem: CaseRow;
 }
 
-function findProvider(name: string): Provider | undefined {
-  const n = name.trim().toLowerCase();
-  return seedProviders.find(
-    (p) =>
-      p.name.toLowerCase() === n ||
-      p.aliases.some((a) => a.toLowerCase() === n),
-  );
-}
-
-function pickRoutingEmail(provider: Provider | undefined, planRef: string | null) {
+// Resolve the LOA "to" address from the DB provider row. Prefers the
+// ceding-team mailbox when populated, falls back to the general mailbox.
+// planRef is kept for forward-compat — a future Provider.routingRules
+// column would let us re-introduce per-prefix routing without changing
+// this signature.
+function pickRoutingEmail(provider: DbProvider | null, _planRef: string | null) {
   if (!provider) return { email: null as string | null, department: null as string | null };
-  const ref = (planRef ?? "").toUpperCase().trim();
-  if (ref) {
-    const match = provider.routingRules.find((r) => ref.startsWith(r.planPrefix.toUpperCase()));
-    if (match?.email) return { email: match.email, department: match.department };
-  }
-  return { email: provider.email, department: "General" };
+  const cedingEmail = provider.email_ceding_dept ?? null;
+  const generalEmail = provider.email_main ?? null;
+  return {
+    email: cedingEmail ?? generalEmail,
+    department: cedingEmail ? "Ceding / Transfers" : "General",
+  };
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -52,26 +66,61 @@ const STATUS_LABEL: Record<string, string> = {
 
 export function SendLOAWorkspace({ caseItem }: Props) {
   const qc = useQueryClient();
-  const provider = useMemo(() => findProvider(caseItem.provider_name), [caseItem.provider_name]);
+  // Provider comes from the joined DB row (case.provider include) — see
+  // backend routes/cases.ts GET /:id. Can be null (no providerId) or a
+  // bare auto-created placeholder with all routing fields null.
+  const provider: DbProvider | null =
+    (caseItem as unknown as { provider?: DbProvider | null }).provider ?? null;
   const planRef = (caseItem as any).plan_ref ?? caseItem.plan_number ?? null;
-  const routing = useMemo(() => pickRoutingEmail(provider, planRef), [provider, planRef]);
+  const routing = pickRoutingEmail(provider, planRef);
 
   const initialMethod: Method =
     ((caseItem as any).loa_method as Method) ??
-    (provider?.origoSupported ? "origo" : "email");
+    (provider?.is_on_origo ? "origo" : "email");
   const [method, setMethod] = useState<Method>(initialMethod);
-  const [trackingRef, setTrackingRef] = useState<string>(
-    (caseItem as any).loa_tracking_ref ?? "",
-  );
-  const [notes, setNotes] = useState<string>((caseItem as any).loa_notes ?? "");
 
-  const status: string = (caseItem as any).loa_status ?? "not_sent";
+  // Per-method notes + tracking refs (16 Jun). The DB has three sets of
+  // columns so switching tabs no longer overwrites another tab's values
+  // and reloading the page hydrates each panel independently.
+  //   Origo:   loa_origo_ref     + loa_origo_notes
+  //   Email:                       loa_email_notes
+  //   Courier: loa_courier_ref   + loa_courier_notes
+  const [origoRef, setOrigoRef] = useState<string>(
+    (caseItem as any).loa_origo_ref ?? "",
+  );
+  const [origoNotes, setOrigoNotes] = useState<string>(
+    (caseItem as any).loa_origo_notes ?? "",
+  );
+  const [emailNotes, setEmailNotes] = useState<string>(
+    (caseItem as any).loa_email_notes ?? "",
+  );
+  const [courierRef, setCourierRef] = useState<string>(
+    (caseItem as any).loa_courier_ref ?? "",
+  );
+  const [courierNotes, setCourierNotes] = useState<string>(
+    (caseItem as any).loa_courier_notes ?? "",
+  );
+
+  // Belt-and-braces lowercase: services/api.ts:flattenCase already normalises
+  // loa_status, but stale React Query cache from before that fix could still
+  // surface uppercase Prisma values ("NOT_SENT", "SENT", …). The button
+  // branches below all compare against lowercase, so a single mismatch hides
+  // every action button on every method panel.
+  const rawLoaStatus = (caseItem as any).loa_status;
+  const status: string =
+    typeof rawLoaStatus === "string" ? rawLoaStatus.toLowerCase() : "not_sent";
 
   const updateMutation = useMutation({
+    // IMPORTANT: route through updateCase() (services/api.ts) — it applies
+    // camelKeys() to the body before sending. Calling api.patch() directly
+    // here used to send raw snake_case keys (`loa_notes`, `loa_status`, …)
+    // to the backend, which only reads camelCase (`loaNotes`, `loaStatus`,
+    // …) — so every LOA save silently dropped its fields and React Query's
+    // optimistic cache masked the bug until a hard refresh.
     mutationFn: async (updates: Record<string, any>) => {
-      await api.patch(`/cases/${caseItem.id}`, {
+      await updateCase(caseItem.id, {
         ...updates,
-        lastActivityAt: new Date().toISOString(),
+        last_activity_at: new Date().toISOString(),
       });
     },
     onSuccess: () => {
@@ -82,7 +131,7 @@ export function SendLOAWorkspace({ caseItem }: Props) {
   });
 
   const subject = `Letter of Authority - ${caseItem.client_name} - ${caseItem.plan_number}`;
-  const initialBody = `Dear ${provider?.name ?? caseItem.provider_name} Team,
+  const initialBody = `Dear ${provider?.name ?? caseItem.Provider_group} Team,
 
 Please find attached a signed Letter of Authority for the following client:
 
@@ -98,7 +147,7 @@ If you require any further information to process this request, please reply to 
 Kind regards,
 ProviderHub on behalf of the client`;
 
-  const followUpBody = `Dear ${provider?.name ?? caseItem.provider_name} Team,
+  const followUpBody = `Dear ${provider?.name ?? caseItem.Provider_group} Team,
 
 I am following up on a Letter of Authority sent on behalf of ${caseItem.client_name} (Policy ref: ${caseItem.plan_number}, Case ref: ${caseItem.case_ref}).
 
@@ -109,13 +158,8 @@ ProviderHub`;
 
   // Use encodeURIComponent (not URLSearchParams) so spaces become %20 instead of "+".
   // Outlook Web's deeplink renders "+" literally in the body.
-  const buildMailto = (body: string) => {
-    const to = routing.email ?? provider?.email ?? "";
-    return `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  };
-
   const buildOutlookWebUrl = (body: string) => {
-    const to = routing.email ?? provider?.email ?? "";
+    const to = routing.email ?? provider?.email_main ?? "";
     const qs =
       `path=${encodeURIComponent("/mail/action/compose")}` +
       `&to=${encodeURIComponent(to)}` +
@@ -133,14 +177,30 @@ ProviderHub`;
     }
   };
 
+  // Each save only writes the chosen method's slot. Other methods' values
+  // are left untouched in the DB — handy if the operator submitted via two
+  // channels on the same case (e.g. retry by Courier after Origo failed)
+  // and we want both references preserved for audit.
+  const fieldsForMethod = (m: Method) => {
+    if (m === "origo")
+      return {
+        loa_origo_ref: origoRef || null,
+        loa_origo_notes: origoNotes || null,
+      };
+    if (m === "email") return { loa_email_notes: emailNotes || null };
+    return {
+      loa_courier_ref: courierRef || null,
+      loa_courier_notes: courierNotes || null,
+    };
+  };
+
   const markSent = () => {
     updateMutation.mutate(
       {
         loa_method: method,
         loa_status: "sent",
-        loa_tracking_ref: trackingRef || null,
-        loa_notes: notes || null,
         loa_sent_date: new Date().toISOString().slice(0, 10),
+        ...fieldsForMethod(method),
       },
       { onSuccess: () => toast.success("LOA marked as sent") },
     );
@@ -148,18 +208,14 @@ ProviderHub`;
 
   const markProcessed = () => {
     updateMutation.mutate(
-      { loa_status: "processed", loa_notes: notes || null },
+      { loa_status: "processed", ...fieldsForMethod(method) },
       { onSuccess: () => toast.success("LOA marked as processed") },
     );
   };
 
   const markReceived = () => {
     updateMutation.mutate(
-      {
-        loa_status: "received",
-        loa_notes: notes || null,
-        pdf_received_date: new Date().toISOString().slice(0, 10),
-      },
+      { loa_status: "received", ...fieldsForMethod(method) },
       { onSuccess: () => toast.success("LOA received — ready for document upload") },
     );
   };
@@ -201,14 +257,23 @@ ProviderHub`;
         )}
       </div>
 
+      {/* Status timeline — one row per LOAStatus transition that has a
+          recorded timestamp, in lifecycle order. NOT_SENT and SIGNED never
+          appear. Hidden entirely until at least one timestamp exists. */}
+      <StatusTimeline
+        sentAt={(caseItem as any).loa_sent_date ?? null}
+        processedAt={(caseItem as any).loa_processed_date ?? null}
+        receivedAt={(caseItem as any).loa_received_date ?? null}
+      />
+
       {/* Method selector */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
         <MethodTile
           icon={Globe}
           title="Origo"
-          subtitle={provider?.origoSupported ? "Recommended for this provider" : "Not supported by provider"}
+          subtitle={provider?.is_on_origo ? "Recommended for this provider" : "Not supported by provider"}
           active={method === "origo"}
-          disabled={!provider?.origoSupported}
+          disabled={!provider?.is_on_origo}
           onClick={() => setMethod("origo")}
         />
         <MethodTile
@@ -227,14 +292,15 @@ ProviderHub`;
         />
       </div>
 
-      {/* Method-specific panels */}
+      {/* Method-specific panels — each owns its own notes + ref state so
+          switching tabs doesn't bleed values across methods. */}
       {method === "origo" && (
         <OrigoPanel
           provider={provider}
-          trackingRef={trackingRef}
-          setTrackingRef={setTrackingRef}
-          notes={notes}
-          setNotes={setNotes}
+          trackingRef={origoRef}
+          setTrackingRef={setOrigoRef}
+          notes={origoNotes}
+          setNotes={setOrigoNotes}
           status={status}
           onSent={markSent}
           onReceived={markReceived}
@@ -250,25 +316,31 @@ ProviderHub`;
           subject={subject}
           initialBody={initialBody}
           followUpBody={followUpBody}
-          buildMailto={buildMailto}
           buildOutlookWebUrl={buildOutlookWebUrl}
           copy={copy}
-          notes={notes}
-          setNotes={setNotes}
+          notes={emailNotes}
+          setNotes={setEmailNotes}
           status={status}
           onSent={markSent}
           onProcessed={markProcessed}
           onReceived={markReceived}
           pending={updateMutation.isPending}
+          onChangeProvider={(providerId) => {
+            if (providerId === provider?.id) return;
+            updateMutation.mutate(
+              { providerId },
+              { onSuccess: () => toast.success("Provider re-linked — routing updated") },
+            );
+          }}
         />
       )}
 
       {method === "courier" && (
         <CourierPanel
-          trackingRef={trackingRef}
-          setTrackingRef={setTrackingRef}
-          notes={notes}
-          setNotes={setNotes}
+          trackingRef={courierRef}
+          setTrackingRef={setCourierRef}
+          notes={courierNotes}
+          setNotes={setCourierNotes}
           status={status}
           onSent={markSent}
           onProcessed={markProcessed}
@@ -276,6 +348,54 @@ ProviderHub`;
           pending={updateMutation.isPending}
         />
       )}
+    </div>
+  );
+}
+
+// Read-only LOA status timeline. Renders Sent → Processed → Received rows,
+// skipping any transition without a recorded timestamp. Date+time format
+// matches the rest of the app (cf. ExportWorkspace.formatTs / AuditTimeline).
+function StatusTimeline({
+  sentAt,
+  processedAt,
+  receivedAt,
+}: {
+  sentAt: string | null;
+  processedAt: string | null;
+  receivedAt: string | null;
+}) {
+  const fmt = (iso: string | null): string | null => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return `${d.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    })} ${d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`;
+  };
+  const rows = [
+    { label: "Sent", ts: fmt(sentAt) },
+    { label: "Processed", ts: fmt(processedAt) },
+    { label: "Received", ts: fmt(receivedAt) },
+  ].filter((r) => r.ts !== null);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="rounded-md border border-border bg-card p-3">
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-2">
+        Status timeline
+      </p>
+      <ul className="space-y-1.5">
+        {rows.map((r) => (
+          <li key={r.label} className="flex items-center gap-2 text-xs">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-teal shrink-0" />
+            <span className="font-medium text-foreground w-20">{r.label}</span>
+            <span className="text-muted-foreground tabular-nums">— {r.ts}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -326,7 +446,7 @@ function OrigoPanel({
   onReceived,
   pending,
 }: {
-  provider: Provider | undefined;
+  provider: DbProvider | null;
   trackingRef: string;
   setTrackingRef: (v: string) => void;
   notes: string;
@@ -336,7 +456,7 @@ function OrigoPanel({
   onReceived: () => void;
   pending: boolean;
 }) {
-  if (!provider?.origoSupported) {
+  if (!provider?.is_on_origo) {
     return (
       <div className="rounded-md border border-dashed border-border bg-muted/20 p-6 text-center">
         <p className="text-sm text-foreground font-semibold">
@@ -370,16 +490,9 @@ function OrigoPanel({
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           </Button>
-          {provider.portalUrl && (
-            <a
-              href={provider.portalUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 text-xs text-teal hover:underline"
-            >
-              Provider portal <ExternalLink className="h-3 w-3" />
-            </a>
-          )}
+          {/* portalUrl link removed — DB Provider model has no equivalent
+              field today. If a portalUrl column is added later, restore
+              the conditional <a> link here. */}
         </div>
         <p className="text-[11px] text-muted-foreground mt-1">
           Submit the LOA on Unipass, then paste the Origo reference below.
@@ -435,7 +548,6 @@ function EmailPanel({
   subject,
   initialBody,
   followUpBody,
-  buildMailto,
   buildOutlookWebUrl,
   copy,
   notes,
@@ -445,14 +557,14 @@ function EmailPanel({
   onProcessed,
   onReceived,
   pending,
+  onChangeProvider,
 }: {
-  provider: Provider | undefined;
+  provider: DbProvider | null;
   routing: { email: string | null; department: string | null };
   planRef: string | null;
   subject: string;
   initialBody: string;
   followUpBody: string;
-  buildMailto: (body: string) => string;
   buildOutlookWebUrl: (body: string) => string;
   copy: (text: string, label: string) => void;
   notes: string;
@@ -462,6 +574,7 @@ function EmailPanel({
   onProcessed: () => void;
   onReceived: () => void;
   pending: boolean;
+  onChangeProvider: (providerId: string) => void;
 }) {
   const [body, setBody] = useState(initialBody);
   const [activeTab, setActiveTab] = useState<"initial" | "followup">("initial");
@@ -472,13 +585,20 @@ function EmailPanel({
     <div className="space-y-3 rounded-md border border-border bg-card p-4">
       {/* Recipient resolution */}
       <div className="rounded-md bg-muted/30 border border-border p-3">
-        <p className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground mb-2">
-          Recipient (resolved from Provider Directory)
-        </p>
+        <div className="flex items-center justify-between mb-2 gap-2">
+          <p className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground">
+            Recipient (resolved from Provider Directory)
+          </p>
+          <ProviderPicker
+            currentProviderId={provider?.id ?? null}
+            onPick={onChangeProvider}
+            disabled={pending}
+          />
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
           <div>
             <p className="text-[10px] uppercase text-muted-foreground">Provider</p>
-            <p className="text-foreground">{provider?.name ?? "Unknown — add to directory"}</p>
+            <p className="text-foreground">{provider?.name ?? "No provider linked — use 'Change provider' to select one."}</p>
           </div>
           <div>
             <p className="text-[10px] uppercase text-muted-foreground">Department</p>
@@ -502,7 +622,7 @@ function EmailPanel({
             {usingFallback && (
               <p className="text-[11px] text-warning mt-1">
                 {planRef
-                  ? "No routing rule matched the policy prefix — using general provider email."
+                  ? "No ceding-team email on file — using the general provider email."
                   : "No policy reference — using general provider email."}
               </p>
             )}
@@ -540,11 +660,6 @@ function EmailPanel({
           <a href={buildOutlookWebUrl(body)} target="_blank" rel="noreferrer">
             <Mail className="h-4 w-4" /> Open in Outlook Web
             <ExternalLink className="h-3.5 w-3.5" />
-          </a>
-        </Button>
-        <Button asChild variant="outline" className="gap-1.5">
-          <a href={buildMailto(body)}>
-            <Mail className="h-4 w-4" /> Open in desktop mail
           </a>
         </Button>
         <Button variant="outline" onClick={() => copy(body, "Body")} className="gap-1.5">

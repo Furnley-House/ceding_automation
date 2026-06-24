@@ -15,8 +15,9 @@ import {
 import { toast } from "sonner";
 import { checklistApi, casesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
-import { useChecklistFields } from "@/hooks/useChecklistFields";
+import { useChecklistFields, isMissing } from "@/hooks/useChecklistFields";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
+import { FundDetailsTable } from "./FundDetailsTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -54,39 +55,77 @@ export function ApprovalWorkspace({ caseItem }: Props) {
   const [bulkReviewText, setBulkReviewText] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
 
+  // Use the template (filtered by showIf) as the canonical set of fields —
+  // matches Extract & Fill Gaps and Review Checklist. Counting raw DB rows
+  // pulls in stale/legacy fields and inflates "missing".
+  const byKey = useMemo(() => {
+    const m = new Map<string, ChecklistRow>();
+    rows.forEach((r) => { if (r.field_key) m.set(r.field_key, r); });
+    return m;
+  }, [rows]);
+
+  const visibleFields = useMemo(
+    () =>
+      template.filter((f) => {
+        if (!f.showIf) return true;
+        const dependent = byKey.get(f.showIf.key)?.value;
+        return dependent ? f.showIf.in.includes(dependent) : false;
+      }),
+    [template, byKey],
+  );
+
   const stats = useMemo(() => {
     let approved = 0,
       review = 0,
       pending = 0,
       missing = 0;
-    rows.forEach((r) => {
-      if (r.status === "approved") approved++;
-      else if (r.status === "review_requested") review++;
-      else if (!r.value) missing++;
+    visibleFields.forEach((f) => {
+      const r = byKey.get(f.key);
+      if (r?.status === "approved") approved++;
+      else if (r?.status === "review_requested") review++;
+      else if (isMissing(r)) missing++;
       else pending++;
     });
-    return { approved, review, pending, missing, total: rows.length };
-  }, [rows]);
+    return { approved, review, pending, missing, total: visibleFields.length };
+  }, [visibleFields, byKey]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return rows.filter((r) => {
-      if (filter === "approved" && r.status !== "approved") return false;
-      if (filter === "review" && r.status !== "review_requested") return false;
-      if (filter === "missing" && r.value) return false;
-      if (filter === "pending") {
-        if (r.status === "approved" || r.status === "review_requested" || !r.value) return false;
-      }
-      if (q) {
-        return (
-          r.label.toLowerCase().includes(q) ||
-          (r.value ?? "").toLowerCase().includes(q) ||
-          (r.section ?? "").toLowerCase().includes(q)
-        );
-      }
-      return true;
-    });
-  }, [rows, filter, search]);
+    // Iterate templated fields so the list matches the stats above.
+    // Synthesise a placeholder row for template fields that have no DB row
+    // yet, so they show up under the "Missing" filter.
+    return visibleFields
+      .map((f) => {
+        const r = byKey.get(f.key);
+        if (r) return r;
+        return {
+          id: `__placeholder__${f.key}`,
+          case_id: caseItem.id,
+          field_key: f.key,
+          label: f.label,
+          section: f.section,
+          value: null,
+          confidence: "MISSING",
+          status: "missing",
+        } as ChecklistRow;
+      })
+      .filter((r) => {
+        if (filter === "approved" && r.status !== "approved") return false;
+        if (filter === "review" && r.status !== "review_requested") return false;
+        if (filter === "missing" && !isMissing(r)) return false;
+        if (filter === "pending") {
+          if (r.status === "approved" || r.status === "review_requested" || isMissing(r)) return false;
+        }
+        if (q) {
+          return (
+            r.label.toLowerCase().includes(q) ||
+            (r.value ?? "").toLowerCase().includes(q) ||
+            (r.section ?? "").toLowerCase().includes(q)
+          );
+        }
+        return true;
+      });
+  }, [visibleFields, byKey, filter, search, caseItem.id]);
 
   const grouped = useMemo(() => {
     const m = new Map<string, ChecklistRow[]>();
@@ -116,7 +155,7 @@ export function ApprovalWorkspace({ caseItem }: Props) {
   const bulkApprove = useMutation({
     mutationFn: async () => {
       const targets = rows.filter(
-        (r) => selected.has(r.id) && !!r.value && r.status !== "approved",
+        (r) => selected.has(r.id) && !isMissing(r) && r.status !== "approved",
       );
       if (targets.length === 0) {
         throw new Error("No eligible fields selected (must have a value and not already approved).");
@@ -132,6 +171,22 @@ export function ApprovalWorkspace({ caseItem }: Props) {
     onError: (e: Error) => toast.error("Approve failed", { description: e.message }),
   });
 
+  // Placeholder rows (no DB row yet) carry an id like `__placeholder__<key>`.
+  // Approving / requesting review needs a real id, so materialise the row
+  // via the seed endpoint first.
+  const materialiseIfPlaceholder = async (row: ChecklistRow): Promise<string> => {
+    if (!row.id.startsWith("__placeholder__")) return row.id;
+    const tpl = template.find((t) => t.key === row.field_key);
+    const res = await checklistApi.seedField(caseItem.id, {
+      fieldKey: row.field_key,
+      label: tpl?.label ?? row.label ?? row.field_key,
+      section: tpl?.section ?? row.section ?? "General",
+      value: null,
+    });
+    const seeded = res.data as { id: string };
+    return seeded.id;
+  };
+
   const singleAction = useMutation({
     mutationFn: async ({
       row,
@@ -142,10 +197,11 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       action: "approve" | "request_review";
       notes?: string;
     }) => {
+      const fieldId = await materialiseIfPlaceholder(row);
       if (action === "approve") {
-        await checklistApi.approveField(caseItem.id, row.id);
+        await checklistApi.approveField(caseItem.id, fieldId);
       } else {
-        await checklistApi.requestReview(caseItem.id, row.id, notes ?? "");
+        await checklistApi.requestReview(caseItem.id, fieldId, notes ?? "");
       }
     },
     onSuccess: (_, vars) => {
@@ -175,10 +231,9 @@ export function ApprovalWorkspace({ caseItem }: Props) {
 
   const markCaseApproved = useMutation({
     mutationFn: async () => {
-      // Gate: every templated field must be approved
-      const requiredKeys = template.map((t) => t.key);
-      const byKey = new Map(rows.map((r) => [r.field_key, r]));
-      const notApproved = requiredKeys.filter((k) => byKey.get(k)?.status !== "approved");
+      // Gate: every visible templated field must be approved (skip fields
+      // hidden by showIf so they don't block sign-off).
+      const notApproved = visibleFields.filter((f) => byKey.get(f.key)?.status !== "approved");
       if (notApproved.length > 0) {
         throw new Error(`${notApproved.length} field${notApproved.length === 1 ? " is" : "s are"} not yet approved.`);
       }
@@ -357,6 +412,10 @@ export function ApprovalWorkspace({ caseItem }: Props) {
           ))}
         </div>
       )}
+
+      {/* Fund Details — read-only at Approval. Paraplanner reviews the
+          extracted/edited fund rows alongside the scalar fields. */}
+      <FundDetailsTable caseId={caseItem.id} readOnly />
 
       {/* Sign-off gate */}
       <div

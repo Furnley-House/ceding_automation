@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Missing Data Resolution — ProviderHub</title>
+<meta name="viewport" content="width=1440" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0D1B2A;
+    --navy-2: #16263a;
+    --navy-line: #25364a;
+    --teal: #00C2CB;
+    --teal-deep: #009ba3;
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --line: #e6eaf0;
+    --line-2: #eef1f5;
+    --ink: #0D1B2A;
+    --ink-2: #2c3a4a;
+    --ink-3: #6a7686;
+    --ink-4: #9ba6b4;
+    --good: #15a36b;
+    --warn: #ea580c;
+    --bad: #dc2626;
+    --info: #2563eb;
+    --bad-soft: #fdecec;
+    --warn-soft: #fef3ec;
+    --good-soft: #e7f6ee;
+    --info-soft: #e7eefd;
+    --r: 8px;
+    --r-lg: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, select { font-family: inherit; }
+
+  /* APP */
+  .app { display: grid; grid-template-columns: 240px 1fr; height: 100vh; overflow: hidden; }
+
+  /* SIDEBAR */
+  .sb { background: var(--navy); color: #cfd6df; display: flex; flex-direction: column; }
+  .sb-logo { display: flex; align-items: center; gap: 10px; padding: 22px 22px 18px; border-bottom: 1px solid var(--navy-line); }
+  .sb-logo-mark { width: 30px; height: 30px; border-radius: 7px; background: var(--teal); display: grid; place-items: center; color: var(--navy); font-weight: 700; font-size: 13px; }
+  .sb-logo-name { font-weight: 700; color: #fff; font-size: 15px; letter-spacing: -0.01em; }
+  .sb-logo-name b { color: var(--teal); font-weight: 700; }
+
+  .sb-nav { padding: 14px 12px; display: flex; flex-direction: column; gap: 2px; flex: 1; }
+  .sb-item { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-radius: var(--r); color: #97a4b4; font-size: 14px; font-weight: 500; cursor: default; }
+  .sb-item:hover { background: rgba(255,255,255,0.04); color: #fff; }
+  .sb-item.active { background: rgba(0,194,203,0.12); color: #fff; box-shadow: inset 2px 0 0 var(--teal); }
+  .sb-item svg { width: 18px; height: 18px; flex-shrink: 0; opacity: 0.85; }
+  .sb-foot { border-top: 1px solid var(--navy-line); padding: 14px 18px; display: flex; align-items: center; gap: 10px; }
+  .sb-avatar { width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg,#f59e0b,#dc2626); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 12px; }
+  .sb-foot-meta { font-size: 12px; line-height: 1.3; }
+  .sb-foot-name { color: #fff; font-weight: 600; }
+  .sb-foot-role { color: #6f7d90; font-size: 11px; }
+
+  /* MAIN */
+  .main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+
+  .top { display: flex; align-items: center; gap: 14px; padding: 18px 32px; background: var(--surface); border-bottom: 1px solid var(--line); flex-shrink: 0; }
+  .top-title { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  .top-sub { font-size: 13px; color: var(--ink-3); margin-top: 2px; }
+  .top-meta { display: flex; align-items: center; gap: 8px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--bg); color: var(--ink-2); border: 1px solid var(--line); }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+
+  .btn { height: 36px; padding: 0 14px; border-radius: var(--r); border: 1px solid var(--line); background: #fff; color: var(--ink); font-size: 13px; font-weight: 500; cursor: default; display: inline-flex; align-items: center; gap: 6px; transition: background .12s; }
+  .btn:hover { background: var(--bg); }
+  .btn svg { width: 14px; height: 14px; }
+  .btn.primary { background: var(--navy); color: #fff; border-color: var(--navy); }
+  .btn.primary:hover { background: var(--navy-2); }
+  .btn.teal { background: var(--teal); color: var(--navy); border-color: var(--teal); font-weight: 600; }
+  .btn.call { color: var(--teal-deep); border-color: var(--teal); background: #fff; font-weight: 600; }
+  .btn.call:hover { background: rgba(0,194,203,0.06); }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--ink-3); }
+  .btn.ghost:hover { background: var(--bg); color: var(--ink); }
+  .btn.sm { height: 30px; padding: 0 10px; font-size: 12px; }
+
+  /* PHASE STRIP — minimal */
+  .phase-bar { display: flex; gap: 4px; padding: 10px 32px; background: var(--surface); border-bottom: 1px solid var(--line); align-items: center; flex-shrink: 0; }
+  .phase-tab { padding: 8px 14px; font-size: 13px; font-weight: 500; color: var(--ink-3); background: transparent; border: 0; border-radius: var(--r); display: inline-flex; align-items: center; gap: 8px; cursor: default; }
+  .phase-tab:hover { color: var(--ink); }
+  .phase-tab.active { background: var(--ink); color: #fff; font-weight: 600; }
+  .phase-tab .num { font-size: 11px; opacity: 0.7; }
+  .phase-tab.active .num { opacity: 1; }
+  .phase-divider { color: var(--ink-4); font-size: 12px; padding: 0 4px; }
+
+  /* CONTENT */
+  .content { flex: 1; overflow-y: auto; padding: 32px; min-height: 0; }
+  .content-narrow { max-width: 1040px; margin: 0 auto; }
+
+  .page-head { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 22px; }
+  .page-head h1 { font-size: 26px; font-weight: 700; margin: 0; letter-spacing: -0.02em; }
+  .page-head p { margin: 6px 0 0; color: var(--ink-3); font-size: 14px; max-width: 560px; }
+
+  .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
+  .field-select { height: 38px; padding: 0 14px; border: 1px solid var(--line); border-radius: var(--r); background: #fff; font-size: 13px; min-width: 280px; display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; cursor: default; color: var(--ink); }
+  .field-select small { color: var(--ink-3); font-weight: 400; }
+
+  /* Section card */
+  .section { background: #fff; border: 1px solid var(--line); border-radius: var(--r-lg); margin-bottom: 14px; overflow: hidden; }
+  .section-head { padding: 16px 20px; border-bottom: 1px solid var(--line-2); display: flex; align-items: center; gap: 8px; }
+  .section-head h3 { margin: 0; font-size: 15px; font-weight: 700; flex: 1; }
+  .section-head h3.bad { color: var(--bad); }
+  .section-head h3.warn { color: var(--warn); }
+  .section-head h3.good { color: var(--good); }
+  .section-head .count { font-size: 13px; color: var(--ink-3); font-weight: 500; }
+
+  /* Field row */
+  .row { display: grid; grid-template-columns: 220px 1fr auto auto; gap: 12px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--line-2); }
+  .row:last-child { border-bottom: none; }
+  .row-label { font-size: 13px; color: var(--ink-2); font-weight: 500; }
+  .row-label small { color: var(--ink-4); font-weight: 400; display: block; font-size: 11px; margin-top: 1px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .row-input { height: 40px; padding: 0 14px; border: 1px solid var(--line); border-radius: var(--r); background: #fff; font-size: 14px; color: var(--ink); width: 100%; }
+  .row-input:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 3px rgba(0,194,203,0.15); }
+  .row-input.placeholder { color: var(--ink-4); }
+  .row-input.has-value { background: var(--bg); }
+  .row-conf { font-size: 11px; padding: 4px 8px; border-radius: 4px; font-weight: 600; min-width: 64px; text-align: center; }
+  .row-conf.high { background: var(--good-soft); color: var(--good); }
+  .row-conf.med { background: var(--warn-soft); color: var(--warn); }
+  .row-conf.low { background: var(--bad-soft); color: var(--bad); }
+  .row-conf.none { background: var(--bg); color: var(--ink-4); }
+
+  /* Source quote (collapsible-feeling, very subtle) */
+  .row-evidence { grid-column: 1 / -1; margin-top: 6px; font-size: 12px; color: var(--ink-3); padding: 8px 12px; background: var(--bg); border-left: 2px solid var(--line); border-radius: 0 var(--r) var(--r) 0; line-height: 1.5; display: flex; align-items: flex-start; gap: 8px; }
+  .row-evidence b { color: var(--ink-2); background: rgba(0,194,203,0.18); padding: 0 2px; border-radius: 2px; font-weight: 500; }
+  .row-evidence .src { font-size: 11px; color: var(--ink-4); }
+
+  /* Script (Phase 2) */
+  .script { background: #fff; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 28px 32px; }
+  .script-greeting { font-size: 15px; line-height: 1.7; color: var(--ink-2); padding-bottom: 18px; border-bottom: 1px solid var(--line-2); margin-bottom: 22px; }
+  .script-greeting b { color: var(--ink); font-weight: 600; background: rgba(0,194,203,0.16); padding: 0 3px; border-radius: 2px; }
+  .script-section-h { font-size: 11px; color: var(--ink-4); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 10px; }
+  .q-row { display: flex; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--line-2); }
+  .q-row:last-child { border-bottom: none; }
+  .q-num { width: 26px; height: 26px; border-radius: 50%; background: var(--bg); color: var(--ink-3); display: grid; place-items: center; font-size: 12px; font-weight: 600; flex-shrink: 0; }
+  .q-text { flex: 1; }
+  .q-text .text { font-size: 14px; line-height: 1.55; color: var(--ink); }
+  .q-text .for { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+  .q-text .for b { color: var(--ink-2); font-weight: 500; }
+
+  /* Live transcript (Phase 3) */
+  .call-card { background: #fff; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+  .call-head { padding: 16px 20px; border-bottom: 1px solid var(--line-2); display: flex; align-items: center; gap: 12px; }
+  .call-head .rec { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .call-head .timer { font-size: 13px; color: var(--ink-3); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .call-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .stream { padding: 16px 20px; max-height: 480px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+  .utter { display: flex; flex-direction: column; gap: 4px; }
+  .utter .who { font-size: 11px; color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+  .utter .bub { font-size: 14px; line-height: 1.55; color: var(--ink); padding: 10px 14px; background: var(--bg); border-radius: var(--r); max-width: 80%; }
+  .utter.ca { align-items: flex-end; }
+  .utter.ca .bub { background: var(--ink); color: #fff; }
+  .utter .extracted { font-size: 12px; color: var(--good); display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; padding: 4px 10px; background: var(--good-soft); border-radius: 999px; max-width: max-content; font-weight: 500; }
+  .utter .extracted b { color: var(--good); font-weight: 600; }
+
+  /* Right summary panel (Phase 3 + 4) */
+  .two-col { display: grid; grid-template-columns: 1fr 320px; gap: 20px; }
+  .summary { background: #fff; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 20px; }
+  .summary h4 { margin: 0 0 14px; font-size: 13px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em; }
+  .summary-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; }
+  .summary-row:last-child { border-bottom: none; }
+  .summary-row .lbl { color: var(--ink-3); }
+  .summary-row .val { font-weight: 600; color: var(--ink); }
+  .summary-row .val.good { color: var(--good); }
+
+  /* Done view */
+  .done-card { background: var(--ink); color: #fff; border-radius: var(--r-lg); padding: 36px 32px; text-align: center; }
+  .done-card .ico { width: 56px; height: 56px; margin: 0 auto 18px; border-radius: 50%; background: var(--teal); color: var(--ink); display: grid; place-items: center; }
+  .done-card h2 { margin: 0 0 8px; font-size: 22px; font-weight: 700; }
+  .done-card p { margin: 0; color: rgba(255,255,255,0.72); font-size: 14px; line-height: 1.6; max-width: 460px; margin: 0 auto; }
+  .done-stats { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-top: 26px; }
+  .done-stat { background: rgba(255,255,255,0.06); padding: 14px; border-radius: var(--r); }
+  .done-stat .num { font-size: 22px; font-weight: 700; color: #fff; }
+  .done-stat .lbl { font-size: 11px; color: rgba(255,255,255,0.55); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+  /* Empty */
+  .empty { padding: 40px; text-align: center; color: var(--ink-3); font-size: 13px; }
+
+  .visually-hidden { position: absolute; left: -9999px; }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script type="text/babel" src="tweaks-panel.jsx"></script>
+  <script type="text/babel" src="icons.jsx"></script>
+  <script type="text/babel" src="data.jsx"></script>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+      "phase": "triage",
+      "showSourceQuotes": true
+    }/*EDITMODE-END*/;
+
+    const PHASES = [
+      { id: 'triage', num: 1, label: 'Triage' },
+      { id: 'script', num: 2, label: 'AI Script' },
+      { id: 'live', num: 3, label: 'Live Call' },
+      { id: 'review', num: 4, label: 'Apply' },
+      { id: 'done', num: 5, label: 'Hand Off' },
+    ];
+
+    const Sidebar = () => (
+      <aside className="sb">
+        <div className="sb-logo">
+          <div className="sb-logo-mark">P</div>
+          <div className="sb-logo-name">Provider<b>Hub</b></div>
+        </div>
+        <nav className="sb-nav">
+          <SbItem icon="home" label="Dashboard" />
+          <SbItem icon="cases" label="Cases" />
+          <SbItem icon="inbox" label="Document Inbox" />
+          <SbItem icon="list" label="Ceding Checklist" />
+          <SbItem icon="alertTri" label="Missing Data" active />
+          <SbItem icon="building" label="Provider Directory" />
+          <SbItem icon="zap" label="Automations" />
+          <SbItem icon="phone" label="Call Assist" />
+          <SbItem icon="building" label="Founder View" />
+        </nav>
+        <div className="sb-foot">
+          <div className="sb-avatar">PR</div>
+          <div className="sb-foot-meta">
+            <div className="sb-foot-name">Priya Ramesh</div>
+            <div className="sb-foot-role">CA Team · Chennai</div>
+          </div>
+        </div>
+      </aside>
+    );
+
+    const SbItem = ({ icon, label, active }) => (
+      <div className={'sb-item' + (active ? ' active' : '')}>
+        <Icon name={icon} size={18} />
+        <span>{label}</span>
+      </div>
+    );
+
+    const TopBar = () => (
+      <div className="top">
+        <div style={{ flex: 1 }}>
+          <div className="top-title">Missing Data Resolution</div>
+          <div className="top-sub">{CASE.client} · {CASE.provider} {CASE.planType} · <span style={{ fontFamily: 'monospace' }}>{CASE.plan}</span></div>
+        </div>
+        <div className="top-meta">
+          <div className="pill warn"><Icon name="alertTri" size={12}/>SLA 1d</div>
+          <button className="btn"><Icon name="doc" size={14}/>View PDF</button>
+        </div>
+      </div>
+    );
+
+    const PhaseBar = ({ phase, setPhase }) => (
+      <div className="phase-bar">
+        {PHASES.map((p, i) => (
+          <React.Fragment key={p.id}>
+            <button className={'phase-tab' + (phase === p.id ? ' active' : '')} onClick={() => setPhase(p.id)}>
+              <span className="num">{p.num}.</span>{p.label}
+            </button>
+            {i < PHASES.length - 1 && <span className="phase-divider">→</span>}
+          </React.Fragment>
+        ))}
+      </div>
+    );
+
+    const FieldRow = ({ f, mode }) => {
+      const conf = !f.value ? 'none' : f.confidence === 'high' ? 'high' : f.confidence === 'medium' ? 'med' : 'low';
+      const confLabel = !f.value ? '—' : f.conf + '%';
+      return (
+        <>
+          <div className="row">
+            <div className="row-label">
+              {f.label}
+              <small>{f.section}</small>
+            </div>
+            <input
+              className={'row-input ' + (f.value ? 'has-value' : 'placeholder')}
+              defaultValue={f.value || ''}
+              placeholder="Enter value"
+            />
+            <span className={'row-conf ' + conf}>{confLabel}</span>
+            {f.status === 'missing' || f.status === 'review' ? (
+              <button className="btn call"><Icon name="phone" size={13}/>Call</button>
+            ) : (
+              <span style={{ fontSize: 12, color: 'var(--good)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4, padding: '0 10px' }}>
+                <Icon name="check" size={13}/>Approved
+              </span>
+            )}
+          </div>
+        </>
+      );
+    };
+
+    /* ---------- PHASE 1: TRIAGE ---------- */
+    const TriageView = ({ t }) => {
+      const missing = FIELDS.filter(f => f.status === 'missing');
+      const review = FIELDS.filter(f => f.status === 'review');
+      const done = FIELDS.filter(f => f.status === 'done');
+
+      return (
+        <div className="content-narrow">
+          <div className="page-head">
+            <div>
+              <h1>Resolve missing data</h1>
+              <p>AI extracted {FIELDS.length} fields from the Aviva statement. {missing.length} need values; {review.length} need review.</p>
+            </div>
+            <button className="btn primary">Generate AI script <Icon name="arrowR" size={13}/></button>
+          </div>
+
+          <div className="toolbar">
+            <div className="field-select">
+              <span><b>{CASE.client}</b> <small>· {CASE.ref}</small></span>
+              <Icon name="chevR" size={14} style={{ transform: 'rotate(90deg)', color: 'var(--ink-4)' }}/>
+            </div>
+          </div>
+
+          <div className="section">
+            <div className="section-head">
+              <h3 className="bad">Missing Fields</h3>
+              <span className="count">({missing.length})</span>
+            </div>
+            {missing.map(f => <FieldRow key={f.id} f={f}/>)}
+          </div>
+
+          <div className="section">
+            <div className="section-head">
+              <h3 className="warn">Needs Review</h3>
+              <span className="count">({review.length})</span>
+            </div>
+            {review.map(f => <FieldRow key={f.id} f={f}/>)}
+          </div>
+
+          <div className="section">
+            <div className="section-head">
+              <h3 className="good">Approved</h3>
+              <span className="count">({done.length})</span>
+            </div>
+            {done.slice(0, 3).map(f => <FieldRow key={f.id} f={f}/>)}
+          </div>
+        </div>
+      );
+    };
+
+    /* ---------- PHASE 2: AI SCRIPT ---------- */
+    const ScriptView = ({ setPhase }) => (
+      <div className="content-narrow">
+        <div className="page-head">
+          <div>
+            <h1>AI Question Script</h1>
+            <p>Generated from {FIELDS.filter(f => f.askOnCall).length} open fields. Estimated 4 min call to {CASE.provider} pensions servicing.</p>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn"><Icon name="refresh" size={13}/>Regenerate</button>
+            <button className="btn primary" onClick={() => setPhase('live')}><Icon name="phoneCall" size={13}/>Start call</button>
+          </div>
+        </div>
+
+        <div className="script">
+          <div className="script-greeting" dangerouslySetInnerHTML={{ __html: '"' + SCRIPT.opener + '"' }} />
+
+          {SCRIPT.sections.map(sec => (
+            <div key={sec.title} style={{ marginBottom: 22 }}>
+              <div className="script-section-h">{sec.title}</div>
+              {sec.questions.map((q, i) => (
+                <div key={q.id} className="q-row">
+                  <div className="q-num">{i + 1}</div>
+                  <div className="q-text">
+                    <div className="text">{q.text}</div>
+                    <div className="for">→ Fills <b>{FIELDS.find(f => f.id === q.linksTo)?.label}</b></div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+
+          <div className="script-greeting" style={{ borderTop: '1px solid var(--line-2)', borderBottom: 'none', paddingTop: 18, paddingBottom: 0, marginBottom: 0, marginTop: 8 }}
+               dangerouslySetInnerHTML={{ __html: '"' + SCRIPT.closing + '"' }} />
+        </div>
+      </div>
+    );
+
+    /* ---------- PHASE 3: LIVE CALL ---------- */
+    const LiveCallView = ({ setPhase }) => {
+      const [stream, setStream] = useState([]);
+      const [secs, setSecs] = useState(0);
+      const [extracted, setExtracted] = useState({});
+      const streamRef = useRef(null);
+
+      useEffect(() => {
+        let i = 0;
+        const next = () => {
+          if (i >= TRANSCRIPT_STREAM.length) return;
+          const u = TRANSCRIPT_STREAM[i];
+          setStream(s => [...s, u]);
+          if (u.extracted) setExtracted(e => ({ ...e, [u.extracted.fieldId]: u.extracted }));
+          i++;
+          setTimeout(next, 1700);
+        };
+        const start = setTimeout(next, 600);
+        const tick = setInterval(() => setSecs(s => s + 1), 1000);
+        return () => { clearTimeout(start); clearInterval(tick); };
+      }, []);
+      useEffect(() => { if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight; }, [stream]);
+
+      const fmt = (s) => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+      const open = FIELDS.filter(f => f.askOnCall);
+      const filledCount = Object.keys(extracted).length;
+
+      return (
+        <div className="content-narrow">
+          <div className="page-head">
+            <div>
+              <h1>Live call · Aviva Pensions Servicing</h1>
+              <p>Transcript is auto-recorded. Extracted answers populate the checklist below.</p>
+            </div>
+            <button className="btn" style={{ background: '#fdecec', borderColor: '#fdecec', color: 'var(--bad)' }} onClick={() => setPhase('review')}>
+              <Icon name="phoneOff" size={13}/>End call
+            </button>
+          </div>
+
+          <div className="two-col">
+            <div className="call-card">
+              <div className="call-head">
+                <span className="rec"></span>
+                <h3>Live transcript</h3>
+                <span className="timer">REC {fmt(secs)}</span>
+              </div>
+              <div className="stream" ref={streamRef}>
+                {stream.length === 0 && <div className="empty">Connecting…</div>}
+                {stream.map((u, i) => (
+                  <div key={i} className={'utter ' + u.side}>
+                    <div className="who">{u.who}</div>
+                    <div className="bub">{u.text}</div>
+                    {u.extracted && (
+                      <div className="extracted">
+                        <Icon name="check" size={12}/>
+                        <span><b>{FIELDS.find(f => f.id === u.extracted.fieldId)?.label}:</b> {u.extracted.value}</span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="summary">
+              <h4>Filling in</h4>
+              {open.map(f => (
+                <div key={f.id} className="summary-row">
+                  <span className="lbl">{f.label}</span>
+                  {extracted[f.id] ? (
+                    <span className="val good">{extracted[f.id].value}</span>
+                  ) : (
+                    <span className="val" style={{ color: 'var(--ink-4)', fontWeight: 400 }}>…</span>
+                  )}
+                </div>
+              ))}
+              <div style={{ marginTop: 14, fontSize: 12, color: 'var(--ink-3)', textAlign: 'center' }}>
+                {filledCount}/{open.length} answered
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    /* ---------- PHASE 4: APPLY FINDINGS ---------- */
+    const ReviewView = ({ setPhase }) => {
+      const updated = FIELDS.filter(f => f.askOnCall);
+      return (
+        <div className="content-narrow">
+          <div className="page-head">
+            <div>
+              <h1>Apply call findings</h1>
+              <p>The transcript was processed. {updated.length} fields have proposed values from the call. Review and approve.</p>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn">Discard</button>
+              <button className="btn primary" onClick={() => setPhase('done')}><Icon name="check" size={13}/>Approve all</button>
+            </div>
+          </div>
+
+          <div className="section">
+            <div className="section-head">
+              <h3>Proposed updates</h3>
+              <span className="count">({updated.length} fields)</span>
+            </div>
+            {updated.map(f => (
+              <div key={f.id} className="row" style={{ gridTemplateColumns: '220px 1fr 140px auto' }}>
+                <div className="row-label">{f.label}<small>{f.section}</small></div>
+                <input className="row-input has-value" defaultValue={
+                  f.id === 'f1' ? '0.45%' :
+                  f.id === 'f2' ? 'FAD, UFPLS, In-house annuity, OMO annuity' :
+                  f.id === 'f3' ? 'Lump sum at fund value; beneficiary drawdown available' :
+                  f.id === 'f4' ? '£127,450.32' :
+                  f.id === 'f5' ? '£127,450.32 (no MVR)' :
+                  f.id === 'f7' ? 'No — confirmed' :
+                  f.id === 'f8' ? '0.00% — bundled' : f.value
+                }/>
+                <span className="row-conf high">94%</span>
+                <button className="btn sm primary"><Icon name="check" size={12}/>Approve</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    /* ---------- PHASE 5: DONE ---------- */
+    const DoneView = ({ setPhase }) => (
+      <div className="content-narrow" style={{ maxWidth: 600 }}>
+        <div className="done-card">
+          <div className="ico"><Icon name="check" size={28}/></div>
+          <h2>Case ready for adviser</h2>
+          <p>All {FIELDS.length} checklist fields for {CASE.client}'s {CASE.planType} are complete and routed to Sarah Khan.</p>
+          <div className="done-stats">
+            <div className="done-stat"><div className="num">{FIELDS.length}</div><div className="lbl">Fields</div></div>
+            <div className="done-stat"><div className="num">04:21</div><div className="lbl">Call time</div></div>
+            <div className="done-stat"><div className="num" style={{ color: 'var(--teal)' }}>96%</div><div className="lbl">Avg conf.</div></div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 24 }}>
+            <button className="btn ghost" style={{ color: 'rgba(255,255,255,0.8)' }} onClick={() => setPhase('triage')}>Start over</button>
+            <button className="btn teal">Open next case <Icon name="arrowR" size={13}/></button>
+          </div>
+        </div>
+      </div>
+    );
+
+    /* ---------- APP ---------- */
+    const App = () => {
+      const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+      const phase = t.phase;
+      const setPhase = (p) => setTweak('phase', p);
+
+      return (
+        <>
+          <div className="app">
+            <Sidebar/>
+            <div className="main">
+              <TopBar/>
+              <PhaseBar phase={phase} setPhase={setPhase}/>
+              <div className="content">
+                {phase === 'triage' && <TriageView t={t}/>}
+                {phase === 'script' && <ScriptView setPhase={setPhase}/>}
+                {phase === 'live' && <LiveCallView setPhase={setPhase}/>}
+                {phase === 'review' && <ReviewView setPhase={setPhase}/>}
+                {phase === 'done' && <DoneView setPhase={setPhase}/>}
+              </div>
+            </div>
+          </div>
+
+          <TweaksPanel className="tweaks-panel-fixed" title="Tweaks">
+            <TweakSection title="Flow phase">
+              <TweakSelect label="Phase" value={t.phase} onChange={v => setTweak('phase', v)}
+                options={PHASES.map(p => ({ value: p.id, label: `${p.num} · ${p.label}` }))}/>
+            </TweakSection>
+            <TweakSection title="Display">
+              <TweakToggle label="Show source quotes" value={t.showSourceQuotes} onChange={v => setTweak('showSourceQuotes', v)}/>
+            </TweakSection>
+          </TweaksPanel>
+        </>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  </script>
+</body>
+</html>

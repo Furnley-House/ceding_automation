@@ -2,7 +2,10 @@ export interface CaseRow {
   id: string;
   case_ref: string;
   client_name: string;
-  provider_name: string;
+  Provider_group: string;
+  Plan_Number: string;
+  provider_phone_main?: string;
+  provider_phone_ceding?: string;
   provider_id?: string | null;
   plan_number: string;
   plan_type: string;
@@ -14,6 +17,8 @@ export interface CaseRow {
   rag?: string | null;
   owner_name?: string | null;
   owner_id?: string | null;
+  paraplanner_id?: string | null;
+  paraplanner_name?: string | null;
   current_value?: string | null;
   transfer_value?: string | null;
   case_notes?: string | null;
@@ -70,13 +75,20 @@ export const STATUS_STYLES: Record<string, string> = {
   ceding_in_progress: "bg-primary/15 text-primary",
 };
 
+/**
+ * Plan-type dropdown options. `value` matches the backend Prisma `PlanType`
+ * enum (PENSION / ISA / GIA / …); `label` is the user-facing display string.
+ * Form submissions must send `value`, not `label`.
+ */
+// Phase 1 supports three plan types: Pension, ISA, GIA. "Personal Pension"
+// is a *sub-type* (handled separately via PlanSubType), not a plan type.
 export const PLAN_TYPES = [
-  "ISA",
-  "GIA",
-  "Personal Pension",
+  { label: "Pension", value: "PENSION" },
+  { label: "ISA", value: "ISA" },
+  { label: "GIA", value: "GIA" },
 ] as const;
 
-export type PlanType = (typeof PLAN_TYPES)[number];
+export type PlanType = (typeof PLAN_TYPES)[number]["value"];
 
 export type Rag = "red" | "amber" | "green";
 

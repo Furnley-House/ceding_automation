@@ -92,7 +92,7 @@ const Cases = () => {
         setSearchParams(next, { replace: true });
 
         if (caseId) {
-          // Navigate directly to the case detail — whether new or existing.
+          qc.invalidateQueries({ queryKey: ["case", caseId] });
           navigate(`/cases/${caseId}`, { replace: true });
         } else {
           qc.invalidateQueries({ queryKey: ["cases"] });
@@ -110,8 +110,8 @@ const Cases = () => {
 
   const [form, setForm] = useState({
     client_name: "",
-    provider_name: "",
-    plan_type: "Personal Pension",
+    Provider_group: "",
+    plan_type: "PENSION",
     plan_number: "",
     zoho_task_id: "",
     case_notes: "",
@@ -124,7 +124,7 @@ const Cases = () => {
     onSuccess: (newCase) => {
       qc.invalidateQueries({ queryKey: ["cases"] });
       setDialogOpen(false);
-      setForm({ client_name: "", provider_name: "", plan_type: "Personal Pension", plan_number: "", zoho_task_id: "", case_notes: "" });
+      setForm({ client_name: "", Provider_group: "", plan_type: "PENSION", plan_number: "", zoho_task_id: "", case_notes: "" });
       toast.success("Case created", { description: `${newCase.case_ref} — ${newCase.client_name}` });
       navigate(`/cases/${newCase.id}`);
     },
@@ -133,20 +133,20 @@ const Cases = () => {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.client_name || !form.provider_name || !form.plan_number) {
+    if (!form.client_name || !form.Provider_group || !form.plan_number) {
       toast.error("Client, provider, and policy reference are required.");
       return;
     }
     createMutation.mutate({
       case_ref: generateCaseRef(form.plan_type),
       client_name: form.client_name,
-      provider_name: form.provider_name,
+      provider_name: form.Provider_group,
       plan_number: form.plan_number,
       plan_type: form.plan_type,
       status: "pending_loa",
       owner_name: userName ?? null,
-      zoho_task_id: form.zoho_task_id || null,
-      case_notes: form.case_notes || null,
+      ...(form.zoho_task_id ? { zoho_task_id: form.zoho_task_id } : {}),
+      ...(form.case_notes ? { case_notes: form.case_notes } : {}),
       current_stage: 1,
     } as any);
   };
@@ -175,7 +175,10 @@ const Cases = () => {
         { id: t, description: ref },
       );
       qc.invalidateQueries({ queryKey: ["cases"] });
-      if (importedCase?.id) navigate(`/cases/${importedCase.id}`, { replace: false });
+      if (importedCase?.id) {
+        qc.invalidateQueries({ queryKey: ["case", importedCase.id] });
+        navigate(`/cases/${importedCase.id}`, { replace: false });
+      }
     } catch (e) {
       toast.error("Import failed", {
         id: t,
@@ -197,7 +200,7 @@ const Cases = () => {
       }
       if (planFilter !== "all" && c.plan_type !== planFilter) return false;
       if (ragFilter !== "all" && calculateRag(c) !== ragFilter) return false;
-      if (q && !`${c.client_name} ${c.provider_name} ${c.plan_number} ${c.case_ref}`.toLowerCase().includes(q))
+      if (q && !`${c.client_name} ${c.Provider_group} ${c.plan_number} ${c.case_ref}`.toLowerCase().includes(q))
         return false;
       return true;
     });
@@ -235,8 +238,8 @@ const Cases = () => {
                     <Input id="client_name" value={form.client_name} onChange={(e) => setForm((f) => ({ ...f, client_name: e.target.value }))} placeholder="e.g. James Richardson" required />
                   </div>
                   <div className="space-y-1.5">
-                    <Label htmlFor="provider_name">Provider *</Label>
-                    <Input id="provider_name" value={form.provider_name} onChange={(e) => setForm((f) => ({ ...f, provider_name: e.target.value }))} placeholder="e.g. Aviva" required />
+                    <Label htmlFor="Provider_group">Provider *</Label>
+                    <Input id="Provider_group" value={form.Provider_group} onChange={(e) => setForm((f) => ({ ...f, Provider_group: e.target.value }))} placeholder="e.g. Aviva" required />
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
@@ -248,8 +251,8 @@ const Cases = () => {
                       </SelectTrigger>
                       <SelectContent>
                         {PLAN_TYPES.map((t) => (
-                          <SelectItem key={t} value={t}>
-                            {t}
+                          <SelectItem key={t.value} value={t.value}>
+                            {t.label}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -304,8 +307,8 @@ const Cases = () => {
         <FilterSelect value={planFilter} onChange={setPlanFilter} placeholder="Plan type">
           <SelectItem value="all">All plan types</SelectItem>
           {PLAN_TYPES.map((p) => (
-            <SelectItem key={p} value={p}>
-              {p}
+            <SelectItem key={p.value} value={p.value}>
+              {p.label}
             </SelectItem>
           ))}
         </FilterSelect>
@@ -372,7 +375,7 @@ const Cases = () => {
                       </div>
                       <p className="text-[11px] text-muted-foreground font-normal mt-0.5">{c.case_ref}</p>
                     </td>
-                    <td className="px-4 py-3 text-muted-foreground">{c.provider_name}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{c.Provider_group}</td>
                     <td className="px-4 py-3 text-muted-foreground">{c.plan_type}</td>
                     <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{c.plan_number}</td>
                     <td className="px-4 py-3">

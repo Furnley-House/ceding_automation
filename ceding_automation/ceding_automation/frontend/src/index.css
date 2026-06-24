@@ -1,71 +1,78 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@300;400;500;600;700&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
-  /* ===== Furnley House — Dark navy primary, teal accent ===== */
+  /* ===== Furnley House — Brand palette (FH Branding brochure v1.0) ===== */
+  /* Furnley Blue #253746 · Aqua #63B1BC · Light Blue #426DA9 · Purple #8C4799
+     Red #CB333B · Gold #FFB81C · Green #B7BF10 · Mid Green #56C271 · Grey #888B8D */
   :root,
   [data-theme="furnley"],
   [data-theme="ocean"] {
-    --background: 210 20% 98%;
-    --foreground: 215 50% 11%;
+    --background: 220 11% 97%;
+    --foreground: 209 30% 21%;
     --card: 0 0% 100%;
-    --card-foreground: 215 50% 11%;
+    --card-foreground: 209 30% 21%;
     --popover: 0 0% 100%;
-    --popover-foreground: 215 50% 11%;
-    /* Primary: Furnley dark navy #0D1B2A */
-    --primary: 213 53% 11%;
+    --popover-foreground: 209 30% 21%;
+    /* Primary: Furnley Blue #253746 */
+    --primary: 209 30% 21%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 18% 94%;
-    --secondary-foreground: 215 50% 11%;
-    --muted: 210 14% 95%;
-    --muted-foreground: 215 14% 46%;
-    /* Accent: Teal/cyan #00C2CB */
-    --accent: 184 100% 95%;
-    --accent-foreground: 184 100% 25%;
-    --destructive: 0 72% 51%;
+    --secondary: 220 9% 93%;
+    --secondary-foreground: 209 30% 21%;
+    --muted: 210 11% 94%;
+    --muted-foreground: 210 2% 55%;
+    /* Accent: Furnley Aqua #63B1BC */
+    --accent: 188 22% 92%;
+    --accent-foreground: 189 32% 29%;
+    --destructive: 357 60% 50%;
     --destructive-foreground: 0 0% 100%;
-    --border: 214 20% 90%;
-    --input: 214 20% 90%;
-    --ring: 184 100% 40%;
-    --radius: 0.5rem;
+    --border: 216 9% 90%;
+    --input: 216 9% 90%;
+    --ring: 188 36% 56%;
+    --radius: 0.625rem;
 
-    --success: 152 60% 40%;
+    /* Furnley Mid Green #56C271 */
+    --success: 134 47% 55%;
     --success-foreground: 0 0% 100%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 38 92% 14%;
-    --info: 184 100% 40%;
+    /* Furnley Gold #FFB81C */
+    --warning: 42 100% 55%;
+    --warning-foreground: 30 100% 10%;
+    /* Furnley Light Blue #426DA9 */
+    --info: 215 43% 46%;
     --info-foreground: 0 0% 100%;
-    --overdue: 0 72% 51%;
+    /* Furnley Red #CB333B */
+    --overdue: 357 60% 50%;
     --overdue-foreground: 0 0% 100%;
 
-    /* Furnley teal */
-    --teal: 184 100% 40%;
-    --teal-foreground: 0 0% 100%;
+    /* Furnley Aqua */
+    --teal: 188 36% 56%;
+    --teal-foreground: 209 30% 21%;
 
-    --sidebar-background: 213 53% 11%;
-    --sidebar-foreground: 210 20% 92%;
-    --sidebar-primary: 184 100% 50%;
-    --sidebar-primary-foreground: 213 53% 11%;
-    --sidebar-accent: 213 45% 18%;
+    --sidebar-background: 209 30% 21%;
+    --sidebar-foreground: 210 12% 90%;
+    --sidebar-primary: 188 36% 56%;
+    --sidebar-primary-foreground: 209 30% 21%;
+    --sidebar-accent: 209 27% 26%;
     --sidebar-accent-foreground: 0 0% 100%;
-    --sidebar-border: 213 40% 22%;
-    --sidebar-ring: 184 100% 50%;
-    --sidebar-muted: 213 40% 16%;
+    --sidebar-border: 209 26% 30%;
+    --sidebar-ring: 188 36% 56%;
+    --sidebar-muted: 209 26% 17%;
 
-    --confidence-high: 152 60% 40%;
-    --confidence-medium: 38 92% 50%;
-    --confidence-low: 0 72% 51%;
+    /* Confidence: Mid Green / Gold / Red */
+    --confidence-high: 134 47% 55%;
+    --confidence-medium: 42 100% 55%;
+    --confidence-low: 357 60% 50%;
 
-    --chart-1: 213 53% 25%;
-    --chart-2: 184 100% 40%;
-    --chart-3: 38 92% 50%;
-    --chart-4: 152 60% 40%;
-    --chart-5: 0 72% 51%;
+    --chart-1: 209 30% 21%;
+    --chart-2: 188 36% 56%;
+    --chart-3: 42 100% 55%;
+    --chart-4: 65 85% 41%;
+    --chart-5: 357 60% 50%;
 
-    --card-shadow: 0 1px 3px 0 rgba(13,27,42,0.06);
-    --card-hover-shadow: 0 4px 14px -2px rgba(13,27,42,0.12);
+    --card-shadow: 0 1px 3px 0 rgba(37,55,70,0.06);
+    --card-hover-shadow: 0 4px 14px -2px rgba(37,55,70,0.12);
     --card-border-width: 1px;
     --header-font-weight: 700;
     --badge-radius: 0.375rem;
@@ -271,8 +278,7 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    font-family: 'Quicksand', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   }
 }
 
@@ -372,4 +378,48 @@
     scrollbar-width: thin;
     scrollbar-color: hsl(var(--border)) transparent;
   }
+}
+
+/* ===== Furnley House — High Contrast accessibility mode =====
+   Activated by data-contrast="high" on <html> (set by useHighContrast).
+   Overrides CSS variable tokens so every Tailwind utility (text-muted-foreground,
+   text-teal, etc.) inherits the fix automatically — no per-component changes needed.
+   Contrast ratios verified against WCAG 2.1 AA (≥ 4.5:1) on white / near-white
+   backgrounds. Brand fills (buttons, badges, status dots, stepper circles) are
+   intentionally unchanged — only text and icon colours shift.
+   Specificity: :root[...] = (0,2,0) beats any single attribute theme selector (0,1,0). */
+
+:root[data-contrast="high"] {
+  /* Muted labels — ocean default was 210 2% 55% (~3.4:1), others 215 14% 46% (~4.3:1).
+     New value #52606E → 6:1 on white. */
+  --muted-foreground: 210 15% 38%;
+
+  /* Body / value text — darkened slightly across all themes for ≥ 13:1. */
+  --foreground: 209 30% 12%;
+  --card-foreground: 209 30% 12%;
+  --popover-foreground: 209 30% 12%;
+  --secondary-foreground: 210 23% 29%;
+
+  /* Aqua used as text/icon — was #63B1BC (2.3:1), now #2F7C88 (4.6:1).
+     Sidebar uses --sidebar-primary, not --teal, so sidebar fills are unaffected. */
+  --teal: 188 49% 36%;
+}
+
+/* Success text (e.g. "Linked", "Complete") — targeted override so badge
+   background fills remain on the original green. #1C7A3E → 4.6:1 on white. */
+:root[data-contrast="high"] .text-success {
+  color: hsl(142 63% 29%) !important;
+}
+
+/* Warning text (e.g. "Awaiting Documents" labels). #8A5A00 → 4.7:1 on white. */
+:root[data-contrast="high"] .text-warning {
+  color: hsl(39 100% 27%) !important;
+}
+
+/* Boost tiny uppercase labels — biggest legibility win for low-vision users. */
+:root[data-contrast="high"] .meta-label,
+:root[data-contrast="high"] .field-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
 }

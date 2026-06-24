@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import { useChecklistFields } from "@/hooks/useChecklistFields";
+import { getProviders } from "@/services/api";
+import { useChecklistFields, isMissing, fundDetailsStatus } from "@/hooks/useChecklistFields";
+import { useFundLines } from "@/hooks/useFundLines";
 import { getTemplate } from "@/lib/checklistTemplates";
-import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +24,9 @@ import {
   PhoneCall,
   Wifi,
   WifiOff,
+  Copy,
+  Volume2,
+  CloudUpload,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -40,7 +44,9 @@ interface Props {
   clientName: string;
   providerName: string;
   planNumber: string;
-  providerPhone?: string; // pre-populated from Provider Directory
+  providerPhone?: string;
+  providerPhoneMain?: string;
+  providerPhoneCeding?: string;
 }
 
 interface CallScript {
@@ -66,6 +72,13 @@ type CallPhase =
   | "dialling"
   | "connected"
   | "ended";
+
+interface ProviderOption {
+  id: string;
+  name: string;
+  phone_main?: string;
+  phone_ceding_dept?: string;
+}
 
 const SAMPLE_TRANSCRIPT = `[CA — Priya] Good morning, this is Priya Ramesh calling from Furnley House on behalf of our client Eleanor Whitmore regarding plan AV-PP-55021. We have an LOA on file dated 2 April. Can you confirm a few outstanding items please?
 
@@ -101,15 +114,47 @@ export function CallWorkspace({
   providerName,
   planNumber,
   providerPhone = "",
+  providerPhoneMain = "",
 }: Props) {
-  const { role } = useRole();
   const template = useMemo(() => getTemplate(planType), [planType]);
   const { rows, refresh } = useChecklistFields({ caseId, template });
 
   // ── RingCentral config state ──────────────────────────────────────────
   const [rcConfigured, setRcConfigured] = useState<boolean | null>(null);
   const [agentPhone, setAgentPhone] = useState<string | null>(null);
-  const [dialNumber, setDialNumber] = useState(providerPhone);
+  const [selectedPhone, setSelectedPhone] = useState(providerPhoneMain || providerPhone);
+
+  // ── Provider directory ────────────────────────────────────────────────
+  const [providers, setProviders] = useState<ProviderOption[]>([]);
+  const [selectedProviderId, setSelectedProviderId] = useState<string>("");
+
+  useEffect(() => {
+    getProviders()
+      .then((data) => {
+        const list = (data as Record<string, unknown>[])
+          .map((p) => ({
+            id: p.id as string,
+            name: (p.name as string) || "",
+            phone_main: p.phone_main as string | undefined,
+            phone_ceding_dept: p.phone_ceding_dept as string | undefined,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setProviders(list);
+        if (providerName) {
+          const match = list.find(
+            (p) => p.name.toLowerCase() === providerName.toLowerCase()
+          );
+          if (match) {
+            setSelectedProviderId(match.id);
+            setSelectedPhone(match.phone_main || providerPhoneMain || "");
+          }
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const activeProvider = providers.find((p) => p.id === selectedProviderId);
 
   // ── Script state ──────────────────────────────────────────────────────
   const [script, setScript] = useState<CallScript | null>(null);
@@ -122,6 +167,58 @@ export function CallWorkspace({
   const [callStartedAt, setCallStartedAt] = useState<number | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [transcript, setTranscript] = useState("");
+
+  // ── RC Embeddable widget state ────────────────────────────────────────
+  const [rcLoggedIn, setRcLoggedIn] = useState(false);
+  const [rcTranscriptStatus, setRcTranscriptStatus] = useState<
+    "idle" | "fetching" | "done" | "unavailable"
+  >("idle");
+
+  // ── RC Recordings panel ───────────────────────────────────────────────
+  interface RcRecording {
+    id: string;
+    sessionId: string;
+    startTime: string;
+    duration: number;
+    direction: string;
+    from: { phoneNumber: string; name?: string };
+    to: { phoneNumber: string; name?: string };
+    hasRecording: boolean;
+    contentUri?: string;
+  }
+  const [rcRecordings, setRcRecordings] = useState<RcRecording[]>([]);
+  const [rcRecordingsLoading, setRcRecordingsLoading] = useState(false);
+  const [recordingsPanelOpen, setRecordingsPanelOpen] = useState(false);
+  const [rcViewMode, setRcViewMode] = useState<"latest" | "all">("latest");
+  const [fetchingTranscriptFor, setFetchingTranscriptFor] = useState<string | null>(null);
+  const [manualSessionId, setManualSessionId] = useState("");
+  const [rcToken, setRcToken] = useState(() => localStorage.getItem("rc-access-token") ?? "");
+  const [rcTokenPanelOpen, setRcTokenPanelOpen] = useState(false);
+
+  // ── WorkDrive recordings (saved calls) ────────────────────────────────
+  interface WorkDriveFile {
+    id: string;
+    name: string;
+    sizeBytes?: number;
+    createdTime?: string;
+    permalink?: string;
+  }
+  const [wdFiles, setWdFiles] = useState<WorkDriveFile[]>([]);
+  const [wdLoading, setWdLoading] = useState(false);
+  const [wdPanelOpen, setWdPanelOpen] = useState(true);
+  const [wdTranscribingId, setWdTranscribingId] = useState<string | null>(null);
+
+  // ── Per-user RingCentral OAuth connection state ─────────────────────────
+  const [rcUserConnected, setRcUserConnected] = useState<boolean>(false);
+  const [rcUserName, setRcUserName] = useState<string | null>(null);
+  const [rcConnecting, setRcConnecting] = useState(false);
+  // Captured from the RC widget's login event — used to auto-map the Ceding user
+  // to whichever extension is currently signed in on the widget. Persisted to
+  // localStorage so Connect still works even when the widget isn't visible on
+  // a manual-call case (no provider selected).
+  const [rcWidgetLoginNumber, setRcWidgetLoginNumber] = useState<string | null>(
+    () => localStorage.getItem("rc-widget-login-number")
+  );
 
   // ── Analysis state ────────────────────────────────────────────────────
   const [analyzing, setAnalyzing] = useState(false);
@@ -141,39 +238,90 @@ export function CallWorkspace({
     return m;
   }, [template]);
 
-  const missingFields = useMemo(
+  // Iterate the TEMPLATE (with showIf conditional filter) rather than the
+  // raw DB rows. Two reasons:
+  //   - Aligns the count with Stage 4 + Stage 6 — was off-by-one before
+  //     because the backend seeds a placeholder ChecklistField row for the
+  //     `fund_lines` table-typed template, which is filtered out of the
+  //     template builder. The vestigial row is now also stripped at the
+  //     normaliseRows layer, but template-driven iteration is the correct
+  //     conceptual model anyway.
+  //   - Respects conditional fields: a field hidden by `showIf` shouldn't
+  //     be asked about on the call.
+  const byKey = useMemo(() => {
+    const m = new Map<string, (typeof rows)[number]>();
+    rows.forEach((r) => { if (r.field_key) m.set(r.field_key, r); });
+    return m;
+  }, [rows]);
+  const visibleTemplate = useMemo(
     () =>
-      rows
-        .filter((r) => r.field_key && (!r.value || r.status === "missing"))
-        .map((r) => ({
-          key: r.field_key!,
-          label: labelByKey.get(r.field_key!)?.label ?? r.field_key!,
-          section: labelByKey.get(r.field_key!)?.section ?? "",
-          hint: labelByKey.get(r.field_key!)?.hint ?? null,
-        })),
-    [rows, labelByKey],
+      template.filter((f) => {
+        if (!f.showIf) return true;
+        const dependent = byKey.get(f.showIf.key)?.value;
+        return dependent ? f.showIf.in.includes(dependent) : false;
+      }),
+    [template, byKey],
   );
 
-  const reviewFields = useMemo(
-    () =>
-      rows
-        .filter(
-          (r) =>
-            r.field_key &&
-            r.value &&
-            (r.confidence === "LOW" || r.status === "review_requested"),
-        )
-        .map((r) => ({
-          key: r.field_key!,
-          label: labelByKey.get(r.field_key!)?.label ?? r.field_key!,
-          section: labelByKey.get(r.field_key!)?.section ?? "",
-          value: r.value ?? "",
-          confidence: (r.confidence as string) ?? "LOW",
-        })),
-    [rows, labelByKey],
-  );
+  // Fund Details — pull rows so we can ask the agent about funds when the
+  // table is empty / incomplete.
+  const { rows: fundLines } = useFundLines(caseId);
+  const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
+
+  const missingFields = useMemo(() => {
+    const list = visibleTemplate
+      .filter((t) => isMissing(byKey.get(t.key)))
+      .map((t) => ({
+        key: t.key,
+        label: t.label,
+        section: t.section,
+        hint: t.hint ?? null,
+      }));
+    // Synthetic Fund Details entry — appears once when the sub-table is
+    // empty (or every row blank). Lets the agent be asked about funds in
+    // the same call without bolting on a separate UI.
+    if (fundStatus === "missing") {
+      list.push({
+        key: "__fund_details__",
+        label: "Fund Details",
+        section: "Fund Details",
+        hint: "Ask the agent for the per-fund breakdown (fund name, ISIN/Sedol, units, price, value, charge).",
+      });
+    }
+    return list;
+  }, [visibleTemplate, byKey, fundStatus]);
+
+  const reviewFields = useMemo(() => {
+    // Switched to template iteration + uppercase confidence match. Status
+    // comes back lowercased via the useChecklistFields adapter.
+    const list = visibleTemplate
+      .map((t) => ({ t, r: byKey.get(t.key) }))
+      .filter(({ r }) => {
+        if (!r || !r.value || isMissing(r)) return false;
+        const c = (r.confidence ?? "").toString().toUpperCase();
+        return c === "LOW" || c === "MEDIUM" || c === "CONFLICT" || r.status === "review_requested";
+      })
+      .map(({ t, r }) => ({
+        key: t.key,
+        label: t.label,
+        section: t.section,
+        value: r!.value ?? "",
+        confidence: ((r!.confidence as string) ?? "LOW").toUpperCase(),
+      }));
+    if (fundStatus === "review") {
+      list.push({
+        key: "__fund_details__",
+        label: "Fund Details",
+        section: "Fund Details",
+        value: "(some rows incomplete or low-confidence)",
+        confidence: "LOW",
+      });
+    }
+    return list;
+  }, [visibleTemplate, byKey, fundStatus]);
 
   const totalQuestions = missingFields.length + reviewFields.length;
+
 
   // ── On mount: check RingCentral config + auto-generate script ─────────
   useEffect(() => {
@@ -185,6 +333,89 @@ export function CallWorkspace({
       .catch(() => setRcConfigured(false));
   }, [caseId]);
 
+  // ── Check whether the logged-in user has connected their own RC account ─
+  const refreshRcUserStatus = async () => {
+    try {
+      const res = await api.get(`/auth/rc/status`);
+      const data = res.data as { connected: boolean; ownerName?: string };
+      setRcUserConnected(data.connected);
+      setRcUserName(data.ownerName ?? null);
+      // If the user isn't connected to RC, make sure no stale recordings are shown
+      if (!data.connected) setRcRecordings([]);
+    } catch {
+      setRcUserConnected(false);
+      setRcRecordings([]);
+    }
+  };
+  useEffect(() => {
+    void refreshRcUserStatus();
+    // If the OAuth landing page sent us back here, refresh status again
+    const handler = (e: StorageEvent) => {
+      if (e.key === "rc-just-connected") void refreshRcUserStatus();
+    };
+    window.addEventListener("storage", handler);
+    return () => window.removeEventListener("storage", handler);
+  }, []);
+
+  interface RcExtensionInfo {
+    id: string;
+    extensionNumber?: string;
+    name: string;
+    email?: string;
+  }
+
+  const connectRingCentral = async () => {
+    if (!rcWidgetLoginNumber) {
+      toast.error("Sign in to the RingCentral widget first", {
+        description: "Open any case with a provider selected, sign in to the widget once — then Connect works everywhere.",
+        duration: 8000,
+      });
+      return;
+    }
+    setRcConnecting(true);
+    // Clear any stale recordings — they may belong to a previously-mapped extension
+    setRcRecordings([]);
+    try {
+      // We pass the RC widget's signed-in extension info so the backend maps THIS user
+      // to whichever extension is currently active on the widget. This means the user
+      // can only map themselves to an account they have RC credentials for — secure.
+      const res = await api.post(`/auth/rc/connect`, {
+        widgetLoginNumber: rcWidgetLoginNumber,
+      });
+      const data = res.data as { matched: boolean; extension?: RcExtensionInfo };
+      if (data.matched && data.extension) {
+        setRcUserConnected(true);
+        setRcUserName(data.extension.name);
+        toast.success(`Connected as ${data.extension.name}`, { description: "Click Load Recordings to see your calls." });
+      }
+    } catch (err: unknown) {
+      const status = (err as any)?.response?.status;
+      const msg = (err as any)?.response?.data?.error ?? (err as Error).message;
+      if (status === 404) {
+        toast.error("Could not match your RC widget login to any extension", {
+          description: msg,
+          duration: 8000,
+        });
+      } else {
+        toast.error("Connect failed", { description: msg });
+      }
+    } finally {
+      setRcConnecting(false);
+    }
+  };
+
+  const disconnectRingCentral = async () => {
+    try {
+      await api.post(`/auth/rc/disconnect`);
+      setRcUserConnected(false);
+      setRcUserName(null);
+      setRcRecordings([]); // Clear data on disconnect
+      toast.success("RingCentral disconnected");
+    } catch (err: unknown) {
+      toast.error("Disconnect failed", { description: (err as any)?.response?.data?.error ?? (err as Error).message });
+    }
+  };
+
   useEffect(() => {
     if (totalQuestions === 0) return;
     const sig = `${caseId}-${missingFields.length}-${reviewFields.length}`;
@@ -193,6 +424,16 @@ export function CallWorkspace({
     void generateScript();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId, missingFields.length, reviewFields.length]);
+
+  // ── Persist RC token to localStorage whenever it changes ─────────────
+  useEffect(() => {
+    if (rcToken.trim()) {
+      localStorage.setItem("rc-access-token", rcToken.trim());
+    } else {
+      localStorage.removeItem("rc-access-token");
+    }
+  }, [rcToken]);
+
 
   // ── Call timer ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -203,9 +444,182 @@ export function CallWorkspace({
     return () => window.clearInterval(id);
   }, [phase, callStartedAt]);
 
-  // ── Ring-out status polling (until connected or terminal state) ───────
+  // ── RC Embeddable widget — load once, hide/show via CSS ──────────────────
   useEffect(() => {
-    if (phase !== "dialling" || !sessionId) return;
+    // Inject a style rule that hides the widget until Start call is clicked.
+    // We give it a known id so we can remove it (= show widget) on demand.
+    if (!document.getElementById("rc-hide-style")) {
+      const s = document.createElement("style");
+      s.id = "rc-hide-style";
+      s.textContent =
+        "#rc-widget, #rc-widget-adapter-frame, [id^='rc-widget']:not(#rc-widget-script) { display: none !important; }";
+      document.head.appendChild(s);
+    }
+
+    // Load the adapter script once; subsequent mounts skip this.
+    if (!document.getElementById("rc-widget-script")) {
+      const script = document.createElement("script");
+      script.id = "rc-widget-script";
+      script.src =
+        "https://apps.ringcentral.com/integration/ringcentral-embeddable/latest/adapter.js";
+      script.async = true;
+      document.body.appendChild(script);
+    }
+
+    const handleRcMessage = (e: MessageEvent) => {
+      const data = e.data as Record<string, unknown> | null;
+      if (!data?.type) return;
+      switch (data.type) {
+        case "rc-login-status-notify":
+          setRcLoggedIn(!!(data.loggedIn));
+          // loginNumber format: "+44116218XXXX*777" where 777 is the extension number
+          if (data.loggedIn && data.loginNumber && typeof data.loginNumber === "string") {
+            const ln = data.loginNumber as string;
+            setRcWidgetLoginNumber(ln);
+            localStorage.setItem("rc-widget-login-number", ln);
+          }
+          if (data.loggedIn === false) {
+            // Don't clear stored loginNumber on widget sign-out — it's still
+            // valid info we can reuse to connect later. Only the DB mapping
+            // matters for actual recording access.
+          }
+          break;
+        // These events only fire when the user is logged in — use them as a
+        // fallback to catch the logged-in state when rc-login-status-notify
+        // fired before our listener was registered (race on first mount).
+        case "rc-dialer-status-notify":
+          if (data.ready !== false) setRcLoggedIn(true);
+          break;
+        case "rc-webphone-connection-status-notify": {
+          const status = data.connectionStatus as string | undefined;
+          if (status === "connectionStatus-connected" || status === "connectionStatus-connecting") {
+            setRcLoggedIn(true);
+          }
+          break;
+        }
+        case "rc-call-init-notify":
+          setPhase("dialling");
+          setElapsedSec(0);
+          break;
+        case "rc-call-start-notify": {
+          const call = data.call as Record<string, unknown> | undefined;
+          const sid = call?.telephonySessionId as string | undefined;
+          setPhase("connected");
+          setCallStartedAt(Date.now());
+          if (sid) setSessionId(sid);
+          toast.success("Call connected", { description: "Both parties are on the line." });
+          break;
+        }
+        case "rc-call-end-notify": {
+          const call = data.call as Record<string, unknown> | undefined;
+          const sid = call?.telephonySessionId as string | undefined;
+          setPhase("ended");
+          if (sid) {
+            setSessionId(sid);
+            void fetchRcTranscript(sid);
+          } else {
+            toast.info("Call ended", {
+              description: "Paste the transcript below, then click Analyse.",
+            });
+          }
+          break;
+        }
+        // Fired continuously while a call is active — use it to capture session IDs
+        // even when the call wasn't initiated via our "Start call" button.
+        case "rc-active-call-notify": {
+          const call = data.call as Record<string, unknown> | undefined;
+          const sid = call?.telephonySessionId as string | undefined;
+          const callStatus = call?.callStatus as string | undefined;
+          if (sid) setSessionId(sid);
+          if (callStatus === "CallConnected" && phase === "idle") {
+            setPhase("connected");
+            setCallStartedAt(Date.now());
+          }
+          break;
+        }
+        // RC widget announces every route change — use it to:
+        // 1. Auto-open the panel when user browses to Recordings tab
+        // 2. Auto-fetch transcript when user clicks a specific recording
+        //    (path becomes /history/recordings/<telephonySessionId>)
+        case "rc-route-changed-notify": {
+          const path = data.path as string | undefined;
+          if (!path) break;
+          if (path === "/history/recordings") {
+            setRecordingsPanelOpen(true);
+            setRcRecordingsLoading(false);
+          }
+          // Specific recording selected — extract session ID from path
+          const match = path.match(/^\/history\/recordings\/(.+)$/);
+          if (match) {
+            const sid = decodeURIComponent(match[1]);
+            setSessionId(sid);
+            setRecordingsPanelOpen(true);
+            toast.info("Loading transcript…", { description: `Session: ${sid}` });
+            void fetchRcTranscript(sid);
+          }
+          break;
+        }
+        // rc-call-log-sync-notify: only fires for new calls needing CRM logging,
+        // not for browsing historical recordings. Keep handler in case it does fire.
+        case "rc-call-log-sync-notify": {
+          const calls = data.calls as Array<Record<string, unknown>> | undefined;
+          if (!calls?.length) break;
+          const recs: RcRecording[] = calls
+            .filter((c) => c.recording)
+            .map((c) => {
+              const rec = c.recording as Record<string, unknown> | undefined;
+              const startMs = c.startTime as number | string | undefined;
+              return {
+                id: (c.id as string) || "",
+                sessionId: (c.telephonySessionId as string) || (c.sessionId as string) || (c.id as string) || "",
+                startTime: startMs ? new Date(startMs as number).toISOString() : "",
+                duration: (c.duration as number) ?? 0,
+                direction: (c.direction as string) ?? "Outbound",
+                from: (c.from as { phoneNumber: string; name?: string }) ?? { phoneNumber: "" },
+                to: (c.to as { phoneNumber: string; name?: string }) ?? { phoneNumber: "" },
+                hasRecording: !!(rec?.contentUri || rec?.uri),
+              };
+            });
+          if (recs.length > 0) {
+            setRcRecordings((prev) => {
+              const existing = new Set(prev.map((r) => r.id));
+              return [...recs.filter((r) => !existing.has(r.id)), ...prev];
+            });
+            setRcRecordingsLoading(false);
+          }
+          break;
+        }
+      }
+    };
+
+    window.addEventListener("message", handleRcMessage);
+    return () => {
+      window.removeEventListener("message", handleRcMessage);
+      // Re-hide the widget when leaving Call Assist.
+      if (!document.getElementById("rc-hide-style")) {
+        const s = document.createElement("style");
+        s.id = "rc-hide-style";
+        s.textContent =
+          "#rc-widget, #rc-widget-adapter-frame, [id^='rc-widget']:not(#rc-widget-script) { display: none !important; }";
+        document.head.appendChild(s);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Auto-populate dial number in widget whenever it changes ───────────
+  useEffect(() => {
+    if (!selectedPhone) return;
+    window.postMessage(
+      { type: "rc-adapter-auto-populate-dial-numbers", dialNumbers: [{ phoneNumber: selectedPhone }] },
+      "*"
+    );
+  }, [selectedPhone]);
+
+  // ── Ring-out status polling (until connected or terminal state) ───────
+  // Only used in non-widget mode (ring-out backend API fallback).
+  useEffect(() => {
+    if (phase !== "dialling" || !sessionId || rcConfigured) return;
 
     pollRef.current = setInterval(async () => {
       try {
@@ -233,6 +647,231 @@ export function CallWorkspace({
     return () => clearInterval(pollRef.current!);
   }, [phase, sessionId, caseId]);
 
+  // ── Fetch transcript from RC AI after call ends ───────────────────────
+  const fetchRcTranscript = async (telephonySessionId: string) => {
+    setRcTranscriptStatus("fetching");
+    const t = toast.loading("Fetching transcript from RingCentral…");
+    try {
+      const res = await api.get(`/cases/${caseId}/calls/rc-transcript`, {
+        params: { telephonySessionId },
+      });
+      const { transcript: text, hasRecording, jobPending } = res.data as {
+        transcript: string | null;
+        hasRecording: boolean;
+        jobPending: boolean;
+      };
+
+      if (text) {
+        setTranscript(text);
+        setRcTranscriptStatus("done");
+        toast.success("Transcript ready", { id: t, description: "Review and click Analyse." });
+      } else if (jobPending) {
+        setRcTranscriptStatus("unavailable");
+        toast.info("Transcript processing", {
+          id: t,
+          description: "RingCentral is still transcribing. Retry in ~30 seconds.",
+        });
+      } else if (hasRecording) {
+        setRcTranscriptStatus("unavailable");
+        toast.warning("Auto-transcription unavailable", {
+          id: t,
+          description: "Recording found but AI transcription isn't enabled on your RC plan. Paste manually.",
+        });
+      } else {
+        setRcTranscriptStatus("unavailable");
+        toast.info("Call ended", {
+          id: t,
+          description: "No recording found yet — wait a moment and retry, or paste the transcript manually.",
+        });
+      }
+    } catch {
+      setRcTranscriptStatus("unavailable");
+      toast.info("Call ended", { id: t, description: "Paste the transcript below, then click Analyse." });
+    }
+  };
+
+  // ── Load recordings — calls RC API directly from browser (token auto-captured) ──
+  const fetchRcRecordings = async () => {
+    setRcRecordingsLoading(true);
+    setRecordingsPanelOpen(true);
+    try {
+      let res: { data: unknown };
+      if (rcConfigured) {
+        // Server has JWT credentials — no user token needed
+        res = await api.get(`/cases/${caseId}/calls/rc-recordings`);
+      } else {
+        // Fall back to manual user token
+        const token = rcToken.trim();
+        if (!token) {
+          setRcRecordingsLoading(false);
+          setRcTokenPanelOpen(true);
+          toast.info("RC token required", { description: "Paste your Bearer token below." });
+          return;
+        }
+        res = await api.get(`/cases/${caseId}/calls/rc-recordings-token`, { params: { rcToken: token } });
+      }
+      const recordings = (res.data as { recordings: RcRecording[] }).recordings;
+      if (recordings.length === 0) {
+        toast.info("No recordings found", { description: "No calls with recordings in your RC account." });
+      } else {
+        setRcRecordings(recordings);
+        setRcTokenPanelOpen(false);
+        toast.success(rcViewMode === "latest" ? "Latest call loaded" : `${recordings.length} call${recordings.length === 1 ? "" : "s"} loaded`);
+      }
+    } catch (err: unknown) {
+      const status = (err as any)?.response?.status;
+      const needsConnect = (err as any)?.response?.data?.needsRcConnect;
+      if (status === 403 && needsConnect) {
+        setRcUserConnected(false);
+        toast.error("Connect your RingCentral account first", { description: "Click 'Connect RingCentral' so your own recordings show here." });
+      } else if (status === 403) {
+        setRcToken("");
+        localStorage.removeItem("rc-access-token");
+        setRcTokenPanelOpen(true);
+        toast.error("RC token expired — paste a fresh one from DevTools");
+      } else {
+        toast.error("Failed to load recordings", { description: (err as any)?.response?.data?.error ?? (err as Error).message });
+      }
+    } finally {
+      setRcRecordingsLoading(false);
+    }
+  };
+
+  // ── WorkDrive: list MP3s already saved in the folder ────────────────────
+  const fetchWorkDriveFiles = async () => {
+    setWdLoading(true);
+    try {
+      const res = await api.get(`/cases/${caseId}/calls/workdrive-recordings`);
+      const files = (res.data as { files: WorkDriveFile[] }).files ?? [];
+      // Show newest first
+      files.sort((a, b) => (b.createdTime ?? "").localeCompare(a.createdTime ?? ""));
+      setWdFiles(files);
+    } catch (err: unknown) {
+      toast.error("Failed to load WorkDrive files", { description: (err as any)?.response?.data?.error ?? (err as Error).message });
+    } finally {
+      setWdLoading(false);
+    }
+  };
+
+  // Auto-load WorkDrive files when the panel opens (no-op if already loaded)
+  useEffect(() => {
+    if (wdPanelOpen && wdFiles.length === 0 && !wdLoading) {
+      void fetchWorkDriveFiles();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wdPanelOpen]);
+
+  // ── Play a WorkDrive file ───────────────────────────────────────────────
+  const playWorkDriveFile = async (file: WorkDriveFile) => {
+    try {
+      const r = await api.get(`/cases/${caseId}/calls/workdrive-audio`, {
+        params: { fileId: file.id },
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(r.data as Blob);
+      const a = document.createElement("a");
+      a.href = url; a.target = "_blank"; a.rel = "noopener"; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch {
+      toast.error("Could not load audio");
+    }
+  };
+
+  // ── Transcribe a WorkDrive file ─────────────────────────────────────────
+  const transcribeWorkDriveFile = async (file: WorkDriveFile) => {
+    setWdTranscribingId(file.id);
+    const t = toast.loading("Transcribing with Azure Whisper…");
+    try {
+      const res = await api.post(`/cases/${caseId}/calls/workdrive-transcribe`, {
+        fileId: file.id,
+        filename: file.name,
+      });
+      const { transcript: text, error } = res.data as { transcript: string | null; error?: string };
+      if (text) {
+        setTranscript(text);
+        setPhase("ended");
+        toast.success("Transcript ready", { id: t, description: "Review and click Analyse." });
+      } else if (error?.includes("not configured")) {
+        toast.warning("Azure Whisper not configured", { id: t, description: "Ask admin to set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env." });
+      } else {
+        toast.warning("Transcription failed", { id: t, description: error ?? "Paste manually." });
+      }
+    } catch (err: unknown) {
+      toast.error("Transcription failed", { id: t, description: (err as any)?.response?.data?.error ?? (err as Error).message });
+    } finally {
+      setWdTranscribingId(null);
+    }
+  };
+
+  // Transcribe a recording via Azure Whisper (backend downloads MP3 + sends to Whisper)
+  const handleUseRecording = async (rec: RcRecording) => {
+    setFetchingTranscriptFor(rec.sessionId);
+
+    // ── Path A: We have the audio file URL — use Azure Whisper ──────────────
+    if (rec.contentUri && (rcConfigured || rcToken.trim())) {
+      const t = toast.loading("Transcribing with Azure Whisper…");
+      try {
+        const res = rcConfigured
+          ? await api.post(`/cases/${caseId}/calls/rc-transcribe`, { contentUri: rec.contentUri })
+          : await api.post(`/cases/${caseId}/calls/rc-transcribe-recording`, { contentUri: rec.contentUri, rcToken: rcToken.trim() });
+        const { transcript: text, error } = res.data as { transcript: string | null; error?: string };
+        if (text) {
+          setTranscript(text);
+          setSessionId(rec.sessionId);
+          setPhase("ended");
+          setRcTranscriptStatus("done");
+          toast.success("Transcript ready", { id: t, description: "Review and click Analyse." });
+        } else {
+          // Azure not configured — tell the user clearly, don't try RC AI STT
+          toast.warning("Azure Whisper not configured", {
+            id: t,
+            description: error?.includes("not configured")
+              ? "Ask your admin to set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env — then transcription will be automatic."
+              : (error ?? "Transcription failed — paste the transcript manually."),
+          });
+        }
+      } catch {
+        toast.error("Transcription failed", { id: t, description: "Paste the transcript manually below." });
+      } finally {
+        setFetchingTranscriptFor(null);
+      }
+      return;
+    }
+
+    // ── Path B: No audio URL — fall back to RC AI STT by session ID ──────────
+    const t = toast.loading("Fetching transcript from RingCentral…");
+    try {
+      const res = await api.get(`/cases/${caseId}/calls/rc-transcript`, {
+        params: { telephonySessionId: rec.sessionId },
+      });
+      const { transcript: text, hasRecording, jobPending } = res.data as {
+        transcript: string | null;
+        hasRecording: boolean;
+        jobPending: boolean;
+      };
+      if (text) {
+        setTranscript(text);
+        setSessionId(rec.sessionId);
+        setPhase("ended");
+        setRcTranscriptStatus("done");
+        toast.success("Transcript loaded", { id: t, description: "Review and click Analyse." });
+      } else if (jobPending) {
+        toast.info("Still transcribing", { id: t, description: "RC is processing. Wait ~30s and try again." });
+      } else if (hasRecording) {
+        toast.warning("No AI transcript available", {
+          id: t,
+          description: "Configure Azure Whisper in .env, or paste the transcript manually.",
+        });
+      } else {
+        toast.info("No recording yet", { id: t, description: "Wait a moment and try again, or paste manually." });
+      }
+    } catch {
+      toast.error("Failed to fetch transcript", { id: t, description: "Paste the transcript manually." });
+    } finally {
+      setFetchingTranscriptFor(null);
+    }
+  };
+
   // ── Script generation ─────────────────────────────────────────────────
   const generateScript = async () => {
     if (totalQuestions === 0) return;
@@ -246,7 +885,7 @@ export function CallWorkspace({
         providerName,
         planNumber,
         planType,
-        providerPhone: dialNumber || undefined,
+        providerPhone: selectedPhone || undefined,
       });
       setScript((res.data as any).script as CallScript);
     } catch (e: any) {
@@ -258,50 +897,43 @@ export function CallWorkspace({
     }
   };
 
-  // ── Start RingCentral call ────────────────────────────────────────────
-  const handleStartCall = async () => {
-    if (!dialNumber.trim()) {
-      toast.error("Enter the provider phone number to dial");
+  // ── Start call — via RC Embeddable widget (or demo fallback) ─────────
+  const handleStartCall = () => {
+    if (!selectedPhone.trim()) {
+      toast.error("Select a provider phone number to dial");
       return;
     }
 
-    if (!rcConfigured) {
-      // Dev / demo mode — simulate call
-      setPhase("connected");
-      setCallStartedAt(Date.now());
-      setElapsedSec(0);
-      toast.info("Demo mode: simulating call", {
-        description:
-          "Configure RINGCENTRAL_JWT + RINGCENTRAL_AGENT_PHONE in .env for production dialling.",
-      });
-      return;
-    }
-
-    setPhase("dialling");
+    const number = selectedPhone.trim();
+    // Show the widget (remove the CSS hide rule), then navigate to dialer and dial.
+    document.getElementById("rc-hide-style")?.remove();
+    window.postMessage({ type: "rc-adapter-navigate-to", path: "/dialer" }, "*");
+    window.postMessage(
+      { type: "rc-adapter-auto-populate-dial-numbers", dialNumbers: [{ phoneNumber: number }] },
+      "*"
+    );
+    window.postMessage({ type: "rc-adapter-new-call", phoneNumber: number, toCall: true }, "*");
     setElapsedSec(0);
-    try {
-      const res = await api.post(`/cases/${caseId}/calls/ring-out`, { toPhone: dialNumber });
-      setSessionId((res.data as any).id);
-      toast.info("Dialling…", {
-        description: `Your phone (***${agentPhone}) will ring first, then connect to ${providerName}.`,
+    setRcTranscriptStatus("idle");
+    if (!rcLoggedIn) {
+      toast.info("Sign in to RingCentral", {
+        description: "Sign in via the widget (bottom-right), then click Start call again.",
       });
-    } catch (e: any) {
-      setPhase("idle");
-      const msg = e?.response?.data?.error ?? e?.message ?? "Failed to start call";
-      toast.error("Call failed", { description: msg });
     }
   };
 
   // ── End / cancel call ─────────────────────────────────────────────────
-  const handleEndCall = async () => {
-    setPhase("ended");
-    if (sessionId) {
-      try {
-        await api.delete(`/cases/${caseId}/calls/ring-out/${sessionId}`);
-      } catch {
-        // best-effort
-      }
+  const handleEndCall = () => {
+    if (rcConfigured && sessionId) {
+      // Ask the widget to hang up; rc-call-end-notify will fire and handle state.
+      window.postMessage(
+        { type: "rc-adapter-control-call", callAction: "hangup", telephonySessionId: sessionId },
+        "*"
+      );
+      return;
     }
+    // Demo / non-widget fallback
+    setPhase("ended");
     toast.info("Call ended", { description: "Paste or review the transcript below, then click Analyse." });
   };
 
@@ -420,6 +1052,7 @@ export function CallWorkspace({
   const isCallActive = phase === "dialling" || phase === "connected";
 
   return (
+    <div className="space-y-4">
     <div className="grid gap-4 lg:grid-cols-[1fr,1.4fr]">
       {/* ── LEFT: Outstanding fields ─── */}
       <div className="rounded-md border border-border bg-card overflow-hidden">
@@ -606,24 +1239,89 @@ export function CallWorkspace({
           </div>
 
           <div className="p-3 space-y-3">
-            {/* Dial number input */}
-            <div className="flex gap-2 items-center">
-              <div className="relative flex-1">
-                <Phone className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                <input
-                  type="tel"
-                  value={dialNumber}
-                  onChange={(e) => setDialNumber(e.target.value)}
-                  placeholder="+44 provider phone number"
-                  disabled={isCallActive}
-                  className="w-full pl-8 pr-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
-                />
+            {/* Provider selector + phone numbers */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+                  Provider
+                </p>
+                {rcConfigured && agentPhone && (
+                  <span className="text-[10px] text-muted-foreground">calling from {agentPhone}</span>
+                )}
               </div>
-              {rcConfigured && agentPhone && (
-                <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                  from {agentPhone}
-                </span>
-              )}
+              <select
+                value={selectedProviderId}
+                onChange={(e) => {
+                  const pid = e.target.value;
+                  setSelectedProviderId(pid);
+                  const prov = providers.find((p) => p.id === pid);
+                  setSelectedPhone(prov?.phone_main || "");
+                }}
+                disabled={isCallActive || providers.length === 0}
+                className="w-full px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50 cursor-pointer"
+              >
+                <option value="">
+                  {providers.length === 0 ? "Loading providers…" : "— Select provider —"}
+                </option>
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+
+              {/* Phone number cards for selected provider */}
+              {activeProvider && (activeProvider.phone_main || activeProvider.phone_ceding_dept) ? (
+                <div className="flex flex-col gap-1.5 pt-0.5">
+                  {(["phone_main", "phone_ceding_dept"] as const).map((field) => {
+                    const number = activeProvider[field];
+                    if (!number) return null;
+                    const label = field === "phone_main" ? "Main" : "Ceding Dept";
+                    return (
+                      <div
+                        key={field}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => !isCallActive && setSelectedPhone(number)}
+                        onKeyDown={(e) => e.key === "Enter" && !isCallActive && setSelectedPhone(number)}
+                        className={`flex items-center justify-between px-3 py-2 rounded-md border transition-colors select-none ${
+                          isCallActive ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+                        } ${
+                          selectedPhone === number
+                            ? "border-primary/60 bg-primary/5"
+                            : "border-border bg-background hover:border-primary/30"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <Phone className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                          <div>
+                            <p className="text-[10px] text-muted-foreground uppercase tracking-wider leading-none mb-0.5">
+                              {label}
+                            </p>
+                            <p className="text-sm font-mono font-medium text-foreground">{number}</p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void navigator.clipboard
+                              .writeText(number)
+                              .then(() => toast.success("Copied to clipboard"));
+                          }}
+                          className="h-7 w-7 flex items-center justify-center rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : activeProvider ? (
+                <p className="text-xs text-muted-foreground italic pt-0.5">
+                  No phone numbers on file for {activeProvider.name}.
+                </p>
+              ) : null}
             </div>
 
             {/* Action buttons */}
@@ -640,7 +1338,11 @@ export function CallWorkspace({
                   ) : (
                     <Phone className="h-3.5 w-3.5 mr-1.5" />
                   )}
-                  {rcConfigured ? "Start call via RingCentral" : "Start call (demo)"}
+                  {rcConfigured
+                    ? rcLoggedIn
+                      ? "Dial via RingCentral"
+                      : "Start call (sign in to RC widget)"
+                    : "Start call (demo)"}
                 </Button>
               ) : (
                 <Button size="sm" variant="destructive" onClick={handleEndCall}>
@@ -648,6 +1350,20 @@ export function CallWorkspace({
                   End call
                 </Button>
               )}
+
+              {/* Open RC dialpad — for manual calls where the provider isn't in the directory */}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  document.getElementById("rc-hide-style")?.remove();
+                  window.postMessage({ type: "rc-adapter-navigate-to", path: "/dialer" }, "*");
+                }}
+                title="Open the RC dialpad to manually enter a number"
+              >
+                <Phone className="h-3.5 w-3.5 mr-1.5" />
+                Open dialpad
+              </Button>
 
               <Button
                 size="sm"
@@ -674,26 +1390,425 @@ export function CallWorkspace({
               </Button>
             </div>
 
+            {rcTranscriptStatus === "fetching" && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground py-1">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                Fetching transcript from RingCentral…
+              </div>
+            )}
+
             <Textarea
               value={transcript}
               onChange={(e) => setTranscript(e.target.value)}
               placeholder={
-                rcConfigured
-                  ? "Transcript will appear here automatically once the call ends (via Palindrome STT).\nYou can also paste or edit it manually."
+                rcLoggedIn
+                  ? "Transcript will appear here automatically after the call ends.\nYou can also paste or edit it manually."
                   : "Paste the call transcript here, then click 'Analyse & propose updates'."
               }
               className="min-h-[180px] text-xs font-mono"
-              disabled={phase === "dialling"}
+              disabled={phase === "dialling" || rcTranscriptStatus === "fetching"}
             />
 
-            {rcConfigured && (
-              <p className="text-[10px] text-muted-foreground">
-                <span className="text-success font-medium">● Live</span> — RingCentral records the
-                call → Palindrome transcribes → transcript appears here automatically after hang-up.
-              </p>
-            )}
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              {rcLoggedIn && rcTranscriptStatus === "idle" && phase !== "ended" && (
+                <p className="text-[10px] text-muted-foreground">
+                  <span className="text-success font-medium">● Connected</span> — transcript fetched
+                  automatically from RingCentral after hang-up.
+                </p>
+              )}
+              {rcTranscriptStatus === "done" && (
+                <p className="text-[10px] text-success font-medium">
+                  ✓ Transcript generated from recording
+                </p>
+              )}
+              {/* Show fetch button if RC widget is logged in and we have a session ID,
+                  regardless of whether the call was started via our button */}
+              {rcLoggedIn && sessionId && rcTranscriptStatus !== "fetching" && rcTranscriptStatus !== "done" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  onClick={() => void fetchRcTranscript(sessionId)}
+                >
+                  <RefreshCw className="h-3 w-3 mr-1.5" />
+                  Fetch transcript from RC
+                </Button>
+              )}
+              {/* Fallback: RC logged in but no session yet — prompt user to make a call */}
+              {rcLoggedIn && !sessionId && phase === "ended" && (
+                <p className="text-[10px] text-muted-foreground">
+                  No RC session captured — paste the transcript manually above.
+                </p>
+              )}
+            </div>
           </div>
         </div>
+      </div>
+    </div>{/* end grid */}
+
+    {/* ── RC Recordings panel ─── */}
+    <div className="rounded-md border border-border bg-card overflow-hidden">
+        <div
+          className="px-3 py-2 border-b border-border bg-muted/40 flex items-center justify-between cursor-pointer"
+          onClick={() => setRecordingsPanelOpen((v) => !v)}
+        >
+          <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground flex items-center gap-1.5">
+            <PhoneCall className="h-3.5 w-3.5 text-primary" />
+            RC Recordings
+            <span className="ml-1 text-[10px] font-normal normal-case tracking-normal text-muted-foreground">
+              ({rcViewMode === "latest" ? "latest call" : `all calls${rcRecordings.length > 0 ? " · " + rcRecordings.length : ""}`})
+            </span>
+          </h4>
+          <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+            {rcUserConnected ? (
+              <span className="flex items-center gap-1.5 text-[10px] text-success font-semibold normal-case tracking-normal" title={rcUserName ? `Connected as ${rcUserName}` : "Connected"}>
+                <Wifi className="h-3 w-3" />
+                {rcUserName ? rcUserName.split(" ")[0] : "Connected"}
+                <button
+                  type="button"
+                  onClick={() => void disconnectRingCentral()}
+                  className="ml-0.5 text-[9px] text-muted-foreground hover:text-overdue underline"
+                  title="Disconnect RingCentral"
+                >
+                  disconnect
+                </button>
+              </span>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                disabled={rcConnecting}
+                onClick={() => void connectRingCentral()}
+              >
+                {rcConnecting ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Wifi className="h-3 w-3 mr-1" />}
+                Connect RingCentral
+              </Button>
+            )}
+            <select
+              value={rcViewMode}
+              onChange={(e) => setRcViewMode(e.target.value as "latest" | "all")}
+              className="h-7 text-xs px-2 rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer"
+              title="Choose how many recordings to show"
+            >
+              <option value="latest">Latest call</option>
+              <option value="all">All calls</option>
+            </select>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={rcRecordingsLoading || !rcUserConnected}
+              onClick={() => void fetchRcRecordings()}
+              title={rcUserConnected ? "Load your RC recordings" : "Connect RingCentral first"}
+            >
+              {rcRecordingsLoading ? (
+                <Loader2 className="h-3 w-3 animate-spin mr-1" />
+              ) : (
+                <RefreshCw className="h-3 w-3 mr-1" />
+              )}
+              Load Recordings
+            </Button>
+            <ChevronRight
+              className={`h-3.5 w-3.5 text-muted-foreground transition-transform cursor-pointer ${recordingsPanelOpen ? "rotate-90" : ""}`}
+              onClick={() => setRecordingsPanelOpen((v) => !v)}
+            />
+          </div>
+        </div>
+
+        {recordingsPanelOpen && (
+          <div className="p-3 space-y-3">
+            {/* Token status / input — only shown when server JWT is not configured */}
+            {!rcConfigured && (
+              rcToken && !rcTokenPanelOpen ? (
+                <div className="flex items-center justify-between px-3 py-1.5 rounded-md border border-border bg-muted/20">
+                  <span className="text-[11px] text-success font-semibold">● RC token saved</span>
+                  <button type="button" className="text-[10px] text-muted-foreground hover:text-foreground underline" onClick={() => setRcTokenPanelOpen(true)}>
+                    Change
+                  </button>
+                </div>
+              ) : rcTokenPanelOpen ? (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="password"
+                    value={rcToken}
+                    onChange={(e) => setRcToken(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && rcToken.trim()) { setRcTokenPanelOpen(false); void fetchRcRecordings(); } }}
+                    placeholder="Paste RC Bearer token (DevTools → Network → any platform.ringcentral.com request → Authorization header)"
+                    className="flex-1 px-3 py-1.5 text-xs rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary font-mono"
+                    autoFocus
+                  />
+                  <Button size="sm" className="h-7 text-xs shrink-0" disabled={!rcToken.trim()} onClick={() => { setRcTokenPanelOpen(false); void fetchRcRecordings(); }}>
+                    Load
+                  </Button>
+                </div>
+              ) : null
+            )}
+
+            {/* Manual session ID fallback */}
+            {/* <div className="space-y-1">
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Or fetch by session ID</p>
+              <div className="flex gap-2 items-center">
+                <input
+                  type="text"
+                  value={manualSessionId}
+                  onChange={(e) => setManualSessionId(e.target.value)}
+                  placeholder="Paste RC telephony session ID…"
+                  className="flex-1 px-3 py-1.5 text-xs rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs shrink-0"
+                  disabled={!manualSessionId.trim() || fetchingTranscriptFor === manualSessionId}
+                  onClick={() => {
+                    const sid = manualSessionId.trim();
+                    setSessionId(sid);
+                    setFetchingTranscriptFor(sid);
+                    void handleUseRecording({ id: sid, sessionId: sid, startTime: "", duration: 0, direction: "Outbound", from: { phoneNumber: "" }, to: { phoneNumber: "" }, hasRecording: true });
+                  }}
+                >
+                  {fetchingTranscriptFor === manualSessionId ? (
+                    <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                  ) : (
+                    <FileText className="h-3 w-3 mr-1" />
+                  )}
+                  Fetch transcript
+                </Button>
+              </div>
+            </div> */}
+
+            {rcRecordingsLoading && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                Loading recordings from RingCentral…
+              </div>
+            )}
+            {rcRecordings.length > 0 && (
+              <ul className={`space-y-1.5 ${rcViewMode === "all" ? "max-h-[320px] overflow-y-auto" : ""}`}>
+                <li className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold pb-0.5">
+                  {rcViewMode === "latest" ? "Most recent call" : `All calls (${rcRecordings.length})`}
+                </li>
+                {(rcViewMode === "latest" ? rcRecordings.slice(0, 1) : rcRecordings).map((rec) => {
+                  const dt = new Date(rec.startTime);
+                  const dateStr = dt.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+                  const timeStr = dt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+                  const mins = Math.floor(rec.duration / 60);
+                  const secs = rec.duration % 60;
+                  const durStr = `${mins}:${String(secs).padStart(2, "0")}`;
+                  const isFetching = fetchingTranscriptFor === rec.sessionId;
+                  const callerLabel = rec.direction === "Outbound"
+                    ? rec.to.name || rec.to.phoneNumber
+                    : rec.from.name || rec.from.phoneNumber;
+
+                  return (
+                    <li
+                      key={rec.id}
+                      className="flex items-center justify-between gap-3 px-3 py-2 rounded-md border border-border bg-background hover:border-primary/30 transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Phone className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-foreground truncate">{callerLabel}</p>
+                          <p className="text-[10px] text-muted-foreground">
+                            {dateStr} · {timeStr} · {durStr}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {/* Play audio — proxied through backend so RC token is never exposed */}
+                        {rec.contentUri && (rcConfigured || rcToken) && (
+                          <button
+                            type="button"
+                            title="Play recording in browser"
+                            onClick={async () => {
+                              try {
+                                const params = rcConfigured
+                                  ? { contentUri: rec.contentUri }
+                                  : { contentUri: rec.contentUri, rcToken: rcToken.trim() };
+                                const r = await api.get(`/cases/${caseId}/calls/rc-recording-audio`, { params, responseType: "blob" });
+                                const url = URL.createObjectURL(r.data as Blob);
+                                const a = document.createElement("a");
+                                a.href = url; a.target = "_blank"; a.rel = "noopener"; a.click();
+                                setTimeout(() => URL.revokeObjectURL(url), 60_000);
+                              } catch {
+                                toast.error("Could not load audio");
+                              }
+                            }}
+                            className="h-7 w-7 flex items-center justify-center rounded border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <Volume2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {/* Save recording to Zoho WorkDrive */}
+                        {rec.contentUri && (rcConfigured || rcToken) && (
+                          <button
+                            type="button"
+                            title="Save recording to Zoho WorkDrive"
+                            onClick={async () => {
+                              const t = toast.loading("Uploading to WorkDrive…");
+                              try {
+                                // Build a human-readable filename: Provider_Client_YYYY-MM-DD_HH-MM.mp3
+                                const sanitize = (s: string) => (s || "").trim().replace(/[\s\/\\:*?"<>|]+/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
+                                const dt = new Date(rec.startTime || Date.now());
+                                const pad = (n: number) => String(n).padStart(2, "0");
+                                const datePart = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}_${pad(dt.getHours())}-${pad(dt.getMinutes())}`;
+                                const provider = sanitize(providerName) || "Provider";
+                                const client = sanitize(clientName) || "Client";
+                                const fileName = `${provider}_${client}_${datePart}.mp3`;
+                                const body = rcConfigured
+                                  ? { contentUri: rec.contentUri, fileName }
+                                  : { contentUri: rec.contentUri, fileName, rcToken: rcToken.trim() };
+                                const r = await api.post(`/cases/${caseId}/calls/upload-recording-to-workdrive`, body);
+                                const file = (r.data as { file?: { name: string; permalink?: string } }).file;
+                                toast.success("Saved to WorkDrive", {
+                                  id: t,
+                                  description: file?.permalink ? `${file.name} — open in WorkDrive` : file?.name,
+                                  action: file?.permalink ? { label: "Open", onClick: () => window.open(file.permalink, "_blank") } : undefined,
+                                });
+                              } catch (err: unknown) {
+                                const d = (err as any)?.response?.data ?? {};
+                                console.error("[workdrive upload error]", d);
+                                toast.error("WorkDrive upload failed", {
+                                  id: t,
+                                  description: `${d.zohoStatus ?? ""} ${d.zohoError ?? d.error ?? (err as Error).message}`.trim(),
+                                });
+                              }
+                            }}
+                            className="h-7 w-7 flex items-center justify-center rounded border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <CloudUpload className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          disabled={isFetching}
+                          onClick={() => void handleUseRecording(rec)}
+                          title="Transcribe with Azure Whisper and load into editor"
+                        >
+                          {isFetching ? (
+                            <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                          ) : (
+                            <FileText className="h-3 w-3 mr-1" />
+                          )}
+                          {isFetching ? "Transcribing…" : "Transcribe"}
+                        </Button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── WorkDrive Recordings panel — calls already saved to Zoho WorkDrive ── */}
+      <div className="rounded-md border border-border bg-card overflow-hidden mt-3">
+        <div
+          className="px-3 py-2 border-b border-border bg-muted/40 flex items-center justify-between cursor-pointer"
+          onClick={() => setWdPanelOpen((v) => !v)}
+        >
+          <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground flex items-center gap-1.5">
+            <CloudUpload className="h-3.5 w-3.5 text-primary" />
+            WorkDrive Recordings
+            {wdFiles.length > 0 && (
+              <span className="ml-1 text-[10px] font-normal normal-case tracking-normal text-muted-foreground">
+                ({wdFiles.length})
+              </span>
+            )}
+          </h4>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={wdLoading}
+              onClick={(e) => {
+                e.stopPropagation();
+                void fetchWorkDriveFiles();
+              }}
+            >
+              {wdLoading ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <RefreshCw className="h-3 w-3 mr-1" />}
+              Refresh
+            </Button>
+            <ChevronRight className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${wdPanelOpen ? "rotate-90" : ""}`} />
+          </div>
+        </div>
+
+        {wdPanelOpen && (
+          <div className="p-3">
+            {wdLoading && wdFiles.length === 0 && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                Loading saved recordings from WorkDrive…
+              </div>
+            )}
+            {!wdLoading && wdFiles.length === 0 && (
+              <p className="text-xs text-muted-foreground">No recordings saved yet. Click ☁ on an RC recording to save it here.</p>
+            )}
+            {wdFiles.length > 0 && (
+              <ul className="space-y-1.5 max-h-[320px] overflow-y-auto">
+                {wdFiles.map((file) => {
+                  const dt = file.createdTime ? new Date(file.createdTime) : null;
+                  const dateStr = dt ? dt.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "";
+                  const timeStr = dt ? dt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
+                  const sizeKb = file.sizeBytes ? `${Math.round(file.sizeBytes / 1024)} KB` : "";
+                  const isTranscribing = wdTranscribingId === file.id;
+                  return (
+                    <li
+                      key={file.id}
+                      className="flex items-center justify-between gap-3 px-3 py-2 rounded-md border border-border bg-background hover:border-primary/30 transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Phone className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-foreground truncate" title={file.name}>{file.name.replace(/\.mp3$/i, "")}</p>
+                          <p className="text-[10px] text-muted-foreground">
+                            {[dateStr, timeStr, sizeKb].filter(Boolean).join(" · ")}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          title="Play recording"
+                          onClick={() => void playWorkDriveFile(file)}
+                          className="h-7 w-7 flex items-center justify-center rounded border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          <Volume2 className="h-3.5 w-3.5" />
+                        </button>
+                        {file.permalink && (
+                          <button
+                            type="button"
+                            title="Open in WorkDrive"
+                            onClick={() => window.open(file.permalink, "_blank")}
+                            className="h-7 w-7 flex items-center justify-center rounded border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <CloudUpload className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          disabled={isTranscribing}
+                          onClick={() => void transcribeWorkDriveFile(file)}
+                          title="Transcribe with Azure Whisper"
+                        >
+                          {isTranscribing ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <FileText className="h-3 w-3 mr-1" />}
+                          {isTranscribing ? "Transcribing…" : "Transcribe"}
+                        </Button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Review & merge modal ─── */}

@@ -34,6 +34,168 @@ function camelKeys(v: unknown): unknown {
   return v;
 }
 
+// The backend serialises the Prisma model fields directly: it emits
+// `sourcePageNumber`, `sourceQuote`, `sourceSection`, and `sourceDocument`
+// (with `originalName`). After snakeKeys those land as `source_page_number`,
+// `source_quote`, `source_section`, `source_document.original_name` — but
+// the rest of the UI was written against an older shape that expected
+// `source_page`, `evidence_source`, `evidence_ref`. This adapter bridges
+// the two so the "Source" jump-to-page button on each checklist field
+// actually has the data it needs.
+function adoptEvidenceFields(row: ChecklistRow): ChecklistRow {
+  const r = row as ChecklistRow & {
+    source_page_number?: number | null;
+    source_section?: string | null;
+    source_quote?: string | null;
+    source_document?: { original_name?: string | null; filename?: string | null } | null;
+  };
+  const sourcePage = r.source_page ?? r.source_page_number ?? null;
+  // Prefer the persistent snapshot column (source_document_name) so the name
+  // survives doc deletion; fall back to the live relation for legacy rows
+  // that pre-date the snapshot field.
+  const sourceDocName =
+    r.source_document_name ??
+    r.source_document?.original_name ??
+    r.source_document?.filename ??
+    null;
+  // Compose a human-readable reference for the tooltip — "Page 3, Cash Value"
+  // when both are present, just "Page 3" otherwise. Fall back to the raw
+  // quote if no page exists.
+  const ref = sourcePage
+    ? `Page ${sourcePage}${r.source_section ? `, ${r.source_section}` : ""}`
+    : r.source_section ?? r.source_quote ?? null;
+  // The paraplanner's "Request review" comment is persisted on
+  // ChecklistField.reviewComment (→ snake-keyed to `review_comment`). The
+  // rest of the UI was written to read `notes` for any field-level comment,
+  // so surface review_comment there when no manual note is present.
+  const notes = r.notes ?? (r as ChecklistRow & { review_comment?: string | null }).review_comment ?? null;
+  // Backend FieldStatus enum is uppercase (APPROVED, REVIEW_REQUESTED, …)
+  // but the entire UI compares against lowercase ("approved", …). snakeKeys
+  // only renames keys, not values — so without this every approval looked
+  // like it had no effect.
+  const status = typeof r.status === "string" ? r.status.toLowerCase() : r.status;
+  // The Prisma column is `isManuallyOverridden` (boolean) plus
+  // `manualEditedById` / `manualEditedAt`. After snakeKeys the wire keys
+  // are `is_manually_overridden` / `manual_edited_at`. The frontend was
+  // written against `manually_edited` — 4 different consumers (Approval
+  // badge, Extract audit-line, Stage 9 XLSX "Manually edited" column,
+  // checklistMerge.ts conflict rule) all read that key and so all silently
+  // saw `false` for every manual override. Alias here once.
+  const rExt = r as ChecklistRow & {
+    is_manually_overridden?: boolean | null;
+    manual_edited_at?: string | null;
+    manual_edited_by_id?: string | null;
+    status?: string | null;
+  };
+  const explicitFlag =
+    (rExt as { manually_edited?: boolean | null }).manually_edited ??
+    rExt.is_manually_overridden ??
+    null;
+  const manuallyEdited =
+    explicitFlag !== null
+      ? explicitFlag
+      : !!rExt.manual_edited_at || rExt.status === "manually_overridden";
+  return {
+    ...r,
+    source_page: sourcePage,
+    evidence_source: r.evidence_source ?? sourceDocName,
+    evidence_ref: r.evidence_ref ?? ref,
+    // Carry the per-field source-doc id + resolved name through to consumers.
+    // The wire already has source_document_id (from the ...f spread server-side);
+    // we just make sure source_document_name has the snapshot-with-relation
+    // fallback applied so the indicator always has *something* to render.
+    source_document_id: r.source_document_id ?? null,
+    source_document_name: sourceDocName,
+    // Verbatim excerpt the AI cited — surfaced so PdfViewer can locate &
+    // highlight it on the page. Falls through from the wire unchanged.
+    source_quote: r.source_quote ?? null,
+    notes,
+    status,
+    manually_edited: !!manuallyEdited,
+  };
+}
+function normaliseRows(raw: unknown): ChecklistRow[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((r) => adoptEvidenceFields(snakeKeys(r) as ChecklistRow))
+    // Drop the vestigial `fund_lines` ChecklistField row. The backend seed
+    // creates one row per template — including the type="table" `fund_lines`
+    // template — but the real fund data lives in the ChecklistFundLine
+    // relation. The placeholder row only confused things: Stage 5 Call
+    // Assist counted it as a missing scalar field (asking the agent "what's
+    // the fund_lines value?"), and it inflated Missing counts by 1 vs
+    // Stage 4 / 6 which read the frontend template (table types stripped).
+    // Filter it out here so every consumer sees the same row set.
+    .filter((r) => {
+      const fk = (r as { field_key?: string }).field_key;
+      const ft = (r as { field_type?: string }).field_type;
+      if (fk === "fund_lines") return false;
+      if (typeof ft === "string" && ft.toLowerCase() === "table") return false;
+      return true;
+    });
+}
+
+// ── isMissing ───────────────────────────────────────────────────
+// A field counts as "missing" when ANY of the following is true:
+//   1. The value column is empty (null / undefined / whitespace).
+//   2. Confidence is the MISSING enum value (no extraction signal).
+//   3. The literal value is the string "MISSING" (case-insensitive) —
+//      the AI returns this when the document itself prints "MISSING"
+//      in the form field, which is still missing data, not a real value.
+//
+// Use this everywhere instead of ad-hoc checks like `!row.value`. Keeping
+// the rule in one place prevents Stage 4 / Stage 6 / Stage 8 from
+// disagreeing about whether the same field is filled.
+export function isMissing(row: {
+  value?: string | null;
+  confidence?: string | null;
+} | null | undefined): boolean {
+  if (!row) return true;
+  const v = (row.value ?? "").trim();
+  if (v === "") return true;
+  if (v.toUpperCase() === "MISSING") return true;
+  const conf = (row.confidence ?? "").toString().toUpperCase();
+  if (conf === "MISSING") return true;
+  return false;
+}
+
+// Display helper — "—" for missing, the actual value otherwise.
+// Avoids showing the literal word "MISSING" in tables / approval lists.
+export function displayValue(row: {
+  value?: string | null;
+  confidence?: string | null;
+} | null | undefined): string {
+  if (isMissing(row)) return "—";
+  return (row?.value ?? "").trim();
+}
+
+// Fund Details status — the table-typed `fund_lines` field doesn't live on
+// ChecklistField (the placeholder row is filtered out above). The real
+// per-fund data is in the ChecklistFundLine relation. This helper rolls a
+// list of fund rows up into a single status token so the Missing / Needs
+// Review counters on Stage 4 / 5 / 6 can include "Fund Details" as a
+// logical section, the way the user expects.
+//
+//   missing — no rows, or every row has an empty value
+//   review  — at least one row has empty value OR confidence LOW/MEDIUM/CONFLICT/MISSING
+//   filled  — every row has a value AND no row is below HIGH confidence
+export type FundDetailsStatus = "missing" | "review" | "filled";
+export interface FundLineLike {
+  value?: string | null;
+  confidence?: string | null;
+}
+export function fundDetailsStatus(rows: FundLineLike[] | null | undefined): FundDetailsStatus {
+  if (!rows || rows.length === 0) return "missing";
+  const anyMissing = rows.some(isMissing);
+  if (anyMissing && rows.every(isMissing)) return "missing";
+  const anyBelowHigh = rows.some((r) => {
+    if (isMissing(r)) return true;
+    const c = (r.confidence ?? "").toString().toUpperCase();
+    return c === "MEDIUM" || c === "LOW" || c === "CONFLICT" || c === "MISSING";
+  });
+  return anyBelowHigh ? "review" : "filled";
+}
+
 export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
   const { role, userName } = useRole();
   const [rows, setRows] = useState<ChecklistRow[]>([]);
@@ -44,7 +206,7 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
     try {
       const res = await api.get(`/cases/${caseId}/checklist`);
       const raw = res.data as { fields?: unknown[]; [k: string]: unknown };
-      setRows((snakeKeys(raw.fields ?? raw) as ChecklistRow[]) ?? []);
+      setRows(normaliseRows(raw.fields ?? raw));
     } catch (err) {
       console.error("useChecklistFields refresh error", err);
     } finally {
@@ -61,7 +223,7 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
       try {
         const res = await api.get(`/cases/${caseId}/checklist`);
         const raw = res.data as { fields?: unknown[]; [k: string]: unknown };
-        if (!cancelled) setRows((snakeKeys(raw.fields ?? raw) as ChecklistRow[]) ?? []);
+        if (!cancelled) setRows(normaliseRows(raw.fields ?? raw));
       } catch (err) {
         console.error("useChecklistFields load error", err);
       } finally {
@@ -96,7 +258,7 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
           status: "missing",
         }));
         // Seed returns the created/found row
-        const seeded = (snakeKeys(seedRes.data) as ChecklistRow);
+        const seeded = adoptEvidenceFields(snakeKeys(seedRes.data) as ChecklistRow);
         existing = seeded;
         setRows((prev) => {
           const without = prev.filter((r) => r.field_key !== fieldKey);

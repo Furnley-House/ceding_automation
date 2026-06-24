@@ -34,5 +34,14 @@ Thumbs.db
 # Claude Code local settings
 .claude/
 
+# Uploaded client files - never commit
+backend/uploads/
+
 # Accidental directories
 {docs,backend
+
+# Local debug noise (added during reconcile prep)
+logs-*.txt
+*.bak
+frontend/vite-dev.err
+frontend/-w

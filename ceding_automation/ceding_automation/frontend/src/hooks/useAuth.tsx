@@ -30,9 +30,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<Profile | null>(null);
 
-  // Re-validate token on mount
+  // Re-validate token on mount.
+  // IMPORTANT: read tokens via useAuthStore.getState() rather than closing over
+  // the render-time `token`. The SSO `/auth/callback` page is a child component,
+  // so its `setAuth(MS_USER, MS_TOKEN)` runs *before* this effect in the same
+  // commit. If we used the captured `token` (the demo token from a prior
+  // session) when persisting the /auth/me response, we'd save the new user
+  // alongside the old token — and on the next refresh that stale token would
+  // resolve back to the demo user.
   useEffect(() => {
-    if (!token) {
+    const initialToken = useAuthStore.getState().token;
+    if (!initialToken) {
       setProfile(null);
       setLoading(false);
       return;
@@ -41,14 +49,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .get("/auth/me")
       .then((res) => {
         const u = res.data as { id: string; email: string; name: string; role: string };
+        const latestToken = useAuthStore.getState().token;
+        if (!latestToken) return; // user logged out mid-flight
         useAuthStore.getState().setAuth(
           { id: u.id, email: u.email, name: u.name, role: u.role as never },
-          token
+          latestToken
         );
         setProfile({ full_name: u.name ?? null, role: u.role.toLowerCase() });
       })
       .catch(() => {
-        logout();
+        useAuthStore.getState().logout();
         setProfile(null);
       })
       .finally(() => setLoading(false));

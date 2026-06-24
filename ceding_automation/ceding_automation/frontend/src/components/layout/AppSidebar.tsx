@@ -5,7 +5,6 @@ import {
   Building2,
   ShieldCheck,
   History,
-  Inbox,
   CheckCircle2,
   Circle,
 } from "lucide-react";
@@ -13,7 +12,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useRole } from "@/hooks/useRole";
 import { getCaseById } from "@/services/api";
 import { CEDING_STAGES } from "@/lib/caseHelpers";
-import logo from "@/assets/logo-white.png";
+import logoWhite from "@/assets/logo-white.png";
+import lionIcon from "@/assets/lion-icon.png";
 
 export function AppSidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const location = useLocation();
@@ -30,9 +30,12 @@ export function AppSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
     enabled: !!activeCaseId,
   });
 
+  // "My Inbox" removed — no role actually used it (CA never had one,
+  // paraplanner/adviser/admin work from /cases directly). The /inbox route
+  // and MyInbox page have been unwired in App.tsx; the page file is left
+  // in place for now in case it's revived later.
   const navItems = [
     { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, show: true },
-    { title: "My Inbox", url: "/inbox", icon: Inbox, show: isParaplanner || isAdviser || isAdmin },
     { title: "Cases", url: "/cases", icon: Briefcase, show: true },
     { title: "Provider Directory", url: "/providers", icon: Building2, show: true },
     { title: "Audit Trail", url: "/audit", icon: History, show: isAdmin || isAdviser || isParaplanner },
@@ -48,19 +51,24 @@ export function AppSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
         collapsed ? "w-16" : "w-60"
       }`}
     >
-      <div className="flex h-16 items-center gap-3 border-b border-sidebar-border px-4 shrink-0">
-        <div className="flex h-9 w-9 items-center justify-center rounded-md bg-sidebar-accent shrink-0">
-          <img src={logo} alt="FH" className="h-7 w-7 object-contain" />
-        </div>
-        {!collapsed && (
-          <div className="flex flex-col leading-tight min-w-0">
-            <span className="text-sm font-bold tracking-tight text-sidebar-accent-foreground theme-heading truncate">
-              FURNLEY HOUSE
-            </span>
-            <span className="text-[9px] font-medium tracking-widest text-sidebar-primary truncate">
-              CEDING APPLICATION
-            </span>
-          </div>
+      <div
+        className={`flex items-center border-b border-sidebar-border shrink-0 ${
+          collapsed ? "h-16 justify-center px-2" : "h-20 justify-start px-4"
+        }`}
+      >
+        {collapsed ? (
+          <img
+            src={lionIcon}
+            alt="Furnley House"
+            className="h-9 w-9 object-contain"
+            style={{ filter: "brightness(0) invert(1)" }}
+          />
+        ) : (
+          <img
+            src={logoWhite}
+            alt="Furnley House — Financial Planning Partners"
+            className="h-12 w-auto max-w-full object-contain"
+          />
         )}
       </div>
 

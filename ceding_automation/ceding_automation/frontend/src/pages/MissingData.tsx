@@ -25,7 +25,6 @@ interface RoutingMatch {
   planPrefix: string;
 }
 
-const RINGCENTRAL_EMBEDDABLE_URL = "https://apps.ringcentral.com/integration/ringcentral-embeddable/latest/adapter.js";
 
 const MissingData = () => {
   const [cases, setCases] = useState<CaseRow[]>([]);
@@ -75,17 +74,11 @@ const MissingData = () => {
     setIsDragging(false);
   };
 
+  // RC widget is owned by CallWorkspace (Stage 5). MissingData falls back to tel: links.
   useEffect(() => {
     if (document.getElementById("rc-widget-script")) {
       setDialerLoaded(true);
-      return;
     }
-    const script = document.createElement("script");
-    script.id = "rc-widget-script";
-    script.src = `${RINGCENTRAL_EMBEDDABLE_URL}?zIndex=9999`;
-    script.async = true;
-    script.onload = () => setDialerLoaded(true);
-    document.body.appendChild(script);
   }, []);
 
   const fetchCases = useCallback(async () => {
@@ -137,11 +130,11 @@ const MissingData = () => {
             matchRouting(data as ProviderRow, theCase.plan_number);
           }
         }).catch(() => {});
-      } else if (theCase?.provider_name) {
+      } else if (theCase?.Provider_group) {
         api.get("/providers").then(({ data }) => {
           const providers = (data as ProviderRow[]) ?? [];
           const match = providers.find(p =>
-            (p.name ?? "").toLowerCase().includes(theCase.provider_name.toLowerCase())
+            (p.name ?? "").toLowerCase().includes(theCase.Provider_group.toLowerCase())
           );
           if (match) {
             setProvider(match);
@@ -264,7 +257,7 @@ const MissingData = () => {
         title="Missing Data Resolution"
         subtitle={
           selectedCase
-            ? `${selectedCase.client_name} — ${selectedCase.provider_name} ${selectedCase.plan_number} · ${missingFields.length} missing, ${reviewFields.length} needs review`
+            ? `${selectedCase.client_name} — ${selectedCase.Provider_group} ${selectedCase.plan_number} · ${missingFields.length} missing, ${reviewFields.length} needs review`
             : "Select a case to resolve missing data"
         }
         action={
@@ -288,7 +281,7 @@ const MissingData = () => {
           <SelectContent>
             {cases.map(c => (
               <SelectItem key={c.id} value={c.id}>
-                {c.client_name} — {c.provider_name} {c.plan_number}
+                {c.client_name} — {c.Provider_group} {c.plan_number}
               </SelectItem>
             ))}
           </SelectContent>
@@ -302,8 +295,8 @@ const MissingData = () => {
               <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
                 <Phone className="h-4 w-4 text-primary" />
                 {routingMatch
-                  ? `${selectedCase?.provider_name} — ${routingMatch.department}`
-                  : `${selectedCase?.provider_name ?? "Provider"}`}
+                  ? `${selectedCase?.Provider_group} — ${routingMatch.department}`
+                  : `${selectedCase?.Provider_group ?? "Provider"}`}
               </h3>
               {routingMatch && (
                 <p className="text-xs text-muted-foreground mt-1">

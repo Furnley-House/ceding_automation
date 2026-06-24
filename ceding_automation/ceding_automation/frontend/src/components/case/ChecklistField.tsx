@@ -10,6 +10,7 @@ import {
   RotateCcw,
   ThumbsUp,
   Sparkles,
+  AlertTriangle,
 } from "lucide-react";
 import type { ChecklistFieldDef } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
@@ -21,7 +22,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 
-export type Confidence = "HIGH" | "MEDIUM" | "LOW" | "MISSING";
+// Must mirror backend Prisma enum `ConfidenceLevel`. CONFLICT is set by the
+// AI extractor when two source documents disagree on a field value.
+export type Confidence = "HIGH" | "MEDIUM" | "LOW" | "MISSING" | "CONFLICT";
 export type FieldStatus = "missing" | "pending" | "approved" | "review_requested";
 
 export interface ChecklistFieldState {
@@ -36,12 +39,41 @@ export interface ChecklistFieldState {
   comment?: string | null;
 }
 
+/** Two-candidate conflict pack passed down by ChecklistPanel for fields
+ *  in CONFLICT state. ChecklistField stays pure — no API knowledge here;
+ *  the parent supplies `onResolve` which closes over caseId + fieldId +
+ *  the refetch, and routes through the existing api.resolveConflict
+ *  wrapper. */
+export interface ConflictResolution {
+  existing: { value: string | null; docName: string | null; page: number | null };
+  incoming: { value: string | null; docName: string | null; page: number | null };
+  onResolve: (chosenValue: string) => Promise<void>;
+}
+
 interface Props {
   def: ChecklistFieldDef;
   state: ChecklistFieldState;
   onChange: (next: Partial<ChecklistFieldState>) => void;
   /** When provided, renders a "jump to source" button next to the field */
   onJumpToSource?: () => void;
+  /** Persistent snapshot of the source doc's filename. Survives deletion of
+   *  the underlying document, so the "from X.pdf" / "deleted" hint can keep
+   *  rendering even after the source PDF is removed from the case. */
+  sourceDocumentName?: string | null;
+  /** True when the field's source doc is in the case but NOT currently shown
+   *  in the viewer. Renders a "from X.pdf" pill so the user understands why
+   *  clicking Source will swap the PDF before scrolling. */
+  isFromDifferentDoc?: boolean;
+  /** True when the field has a source_document_id that no longer matches any
+   *  document in the case (the source PDF was deleted post-extraction).
+   *  Renders a muted "(deleted)" indicator; the Source button does nothing
+   *  in this state — handled in ExtractionWorkspace.handleJumpToSource. */
+  isSourceDeleted?: boolean;
+  /** When the field is in CONFLICT, renders an inline resolver panel
+   *  showing both candidate values + their provenance + "Use this value"
+   *  buttons. Undefined for non-conflicted fields (or if the parent
+   *  couldn't assemble the candidates — e.g. missing conflict_values). */
+  conflict?: ConflictResolution;
 }
 
 const CONF_META: Record<Confidence, { label: string; icon: React.ElementType; cls: string }> = {
@@ -49,19 +81,33 @@ const CONF_META: Record<Confidence, { label: string; icon: React.ElementType; cl
   MEDIUM: { label: "Medium confidence", icon: CircleHelp, cls: "bg-warning/15 text-warning border-warning/30" },
   LOW: { label: "Low confidence", icon: CircleAlert, cls: "bg-overdue/15 text-overdue border-overdue/30" },
   MISSING: { label: "Missing", icon: CircleDashed, cls: "bg-muted text-muted-foreground border-border" },
+  CONFLICT: { label: "Conflicting sources", icon: AlertTriangle, cls: "bg-overdue/15 text-overdue border-overdue/40" },
 };
 
-export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) {
+export function ChecklistField({
+  def,
+  state,
+  onChange,
+  onJumpToSource,
+  sourceDocumentName,
+  isFromDifferentDoc,
+  isSourceDeleted,
+  conflict,
+}: Props) {
   const { canEditChecklist, canApprove, userName } = useRole();
   const [localValue, setLocalValue] = useState(state.value ?? "");
   const [reviewOpen, setReviewOpen] = useState(false);
   const [commentOpen, setCommentOpen] = useState(false);
   const [reviewText, setReviewText] = useState("");
   const [commentText, setCommentText] = useState(state.comment ?? "");
+  const [resolving, setResolving] = useState(false);
 
   useEffect(() => setLocalValue(state.value ?? ""), [state.value]);
 
-  const conf = CONF_META[state.confidence];
+  // Fall back to MISSING if the backend returns an unmapped enum value.
+  // Without this guard, the whole Extract & Fill Gaps stage white-screens
+  // because `conf.icon` would throw on undefined.
+  const conf = CONF_META[state.confidence] ?? CONF_META.MISSING;
   const ConfIcon = conf.icon;
   const isApproved = state.status === "approved";
   const isReviewRequested = state.status === "review_requested";
@@ -246,7 +292,12 @@ export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) 
               </span>
             )}
 
-            {onJumpToSource && state.evidenceRef && (
+            {onJumpToSource && (
+              // The parent (ChecklistPanel) only wires this callback when a
+              // source page exists, so reaching here means we have something
+              // to scroll to. The tooltip carries the optional `evidenceRef`
+              // metadata when it's available; the button itself is gated on
+              // the click handler alone.
               <TooltipProvider delayDuration={200}>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -270,6 +321,44 @@ export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) 
                 </Tooltip>
               </TooltipProvider>
             )}
+
+            {/* Wrong-pdf / deleted-source hint. Three mutually exclusive
+                states (deleted wins over different — a deleted doc is by
+                definition not the open one). When the source IS the open
+                doc, render nothing. */}
+            {isSourceDeleted ? (
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border bg-muted text-muted-foreground border-border text-[10px] font-semibold max-w-[180px] truncate">
+                      source: {sourceDocumentName ?? "unknown"} (deleted)
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p className="text-xs">Source PDF removed</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      The document this value came from is no longer in the case.
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            ) : isFromDifferentDoc && sourceDocumentName ? (
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border bg-info/10 text-info border-info/30 text-[10px] font-semibold max-w-[180px] truncate">
+                      from {sourceDocumentName}
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p className="text-xs">Source is a different PDF</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      Clicking Source switches the viewer to “{sourceDocumentName}”.
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            ) : null}
           </div>
 
           {def.hint && <p className="text-[10px] text-muted-foreground italic mt-0.5">{def.hint}</p>}
@@ -352,6 +441,33 @@ export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) 
         )}
       </div>
 
+      {state.confidence === "CONFLICT" && conflict && (
+        <div className="mt-3 pt-3 border-t border-overdue/30 space-y-2">
+          <p className="text-[11px] font-semibold text-foreground flex items-center gap-1">
+            <AlertTriangle className="h-3 w-3 text-overdue" />
+            Two sources disagree — pick a value
+          </p>
+          <ConflictCandidate
+            label="Existing"
+            candidate={conflict.existing}
+            disabled={resolving}
+            onPick={async (chosen) => {
+              setResolving(true);
+              try { await conflict.onResolve(chosen); } finally { setResolving(false); }
+            }}
+          />
+          <ConflictCandidate
+            label="New"
+            candidate={conflict.incoming}
+            disabled={resolving}
+            onPick={async (chosen) => {
+              setResolving(true);
+              try { await conflict.onResolve(chosen); } finally { setResolving(false); }
+            }}
+          />
+        </div>
+      )}
+
       {(state.evidenceSource || state.comment || state.originalAiValue) && (
         <div className="mt-2 pt-2 border-t border-border/60 space-y-1">
           {state.evidenceSource && (
@@ -373,6 +489,39 @@ export function ChecklistField({ def, state, onChange, onJumpToSource }: Props) 
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+interface ConflictCandidateProps {
+  label: string;
+  candidate: { value: string | null; docName: string | null; page: number | null };
+  disabled: boolean;
+  onPick: (chosen: string) => Promise<void>;
+}
+
+function ConflictCandidate({ label, candidate, disabled, onPick }: ConflictCandidateProps) {
+  const displayValue = candidate.value ?? "(empty)";
+  const docLabel = candidate.docName ?? "another document";
+  const pageSuffix = candidate.page != null ? `, p.${candidate.page}` : "";
+  return (
+    <div className="flex items-start justify-between gap-3 px-3 py-2 rounded border border-overdue/30 bg-overdue/5">
+      <div className="min-w-0 flex-1">
+        <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</p>
+        <p className="text-sm font-semibold text-foreground break-words">{displayValue}</p>
+        <p className="text-[10px] text-muted-foreground mt-0.5">
+          from {docLabel}{pageSuffix}
+        </p>
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        className="shrink-0 h-7 text-[11px]"
+        disabled={disabled || candidate.value == null}
+        onClick={() => onPick(candidate.value ?? "")}
+      >
+        Use this value
+      </Button>
     </div>
   );
 }

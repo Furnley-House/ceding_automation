@@ -1,9 +1,18 @@
-import { ShieldCheck, Users, Building2, ListChecks, Sparkles } from "lucide-react";
+import { useState } from "react";
+import { ShieldCheck, Users, Building2, ListChecks } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UserManagementPanel } from "@/components/admin/UserManagementPanel";
+import { ProviderManagementPanel } from "@/components/admin/ProviderManagementPanel";
+import { ChecklistTemplatesPanel } from "@/components/admin/ChecklistTemplatesPanel";
+
+type AdminTab = "users" | "providers" | "templates";
 
 const Admin = () => {
+  const [tab, setTab] = useState<AdminTab>("users");
+
   return (
-    <div className="animate-slide-in">
-      <div className="mb-6">
+    <div className="animate-slide-in space-y-6">
+      <div>
         <h1 className="text-2xl font-bold theme-heading text-foreground flex items-center gap-2">
           <ShieldCheck className="h-6 w-6 text-teal" /> Admin Panel
         </h1>
@@ -12,53 +21,31 @@ const Admin = () => {
         </p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
-        <AdminCard
-          icon={Users}
-          title="User Management"
-          description="View all users, assign roles, and activate/deactivate accounts. (In production, role assignment will sync from SSO.)"
-          status="Coming in Phase 9"
-        />
-        <AdminCard
-          icon={Building2}
-          title="Provider Directory"
-          description="Add, edit, and remove providers. Configure routing rules and jargon mappings."
-          status="Coming in Phase 9"
-        />
-        <AdminCard
-          icon={ListChecks}
-          title="Checklist Templates"
-          description="Add, reorder, or deactivate fields per plan type (ISA / GIA / Pension / Bond / DB / Protection)."
-          status="Coming in Phase 9"
-        />
-      </div>
+      <Tabs value={tab} onValueChange={(v) => setTab(v as AdminTab)}>
+        <TabsList className="grid w-full max-w-xl grid-cols-3">
+          <TabsTrigger value="users" className="gap-2">
+            <Users className="h-4 w-4" /> Users
+          </TabsTrigger>
+          <TabsTrigger value="providers" className="gap-2">
+            <Building2 className="h-4 w-4" /> Providers
+          </TabsTrigger>
+          <TabsTrigger value="templates" className="gap-2">
+            <ListChecks className="h-4 w-4" /> Checklist
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="users" className="mt-4">
+          <UserManagementPanel />
+        </TabsContent>
+        <TabsContent value="providers" className="mt-4">
+          <ProviderManagementPanel />
+        </TabsContent>
+        <TabsContent value="templates" className="mt-4">
+          <ChecklistTemplatesPanel />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 };
-
-function AdminCard({
-  icon: Icon,
-  title,
-  description,
-  status,
-}: {
-  icon: React.ElementType;
-  title: string;
-  description: string;
-  status: string;
-}) {
-  return (
-    <div className="theme-card theme-card-accent border border-border bg-card">
-      <div className="flex h-10 w-10 items-center justify-center rounded-md bg-teal/15 text-teal mb-3">
-        <Icon className="h-5 w-5" />
-      </div>
-      <h3 className="text-base font-bold theme-heading text-foreground mb-1">{title}</h3>
-      <p className="text-xs text-muted-foreground mb-3 leading-relaxed">{description}</p>
-      <div className="flex items-center gap-1.5 text-[10px] font-semibold text-teal uppercase tracking-wider">
-        <Sparkles className="h-3 w-3" /> {status}
-      </div>
-    </div>
-  );
-}
 
 export default Admin;

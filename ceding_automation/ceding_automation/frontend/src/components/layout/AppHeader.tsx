@@ -1,9 +1,16 @@
-import { Search, ChevronDown, LogOut, RefreshCw, Settings, BarChart3 } from "lucide-react";
+import { Search, ChevronDown, LogOut, RefreshCw, Settings, BarChart3, Contrast } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getCases } from "@/services/api";
 import { useRole, ROLE_LABELS } from "@/hooks/useRole";
+import { useHighContrast } from "@/hooks/useHighContrast";
+import { useAuth } from "@/hooks/useAuth";
+
+// Hide the "Switch role" back-door menu item in prod so users can't bypass
+// the SSO-only flow. Same flag the RolePicker / RoleGuard use.
+const DEMO_LOGIN_DISABLED =
+  String(import.meta.env.VITE_DISABLE_DEMO_LOGIN).toLowerCase() === "true";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,8 +19,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
 import { NotificationBell } from "./NotificationBell";
-import logo from "@/assets/logo-dark.png";
 
 export function AppHeader() {
   const [searchQuery, setSearchQuery] = useState("");
@@ -21,6 +28,21 @@ export function AppHeader() {
   const navigate = useNavigate();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { role, userName, clearRole } = useRole();
+  const { signOut } = useAuth();
+  const qc = useQueryClient();
+  const { enabled: highContrast, toggle: toggleHighContrast } = useHighContrast();
+
+  // Full sign-out: clear JWT + persisted role + React Query cache, then
+  // bounce to the root so ProtectedRoute sends the user back to SSO.
+  // The old menu item shared the "Switch role" handler, which only wiped
+  // the role from localStorage but left the JWT live — picking a role
+  // again let the user back in without re-authenticating.
+  const handleSignOut = async () => {
+    await signOut();
+    clearRole();
+    qc.clear();
+    navigate("/", { replace: true });
+  };
 
   const { data: cases = [] } = useQuery({ queryKey: ["cases"], queryFn: getCases });
 
@@ -41,7 +63,7 @@ export function AppHeader() {
             const q = searchQuery.toLowerCase();
             return (
               c.client_name.toLowerCase().includes(q) ||
-              c.provider_name.toLowerCase().includes(q) ||
+              c.Provider_group.toLowerCase().includes(q) ||
               c.plan_number.toLowerCase().includes(q) ||
               c.case_ref.toLowerCase().includes(q)
             );
@@ -65,10 +87,9 @@ export function AppHeader() {
 
   return (
     <header className="app-header sticky top-0 z-30 flex h-16 items-center justify-between border-b border-border bg-card px-6">
-      {/* Left: logo + app name */}
-      <div className="flex items-center gap-4 mr-6">
-        <img src={logo} alt="Furnley House" className="h-8 w-auto" />
-        <div className="hidden md:block border-l border-border pl-4">
+      {/* Left: app context (logo is already in the sidebar) */}
+      <div className="flex items-center mr-6">
+        <div className="hidden md:block">
           <p className="text-sm font-bold theme-heading text-foreground leading-tight">Ceding Application</p>
           <p className="text-[10px] text-muted-foreground leading-tight">Furnley House Financial Planning Partners</p>
         </div>
@@ -100,7 +121,7 @@ export function AppHeader() {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-foreground truncate">{c.client_name}</p>
                     <p className="text-xs text-muted-foreground">
-                      {c.provider_name} · {c.plan_number}
+                      {c.Provider_group} · {c.plan_number}
                     </p>
                   </div>
                   <span className="text-[10px] font-mono text-muted-foreground">{c.case_ref}</span>
@@ -125,6 +146,19 @@ export function AppHeader() {
         </div>
 
         <NotificationBell />
+
+        {/* High contrast toggle */}
+        <div
+          className="flex items-center gap-1.5 px-2 py-1.5 rounded-md hover:bg-muted transition-colors"
+          title="High contrast mode"
+        >
+          <Contrast className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+          <Switch
+            checked={highContrast}
+            onCheckedChange={toggleHighContrast}
+            aria-label="Toggle high contrast mode"
+          />
+        </div>
 
         <DropdownMenu>
           <DropdownMenuTrigger className="flex items-center gap-3 px-3 py-1.5 rounded-md hover:bg-muted transition-colors">
@@ -155,11 +189,13 @@ export function AppHeader() {
             <DropdownMenuItem onClick={() => navigate("/admin")} disabled={role !== "admin"}>
               <Settings className="mr-2 h-4 w-4" /> Admin Panel
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={clearRole}>
-              <RefreshCw className="mr-2 h-4 w-4" /> Switch role
-            </DropdownMenuItem>
+            {!DEMO_LOGIN_DISABLED && (
+              <DropdownMenuItem onClick={clearRole}>
+                <RefreshCw className="mr-2 h-4 w-4" /> Switch role
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={clearRole}>
+            <DropdownMenuItem onClick={handleSignOut}>
               <LogOut className="mr-2 h-4 w-4" /> Sign out
             </DropdownMenuItem>
           </DropdownMenuContent>

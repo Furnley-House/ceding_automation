@@ -10,7 +10,20 @@ interface Props {
   onUploaded?: () => void;
 }
 
-const MAX_BYTES = 20 * 1024 * 1024; // 20 MB
+const MAX_BYTES = 20 * 1024 * 1024; // 20 MB (backend allows up to 50 MB; UI is intentionally stricter)
+
+// PDF only. Word/Excel/plain-text were advertised before, but only PDF
+// extraction works end-to-end through the AI BFF — accepting other formats
+// just produced failed extractions, so the UI now matches reality. Accept on
+// EITHER the .pdf extension OR the application/pdf MIME (belt-and-braces; PDF
+// MIME is normally reliable but the extension fallback costs nothing).
+const ALLOWED_EXTENSIONS = [".pdf"] as const;
+const ALLOWED_MIME_TYPES = ["application/pdf"];
+const EXTENSION_RE = new RegExp(`(${ALLOWED_EXTENSIONS.join("|").replace(/\./g, "\\.")})$`, "i");
+
+function isAcceptedFile(f: File): boolean {
+  return EXTENSION_RE.test(f.name) || ALLOWED_MIME_TYPES.includes(f.type);
+}
 
 export function DocumentUploader({ caseId, onUploaded }: Props) {
   const [busy, setBusy] = useState(false);
@@ -24,8 +37,8 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
           toast.error(`${f.name} is over 20 MB`);
           return false;
         }
-        if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") {
-          toast.error(`${f.name} is not a PDF`);
+        if (!isAcceptedFile(f)) {
+          toast.error("Only PDF files are accepted on this step.");
           return false;
         }
         return true;
@@ -34,26 +47,53 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
 
       setBusy(true);
       setUploadingNames(valid.map((v) => v.name));
-      try {
-        for (const f of valid) {
+      // Sequential one-at-a-time uploads, but each failure is contained to
+      // its own file — a 400 on file 2 must not abort files 3..N. The old
+      // `for/await` loop threw on the first failure and silently dropped
+      // the rest, which read to testers as "multi-file sometimes doesn't
+      // work" with no clue which file was the problem.
+      const failures: { name: string; message: string }[] = [];
+      let successes = 0;
+      for (const f of valid) {
+        try {
           await uploadDocumentFile({ caseId, file: f });
+          successes++;
+        } catch (e) {
+          const message =
+            (e as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+            (e instanceof Error ? e.message : "Upload failed");
+          failures.push({ name: f.name, message });
         }
-        toast.success(`Uploaded ${valid.length} document${valid.length === 1 ? "" : "s"}`);
-        onUploaded?.();
-      } catch (e: any) {
-        console.error(e);
-        toast.error("Upload failed", { description: e?.message ?? "Please retry" });
-      } finally {
-        setBusy(false);
-        setUploadingNames([]);
       }
+      if (successes > 0) {
+        toast.success(`Uploaded ${successes} document${successes === 1 ? "" : "s"}`);
+        onUploaded?.();
+      }
+      for (const f of failures) {
+        toast.error(`${f.name} failed`, { description: f.message });
+      }
+      setBusy(false);
+      setUploadingNames([]);
     },
     [busy, caseId, onUploaded],
   );
 
+  // Restrict the native file picker + drag-drop to PDF. Unlike the old
+  // Office formats (whose OS-reported MIME was unreliable), application/pdf
+  // is reported consistently, so the dropzone pre-filter is safe here. Our
+  // isAcceptedFile and the backend multer filter enforce the same PDF-only
+  // rule; onDropRejected surfaces anything react-dropzone rejects so a
+  // wrong-format drop never fails silently.
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
     accept: { "application/pdf": [".pdf"] },
+    onDropRejected: (rejections) => {
+      for (const rej of rejections) {
+        toast.error(`${rej.file.name} was rejected`, {
+          description: "Only PDF files are accepted on this step.",
+        });
+      }
+    },
     multiple: true,
     noClick: true,
   });
@@ -68,10 +108,10 @@ export function DocumentUploader({ caseId, onUploaded }: Props) {
       <input {...getInputProps()} />
       <Upload className="h-10 w-10 mx-auto mb-3 text-muted-foreground" />
       <p className="text-sm font-semibold text-foreground mb-1">
-        {isDragActive ? "Drop the PDFs here…" : "Drop policy pack PDFs here"}
+        {isDragActive ? "Drop the documents here…" : "Drop policy documents here"}
       </p>
       <p className="text-xs text-muted-foreground mb-4">
-        Multiple files supported · 20 MB max each · provider packs, illustrations, terms
+        PDF · 20 MB max each
       </p>
       <Button type="button" onClick={open} disabled={busy} variant="outline" size="sm">
         {busy ? (

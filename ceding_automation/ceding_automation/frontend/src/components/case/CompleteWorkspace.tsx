@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
-import { CheckCircle2, ArrowRight, LayoutGrid, Inbox, Sparkles, FileText, Clock } from "lucide-react";
+import { CheckCircle2, ArrowRight, LayoutGrid, Sparkles, FileText, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getCases } from "@/services/api";
 import type { CaseRow } from "@/lib/caseHelpers";
 import { RAG_STYLES, STATUS_LABELS, calculateRag } from "@/lib/caseHelpers";
+import { CaseKpiPanel } from "./CaseKpiPanel";
 
 interface Props {
   caseItem: CaseRow;
@@ -51,7 +52,7 @@ export function CompleteWorkspace({ caseItem }: Props) {
           {caseItem.client_name}
         </h3>
         <p className="text-sm text-muted-foreground mt-1">
-          {caseItem.provider_name} · {caseItem.plan_type} · {caseItem.plan_number}
+          {caseItem.Provider_group} · {caseItem.plan_type} · {caseItem.plan_number}
         </p>
         <p className="text-xs text-muted-foreground mt-3">
           Completed on <span className="font-semibold text-foreground">{completedDate}</span>
@@ -73,8 +74,14 @@ export function CompleteWorkspace({ caseItem }: Props) {
         </div>
       </div>
 
-      {/* Primary actions */}
-      <div className="grid gap-3 sm:grid-cols-2">
+      {/* Case KPIs — client-side derived metrics, above the completion controls. */}
+      <CaseKpiPanel caseItem={caseItem} />
+
+      {/* Primary action — "My Inbox" was removed because no role actually
+          uses it (CA has no inbox, paraplanner/adviser/admin work from the
+          Cases view directly). Single full-width Browse button keeps the
+          completion screen focused on the next-cases handoff below. */}
+      <div className="grid gap-3">
         <Button asChild size="lg" className="gap-2 h-auto py-4 flex-col items-start">
           <Link to="/cases">
             <span className="flex items-center gap-2 text-sm font-bold">
@@ -82,16 +89,6 @@ export function CompleteWorkspace({ caseItem }: Props) {
             </span>
             <span className="text-[11px] font-normal opacity-90">
               Pick the next case from the full pipeline
-            </span>
-          </Link>
-        </Button>
-        <Button asChild size="lg" variant="outline" className="gap-2 h-auto py-4 flex-col items-start">
-          <Link to="/inbox">
-            <span className="flex items-center gap-2 text-sm font-bold">
-              <Inbox className="h-4 w-4" /> Go to my inbox
-            </span>
-            <span className="text-[11px] font-normal text-muted-foreground">
-              See cases assigned to you
             </span>
           </Link>
         </Button>
@@ -123,7 +120,7 @@ export function CompleteWorkspace({ caseItem }: Props) {
                         {c.client_name}
                       </p>
                       <p className="text-[11px] text-muted-foreground truncate">
-                        {c.provider_name} · {c.plan_type} ·{" "}
+                        {c.Provider_group} · {c.plan_type} ·{" "}
                         <span className="font-mono">{c.case_ref}</span>
                       </p>
                     </div>

@@ -1,15 +1,210 @@
 // backend/prisma/seed.ts
-// Seeds: checklist templates (aligned to "Ceding Checklist - Blank.xlsx"), demo users, sample providers.
-// Source of truth for fields: Pension / ISA / GIA tabs of the official ceding checklist workbook.
+// Seeds: checklist templates (canonical JSON v1.x), demo users, sample providers.
+// Checklist source of truth: ../shared-contracts/checklist-fields-v1.json
+//   (mirrored to ./canonical/checklist-fields-v1.json so this file works inside
+//    the Docker image and CI without path traversal outside the backend dir).
+// Both backend and the BFF load the same canonical to eliminate field-key drift.
 
-import { PrismaClient, PlanType, UserRole } from "@prisma/client";
+import { PrismaClient, PlanType, UserRole, Prisma } from "@prisma/client";
+import { readFileSync } from "fs";
+import { join } from "path";
 
 const prisma = new PrismaClient();
 
+const DRY_RUN = process.argv.includes("--dry-run");
+const CANONICAL_PATH = join(__dirname, "canonical", "checklist-fields-v1.json");
+
+type PlanKey = "ISA" | "GIA" | "PENSION";
+
+interface CanonicalField {
+  key: string;
+  label: string;
+  section: string;
+  section_order: number;
+  display_order: number;
+  type: string;
+  required: boolean;
+  options?: string[];
+  typical_values?: string[];
+  note?: string;
+  columns?: unknown[];
+  normalize_per?: string;
+  accepts_non_applicable_markers?: boolean;
+  allows_defer_to_source?: boolean;
+  defer_examples?: string[];
+  auto_extract_hint?: string;
+  parent_field?: string;
+}
+
+interface Canonical {
+  version: string;
+  plans: Record<PlanKey, CanonicalField[]>;
+}
+
+// Map canonical field type → backend's existing ChecklistTemplate.fieldType vocabulary.
+// Decision: keep backend vocabulary so the frontend doesn't need to change this weekend.
+function mapType(canonicalType: string): string {
+  const m: Record<string, string> = {
+    text: "text",
+    text_long: "free_text",
+    date: "date",
+    currency: "currency",
+    percent: "percentage",
+    boolean: "yes_no",
+    dropdown: "dropdown",
+    url: "url",
+    table: "table",
+  };
+  return m[canonicalType] ?? "text";
+}
+
+// Pack the v1.1 extras that don't have a dedicated column into the metadata JSONB.
+// Returns null when nothing to store so we don't write empty objects.
+function buildMetadata(f: CanonicalField): Prisma.InputJsonValue | null {
+  const md: Record<string, unknown> = {};
+  if (f.typical_values) md.typical_values = f.typical_values;
+  if (f.normalize_per) md.normalize_per = f.normalize_per;
+  if (f.accepts_non_applicable_markers) md.accepts_non_applicable_markers = true;
+  if (f.allows_defer_to_source) md.allows_defer_to_source = true;
+  if (f.defer_examples) md.defer_examples = f.defer_examples;
+  if (f.auto_extract_hint) md.auto_extract_hint = f.auto_extract_hint;
+  if (f.parent_field) md.parent_field = f.parent_field;
+  if (f.columns) md.columns = f.columns;
+  if (typeof f.section_order === "number") md.section_order = f.section_order;
+  return Object.keys(md).length > 0 ? (md as Prisma.InputJsonValue) : null;
+}
+
+interface PlanDiff {
+  inserts: string[]; // canonical keys absent from DB
+  updates: string[]; // canonical keys present in DB
+  deactivations: string[]; // active DB keys not in canonical
+}
+
+async function computePlanDiff(planType: PlanType, fields: CanonicalField[]): Promise<PlanDiff> {
+  const existing = await prisma.checklistTemplate.findMany({
+    where: { planType, isActive: true },
+    select: { fieldKey: true },
+  });
+  const existingKeys = new Set(existing.map((e) => e.fieldKey));
+  const canonicalKeys = new Set(fields.map((f) => f.key));
+  return {
+    inserts: fields.filter((f) => !existingKeys.has(f.key)).map((f) => f.key),
+    updates: fields.filter((f) => existingKeys.has(f.key)).map((f) => f.key),
+    deactivations: [...existingKeys].filter((k) => !canonicalKeys.has(k)),
+  };
+}
+
+function printSummary(label: string, diff: Record<PlanKey, PlanDiff>): void {
+  console.log(`\n[seed] ${label}:`);
+  for (const planKey of ["ISA", "GIA", "PENSION"] as PlanKey[]) {
+    const d = diff[planKey];
+    const preview = d.deactivations.slice(0, 6).join(", ");
+    const more = d.deactivations.length > 6 ? `, +${d.deactivations.length - 6} more` : "";
+    const deactStr = d.deactivations.length > 0 ? `  (${preview}${more})` : "";
+    console.log(
+      `  ${planKey.padEnd(8)} inserts=${d.inserts.length}  updates=${d.updates.length}  deactivations=${d.deactivations.length}${deactStr}`,
+    );
+  }
+}
+
+async function seedChecklistFromCanonical(): Promise<void> {
+  const canonical: Canonical = JSON.parse(readFileSync(CANONICAL_PATH, "utf8"));
+  console.log(`[seed] Canonical version: ${canonical.version}`);
+
+  const planKeys: PlanKey[] = ["ISA", "GIA", "PENSION"];
+  const diff = {} as Record<PlanKey, PlanDiff>;
+
+  for (const planKey of planKeys) {
+    const planType = PlanType[planKey];
+    const fields = canonical.plans[planKey];
+    diff[planKey] = await computePlanDiff(planType, fields);
+
+    if (DRY_RUN) continue;
+
+    await prisma.$transaction(async (tx) => {
+      for (const f of fields) {
+        const meta = buildMetadata(f);
+        const data = {
+          sectionName: f.section,
+          fieldName: f.label,
+          fieldType: mapType(f.type),
+          dropdownOptions: f.options ?? [],
+          displayOrder: f.display_order,
+          conditionalNote: f.note ?? null,
+          metadata: meta ?? Prisma.JsonNull,
+          isRequired: f.required,
+          isActive: true,
+        };
+        await tx.checklistTemplate.upsert({
+          where: { planType_fieldKey: { planType, fieldKey: f.key } },
+          update: data,
+          create: { planType, fieldKey: f.key, ...data },
+        });
+      }
+
+      if (diff[planKey].deactivations.length > 0) {
+        await tx.checklistTemplate.updateMany({
+          where: { planType, fieldKey: { in: diff[planKey].deactivations }, isActive: true },
+          data: { isActive: false },
+        });
+      }
+    }, { timeout: 60_000 });
+  }
+
+  // Legacy: deactivate the free-text fund_details rows (now superseded by ChecklistFundLine
+  // + canonical fund_lines table). Kept for idempotency; per-plan pass above also handles it.
+  if (!DRY_RUN) {
+    const legacy = await prisma.checklistTemplate.updateMany({
+      where: { fieldKey: "fund_details", isActive: true },
+      data: { isActive: false },
+    });
+    if (legacy.count > 0) {
+      console.log(`[seed] Deactivated ${legacy.count} legacy fund_details template(s)`);
+    }
+  }
+
+  printSummary(DRY_RUN ? "DRY RUN summary (no DB writes)" : "Checklist seed complete", diff);
+}
+
 async function main() {
+  // ── SAFETY: refuse to seed prod DB without explicit override ──
+  const env = process.env.NODE_ENV ?? "development";
+  const dbHost = process.env.DATABASE_URL?.match(/@([^:/]+)/)?.[1] ?? "unknown";
+  console.log(`[seed] Running against: NODE_ENV=${env}, DB host=${dbHost}`);
+  if (dbHost.includes("prod") && process.env.FORCE_PROD_SEED !== "true") {
+    throw new Error("Refusing to seed prod DB without FORCE_PROD_SEED=true");
+  }
+
+  if (DRY_RUN) {
+    console.log("[seed] DRY RUN — read-only diff vs canonical, no DB writes");
+    await seedChecklistFromCanonical();
+    return;
+  }
+
   console.log("🌱 Seeding database...");
 
+  // ── SYSTEM USER (BFF write-back attribution) ────────
+  // Audit-log rows written by the BFF integration cite this synthetic user.
+  // Fixed ID so middleware/internalKey.ts can reference it without a lookup.
+  // Role=ADMIN is the narrowest role that passes any requireRole check; the
+  // user is never authenticated as a human (no email login, no SSO match).
+  await prisma.user.upsert({
+    where: { id: "system-ai-bff" },
+    update: {},
+    create: {
+      id: "system-ai-bff",
+      email: "ai-system@furnleyhouse.internal",
+      name: "AI Extraction (system)",
+      role: "ADMIN",
+      status: "ACTIVE",
+    },
+  });
+
   // ── DEMO USERS (one per role) ───────────────────────
+  // Paraplanner is the real Furnley House paraplanner (Megan Doherty) so
+  // the approval / review flow can be tested against a CRM-matched account.
+  // The legacy "Emma Clarke" dummy is kept in the DB as INACTIVE (so any
+  // historical refs still resolve) — see scripts/replaceEmmaWithMegan.ts.
   const demoUsers = [
     { email: "admin@furnleyhouse.co.uk", name: "Nicki Foster", role: UserRole.ADMIN },
     // Default CA Team user (used by the role picker). Aligns with the real CRM user
@@ -17,16 +212,24 @@ async function main() {
     { email: "revathy.s@furnleyhouse.co.uk", name: "Revathy S", role: UserRole.CA_TEAM },
     // Secondary CA Team user kept for multi-CA testing.
     { email: "ca@furnleyhouse.co.uk", name: "Priya Ramesh", role: UserRole.CA_TEAM },
-    { email: "paraplanner@furnleyhouse.co.uk", name: "Emma Clarke", role: UserRole.PARAPLANNER },
+    // Real paraplanner from the Furnley House team (replaced the Emma Clarke dummy).
+    { email: "megan.doherty@furnleyhouse.co.uk", name: "Megan Doherty", role: UserRole.PARAPLANNER },
     { email: "adviser@furnleyhouse.co.uk", name: "James Whitfield", role: UserRole.ADVISER },
+    { email: "srinath.k@furnleyhouse.co.uk", name: "Srinath K", role: UserRole.CA_TEAM },
   ];
   for (const u of demoUsers) {
     await prisma.user.upsert({
       where: { email: u.email },
-      update: { name: u.name },
+      update: { name: u.name, status: "ACTIVE" },
       create: { email: u.email, name: u.name, role: u.role },
     });
   }
+  // Demote the old dummy paraplanner so auto-assign + role picker don't
+  // surface her. Safe re-run: no-op if she's not present.
+  await prisma.user.updateMany({
+    where: { email: "paraplanner@furnleyhouse.co.uk" },
+    data: { status: "INACTIVE" },
+  });
 
   // ── PROVIDER DIRECTORY ──────────────────────────────
   // Source: "Provider Contact details test.xlsx" (contact info)
@@ -41,13 +244,13 @@ async function main() {
     postalAddress?: string;
     loaFormat?: "EITHER" | "ELECTRONIC" | "WET_SIGNATURE";
     isOnOrigo?: boolean;
-    acceptedSigType?: string;
     planTypePrefixes?: string[];
     notes?: string;
   };
 
   const providers: ProviderInput[] = [
     // ── ORIGO-ONLY (on Origo network, no contact details on file) ────────────
+    { name: "Test -Sri",                          isOnOrigo: true },
     { name: "7IM",                                isOnOrigo: true },
     { name: "Aberdeen",                           isOnOrigo: true },
     { name: "AIG Life",                           isOnOrigo: true },
@@ -130,6 +333,14 @@ async function main() {
 
     // ── ORIGO + CONTACT DETAILS ──────────────────────────────────────────────
     {
+      name: "Test -Sri",
+      phoneMain: "01162185867",
+      emailMain: "sri@test.com",
+      postalAddress: "abrdn Elevate, PO Box 6891, Basingstoke, RG24 4SN",
+      isOnOrigo: true,
+      notes: "Previously Standard Life Elevate; now under abrdn brand",
+    },
+    {
       name: "Aberdeen (Elevate)",
       phoneMain: "0345 300 4177",
       emailMain: "Elevate_enquiries@abrdn.com",
@@ -154,7 +365,6 @@ async function main() {
       postalAddress: "Aviva, PO Box 520, Norwich, NR1 3WG",
       isOnOrigo: true,
       loaFormat: "EITHER",
-      acceptedSigType: "Either",
       planTypePrefixes: ["AV", "PP", "ISA", "GS", "TK", "DD", "PW", "B"],
       notes: "Multiple numbers: GPP 0345 602 9221, Personal 0800 953 1777, Advised Platform 0800 068 2170, Protection 0800 285 1098. Ceding email for GPP: NGP.questions@dgaviva.com; Aviva Protection: bpamail@aviva.com",
     },
@@ -309,7 +519,6 @@ async function main() {
       postalAddress: "Royal London House, Alderley Park, Congleton Road, Nether Alderley, Macclesfield, SK10 4EL",
       isOnOrigo: true,
       loaFormat: "EITHER",
-      acceptedSigType: "Either",
       planTypePrefixes: ["RL"],
       notes: "Transfers: pensiontransfers@royallondon.com / 0345 605 7777, 5th floor Churchgate House, 56 Oxford Street, Manchester M1 6EU. Protection: 0345 6094 500 / protectionhelp@royallondon.com",
     },
@@ -328,7 +537,6 @@ async function main() {
       postalAddress: "Scottish Widows Ltd, 69 Morrison Street, Edinburgh, EH3 1HL",
       isOnOrigo: true,
       loaFormat: "EITHER",
-      acceptedSigType: "Either",
       planTypePrefixes: ["SW", "DC", "ISA"],
     },
     {
@@ -338,7 +546,6 @@ async function main() {
       postalAddress: "Standard Life, 1 George Street, Edinburgh, EH2 2LL",
       isOnOrigo: true,
       loaFormat: "EITHER",
-      acceptedSigType: "Either",
       planTypePrefixes: ["SL", "SIPP", "EL"],
       notes: "Elevate platform now under abrdn brand (see Aberdeen (Elevate)). Elevate contact: 0345 300 4177 / Elevate_enquiries@abrdn.com / abrdn Elevate, PO Box 6891, Basingstoke, RG24 4SN",
     },
@@ -621,7 +828,6 @@ async function main() {
         postalAddress: p.postalAddress ?? undefined,
         isOnOrigo: p.isOnOrigo ?? false,
         loaFormat: p.loaFormat ?? undefined,
-        acceptedSigType: p.acceptedSigType ?? undefined,
         planTypePrefixes: p.planTypePrefixes ?? undefined,
         notes: p.notes ?? undefined,
       },
@@ -634,7 +840,6 @@ async function main() {
         postalAddress: p.postalAddress,
         isOnOrigo: p.isOnOrigo ?? false,
         loaFormat: p.loaFormat ?? "EITHER",
-        acceptedSigType: p.acceptedSigType,
         planTypePrefixes: p.planTypePrefixes ?? [],
         notes: p.notes,
       },
@@ -642,312 +847,9 @@ async function main() {
   }
 
   // ─────────────────────────────────────────────────────
-  // PENSION CHECKLIST TEMPLATE  (matches Pension tab)
+  // CHECKLIST TEMPLATES — loaded from canonical JSON
   // ─────────────────────────────────────────────────────
-  const pensionFields: Array<{
-    section: string;
-    key: string;
-    label: string;
-    type: string;
-    order: number;
-    options?: string[];
-    note?: string;
-  }> = [
-    // ── Basic Details ──
-    { section: "Basic Details", key: "provider_name", label: "Provider Name", type: "text", order: 1 },
-    { section: "Basic Details", key: "provider_phone_email", label: "Provider Telephone Number & Email Address", type: "text", order: 2 },
-    { section: "Basic Details", key: "plan_number", label: "Plan Number", type: "text", order: 3 },
-    { section: "Basic Details", key: "pension_type", label: "Type of Pension (Personal Pension / SIPP / Other)", type: "dropdown", order: 4, options: ["Personal Pension Plan", "SIPP", "IPP", "Group Stakeholder", "Stakeholder", "Occupational DC", "Workplace", "Section 32", "Group Pension Plan", "Other"] },
-    { section: "Basic Details", key: "scheme_name", label: "Name of Policy / Scheme", type: "text", order: 5 },
-    { section: "Basic Details", key: "contract_or_trust", label: "Is the plan Contract based or Trust based?", type: "dropdown", order: 6, options: ["Contract", "Trust"] },
-    { section: "Basic Details", key: "plan_status", label: "Status (Inforce-Active / Paid Up)", type: "dropdown", order: 7, options: ["Inforce Active", "Paid Up"], note: "Inforce-Active if contribution is ongoing; Paid Up if no ongoing contribution." },
-    { section: "Basic Details", key: "start_date", label: "Start Date", type: "date", order: 8 },
-    { section: "Basic Details", key: "normal_retirement_date", label: "Normal Retirement Date / Age / Protected Retirement Age", type: "text", order: 9, note: "What age can client access benefits?" },
-    { section: "Basic Details", key: "is_inherited_pension", label: "Inherited / Beneficiary Pension? (If yes, all or part? Taxable?)", type: "yes_no", order: 10, note: "If yes, continue checklist but notify PP/ADV immediately. Pre-75 death = inherit tax-free; post-75 = beneficiary pays income tax on withdrawals." },
-
-    // ── Transaction History ──
-    { section: "Transaction History", key: "contribution_personal", label: "Ongoing Regular Contributions – Personal (GROSS or NET)", type: "currency", order: 11 },
-    { section: "Transaction History", key: "contribution_employee", label: "Ongoing Regular Contributions – Employee", type: "currency", order: 12 },
-    { section: "Transaction History", key: "contribution_employer", label: "Ongoing Regular Contributions – Employer", type: "currency", order: 13 },
-    { section: "Transaction History", key: "withdrawal_details", label: "Withdrawals Details (Regular / Lumpsum / Ongoing amount being paid)", type: "free_text", order: 14 },
-    { section: "Transaction History", key: "pct_crystallised", label: "% Crystallised", type: "percentage", order: 15 },
-    { section: "Transaction History", key: "tax_free_cash", label: "Tax Free Cash Taken (£ and %)", type: "text", order: 16 },
-    { section: "Transaction History", key: "tax_year_2025_2026", label: "Contributions: 06/04/2025 – 05/04/2026", type: "currency", order: 17, note: "Pensions only. Proof of past 4 years' transactions is required." },
-    { section: "Transaction History", key: "tax_year_2024_2025", label: "Contributions: 06/04/2024 – 05/04/2025", type: "currency", order: 18 },
-    { section: "Transaction History", key: "tax_year_2023_2024", label: "Contributions: 06/04/2023 – 05/04/2024", type: "currency", order: 19 },
-    { section: "Transaction History", key: "tax_year_2022_2023", label: "Contributions: 06/04/2022 – 05/04/2023", type: "currency", order: 20 },
-    { section: "Transaction History", key: "employer_personal_breakdown", label: "Breakdown of Employer & Personal (per tax year, £)", type: "free_text", order: 21 },
-
-    // ── Valuation & Fund Details ──
-    { section: "Valuation & Fund Details", key: "current_value", label: "Current Value (with date)", type: "text", order: 22 },
-    { section: "Valuation & Fund Details", key: "transfer_value", label: "Transfer Value (if higher than CV, state any bonuses etc.)", type: "currency", order: 23 },
-    { section: "Valuation & Fund Details", key: "loyalty_bonuses", label: "Are there any Loyalty or Other Bonuses applied? (provide details)", type: "yes_no", order: 24 },
-    { section: "Valuation & Fund Details", key: "crystallised_split", label: "Crystallised & Uncrystallised Split", type: "free_text", order: 25 },
-    // Fund Details is now a structured table — see ChecklistFundLine model.
-    { section: "Valuation & Fund Details", key: "fund_range_link", label: "Range of Funds Available for Investment (provide client-specific link)", type: "url", order: 27 },
-    { section: "Valuation & Fund Details", key: "restricted_funds", label: "Are any of the funds held restricted for trading? (provide details)", type: "free_text", order: 28 },
-
-    // ── With Profit Funds ──
-    { section: "With Profit Funds", key: "wp_fund_names_isin", label: "With-Profits Fund Names & ISIN", type: "free_text", order: 29 },
-    { section: "With Profit Funds", key: "wp_guaranteed_growth_rate", label: "Guaranteed Growth Rate (if applicable)", type: "percentage", order: 30 },
-    { section: "With Profit Funds", key: "wp_ppfm", label: "PPFM (Principles & Practices of Financial Management)", type: "free_text", order: 31 },
-    { section: "With Profit Funds", key: "wp_historical_bonus_rate", label: "Historical Bonus Rate", type: "free_text", order: 32 },
-    { section: "With Profit Funds", key: "wp_mvr", label: "Market Value Reduction (MVR)", type: "free_text", order: 33 },
-    { section: "With Profit Funds", key: "wp_terminal_bonus", label: "Terminal Bonus", type: "free_text", order: 34 },
-
-    // ── Charges ──
-    { section: "Charges", key: "platform_charge", label: "Platform Charge / Plan Charges", type: "percentage", order: 35 },
-    { section: "Charges", key: "wrapper_charges", label: "Wrapper Charges", type: "percentage", order: 36 },
-    { section: "Charges", key: "fund_charges_weighted", label: "Fund Charges (Weighted Average)", type: "percentage", order: 37 },
-    { section: "Charges", key: "transactional_fund_charge", label: "Transactional Fund Charge", type: "percentage", order: 38 },
-    { section: "Charges", key: "advice_charges", label: "Advice Charges", type: "currency", order: 39 },
-    { section: "Charges", key: "exit_charge", label: "Exit Charge / Penalty on Transfer", type: "text", order: 40 },
-    { section: "Charges", key: "discount_on_charges", label: "Does a discount on charges or any other discount apply? (provide details)", type: "yes_no", order: 41 },
-    { section: "Charges", key: "other_charges", label: "Any other charges (e.g. switch charge, bid-offer spread)", type: "free_text", order: 42 },
-
-    // ── Guarantees ──
-    { section: "Guarantees", key: "gmp", label: "Guaranteed Minimum Pension (GMP)", type: "yes_no", order: 43 },
-    { section: "Guarantees", key: "gar", label: "Guaranteed Annuity Rate (GAR)", type: "yes_no", order: 44 },
-    { section: "Guarantees", key: "guaranteed_income", label: "Guaranteed Income", type: "yes_no", order: 45 },
-    { section: "Guarantees", key: "guaranteed_capital_value", label: "Guaranteed Capital Value", type: "yes_no", order: 46 },
-    { section: "Guarantees", key: "other_guarantees", label: "Any Other Guarantees Applicable", type: "free_text", order: 47 },
-    { section: "Guarantees", key: "protected_tax_free_cash", label: "Protected Tax-Free Cash", type: "yes_no", order: 48 },
-    { section: "Guarantees", key: "waiver_of_premium", label: "Waiver of Premiums / Contributions", type: "yes_no", order: 49 },
-    { section: "Guarantees", key: "additional_life_cover", label: "Additional Life Cover", type: "yes_no", order: 50 },
-
-    // ── Pre-A-Day Protected Tax-Free Cash (only if pension started before 06/04/2006) ──
-    { section: "Protected Tax-Free Cash (Pre-A-Day)", key: "a_day_value", label: "A-Day Value", type: "currency", order: 51, note: "Only applicable if pension started before 06/04/2006." },
-    { section: "Protected Tax-Free Cash (Pre-A-Day)", key: "a_day_tax_free_cash", label: "A-Day Tax-Free Cash", type: "currency", order: 52 },
-    { section: "Protected Tax-Free Cash (Pre-A-Day)", key: "current_tax_free_cash", label: "Tax-Free Cash on Current Basis", type: "currency", order: 53 },
-
-    // ── Benefits & Options Available ──
-    { section: "Benefits & Options Available", key: "drawdown_available", label: "Is drawdown facility available?", type: "yes_no", order: 54 },
-    { section: "Benefits & Options Available", key: "drawdown_options", label: "Drawdown options available (FAD / UFPLS / Annuity in-house / Annuity OMO)", type: "free_text", order: 55 },
-    { section: "Benefits & Options Available", key: "transfer_internal_for_fad", label: "If FAD not available, can the plan be transferred internally to another plan that supports it?", type: "yes_no", order: 56 },
-    { section: "Benefits & Options Available", key: "origo_or_discharge", label: "Origo Option Available OR Discharge Forms required (if no Origo)?", type: "dropdown", order: 57, options: ["Origo", "Discharge Forms", "Both", "Neither"] },
-    { section: "Benefits & Options Available", key: "partial_transfer_facility", label: "Is partial transfer facility available? Minimum balance to keep account open?", type: "free_text", order: 58 },
-    { section: "Benefits & Options Available", key: "lifestyling", label: "Lifestyling – is it available for this plan & is it active?", type: "free_text", order: 59 },
-    { section: "Benefits & Options Available", key: "death_benefits", label: "Death Benefits (Pay-out of fund value / Beneficiary drawdown)", type: "free_text", order: 60 },
-    { section: "Benefits & Options Available", key: "benefits_before_75", label: "Does client have to take benefits from plan prior to age 75?", type: "yes_no", order: 61 },
-    { section: "Benefits & Options Available", key: "former_protected_rights", label: "Former Protected Rights? If yes, what is the value?", type: "text", order: 62 },
-    { section: "Benefits & Options Available", key: "pension_subject_to_orders", label: "Is the pension subject to a Pension Sharing Order / Earmarking / Bankruptcy?", type: "yes_no", order: 63, note: "If yes, continue checklist but notify PP/ADV immediately." },
-    { section: "Benefits & Options Available", key: "external_transfers_in", label: "Can external plans be transferred IN?", type: "yes_no", order: 64 },
-    { section: "Benefits & Options Available", key: "named_beneficiaries_split", label: "Are there any named beneficiaries? If so, what is the % split between each?", type: "free_text", order: 65 },
-    { section: "Benefits & Options Available", key: "in_specie_transfer_out", label: "Are in-specie transfers available if transferring AWAY?", type: "yes_no", order: 66 },
-  ];
-
-  for (const f of pensionFields) {
-    await prisma.checklistTemplate.upsert({
-      where: { planType_fieldKey: { planType: PlanType.PENSION, fieldKey: f.key } },
-      update: {
-        sectionName: f.section,
-        fieldName: f.label,
-        fieldType: f.type,
-        dropdownOptions: f.options ?? [],
-        displayOrder: f.order,
-        conditionalNote: f.note ?? null,
-        isActive: true,
-      },
-      create: {
-        planType: PlanType.PENSION,
-        sectionName: f.section,
-        fieldName: f.label,
-        fieldKey: f.key,
-        fieldType: f.type,
-        dropdownOptions: f.options ?? [],
-        displayOrder: f.order,
-        conditionalNote: f.note ?? null,
-        isRequired: true,
-        isActive: true,
-      },
-    });
-  }
-
-  // ─────────────────────────────────────────────────────
-  // ISA CHECKLIST TEMPLATE  (matches ISA tab)
-  // ─────────────────────────────────────────────────────
-  const isaFields: Array<{
-    section: string;
-    key: string;
-    label: string;
-    type: string;
-    order: number;
-    options?: string[];
-    note?: string;
-  }> = [
-    // ── Basic Details ──
-    { section: "Basic Details", key: "provider_name", label: "Provider Name", type: "text", order: 1 },
-    { section: "Basic Details", key: "provider_phone_email", label: "Provider Telephone Number & Email Address", type: "text", order: 2 },
-    { section: "Basic Details", key: "plan_number", label: "Plan Number", type: "text", order: 3 },
-    { section: "Basic Details", key: "isa_type", label: "Type of ISA (Stocks & Shares / Cash / Lifetime)", type: "dropdown", order: 4, options: ["Stocks and Shares ISA", "Cash ISA", "Innovative Finance ISA", "Lifetime ISA"] },
-    { section: "Basic Details", key: "start_date", label: "Start Date", type: "date", order: 5 },
-    { section: "Basic Details", key: "is_flexible_isa", label: "Is this a 'Flexible ISA'?", type: "yes_no", order: 6 },
-
-    // ── Transaction History ──
-    { section: "Transaction History", key: "total_investment", label: "Total Investment", type: "currency", order: 7 },
-    { section: "Transaction History", key: "regular_contribution", label: "Amount of Ongoing Regular Contributions", type: "currency", order: 8 },
-    { section: "Transaction History", key: "current_tax_year_contribution", label: "Current Year Subscriptions (Allowance used this tax year)", type: "currency", order: 9 },
-    { section: "Transaction History", key: "withdrawal_details", label: "Withdrawals Details (Regular / Lumpsum / Ongoing amount being paid)", type: "free_text", order: 10 },
-
-    // ── Valuation & Fund Details ──
-    { section: "Valuation & Fund Details", key: "current_value", label: "Current Value (with date)", type: "text", order: 11 },
-    { section: "Valuation & Fund Details", key: "transfer_value", label: "Transfer Value (if higher than CV, disclose why)", type: "currency", order: 12 },
-    // Fund Details is now a structured table — see ChecklistFundLine model.
-    { section: "Valuation & Fund Details", key: "fund_range_link", label: "Range of Funds Available for Investment (provide client-specific link)", type: "url", order: 14 },
-    { section: "Valuation & Fund Details", key: "restricted_funds", label: "Are any of the funds held restricted for trading? (provide details)", type: "free_text", order: 15 },
-
-    // ── With Profit Funds ──
-    { section: "With Profit Funds", key: "wp_fund_names_isin", label: "With-Profits Fund Names & ISIN", type: "free_text", order: 16 },
-    { section: "With Profit Funds", key: "wp_ppfm", label: "PPFM", type: "free_text", order: 17 },
-    { section: "With Profit Funds", key: "wp_historical_bonus_rate", label: "Historical Bonus Rate", type: "free_text", order: 18 },
-    { section: "With Profit Funds", key: "wp_mvr", label: "Market Value Reduction (MVR)", type: "free_text", order: 19 },
-
-    // ── Charges ──
-    { section: "Charges", key: "platform_charge", label: "Platform Charge", type: "percentage", order: 20 },
-    { section: "Charges", key: "fund_charges_weighted", label: "Fund Charges (Weighted Average)", type: "percentage", order: 21 },
-    { section: "Charges", key: "transactional_fund_charge", label: "Transactional Fund Charge", type: "percentage", order: 22 },
-    { section: "Charges", key: "advice_charges", label: "Advice Charges", type: "currency", order: 23 },
-    { section: "Charges", key: "exit_charge", label: "Exit Charge / Penalty on Transfer", type: "text", order: 24 },
-    { section: "Charges", key: "other_charges", label: "Any other charges (e.g. switch charge, bid-offer spread)", type: "free_text", order: 25 },
-
-    // ── Guarantees ──
-    { section: "Guarantees", key: "any_guarantees", label: "Any Guarantees Applicable", type: "free_text", order: 26 },
-
-    // ── Benefits & Options Available ──
-    { section: "Benefits & Options Available", key: "origo_option", label: "Origo Option Available", type: "yes_no", order: 27 },
-    { section: "Benefits & Options Available", key: "discharge_forms", label: "Discharge Forms", type: "free_text", order: 28 },
-    { section: "Benefits & Options Available", key: "transfer_systems", label: "Transfer Systems", type: "free_text", order: 29 },
-    { section: "Benefits & Options Available", key: "isa_aps_transfer", label: "Do you allow an ISA APS transfer for the client's spouse beneficiary?", type: "yes_no", order: 30 },
-    { section: "Benefits & Options Available", key: "in_specie_transfer_out", label: "Are in-specie transfers available if transferring AWAY?", type: "yes_no", order: 31 },
-    { section: "Benefits & Options Available", key: "other_notes", label: "Other Notes", type: "free_text", order: 32 },
-  ];
-
-  for (const f of isaFields) {
-    await prisma.checklistTemplate.upsert({
-      where: { planType_fieldKey: { planType: PlanType.ISA, fieldKey: f.key } },
-      update: {
-        sectionName: f.section,
-        fieldName: f.label,
-        fieldType: f.type,
-        dropdownOptions: f.options ?? [],
-        displayOrder: f.order,
-        conditionalNote: f.note ?? null,
-        isActive: true,
-      },
-      create: {
-        planType: PlanType.ISA,
-        sectionName: f.section,
-        fieldName: f.label,
-        fieldKey: f.key,
-        fieldType: f.type,
-        dropdownOptions: f.options ?? [],
-        displayOrder: f.order,
-        conditionalNote: f.note ?? null,
-        isRequired: true,
-        isActive: true,
-      },
-    });
-  }
-
-  // ─────────────────────────────────────────────────────
-  // GIA CHECKLIST TEMPLATE  (matches GIA tab)
-  // ─────────────────────────────────────────────────────
-  const giaFields: Array<{
-    section: string;
-    key: string;
-    label: string;
-    type: string;
-    order: number;
-    options?: string[];
-    note?: string;
-  }> = [
-    // ── Basic Details ──
-    { section: "Basic Details", key: "single_or_joint", label: "Single or Joint client", type: "dropdown", order: 1, options: ["Single", "Joint"] },
-    { section: "Basic Details", key: "provider_name", label: "Provider Name", type: "text", order: 2 },
-    { section: "Basic Details", key: "provider_phone_email", label: "Provider Telephone Number & Email Address", type: "text", order: 3 },
-    { section: "Basic Details", key: "plan_number", label: "Plan Number", type: "text", order: 4 },
-    { section: "Basic Details", key: "start_date", label: "Start Date", type: "date", order: 5 },
-
-    // ── Transaction History ──
-    { section: "Transaction History", key: "total_contributions", label: "Total Contributions", type: "currency", order: 6 },
-    { section: "Transaction History", key: "regular_contribution", label: "Amount of Ongoing Regular Contributions", type: "currency", order: 7 },
-    { section: "Transaction History", key: "withdrawal_details", label: "Withdrawals Details", type: "free_text", order: 8 },
-    { section: "Transaction History", key: "current_tax_year_contribution", label: "Contributions Made This Tax Year", type: "currency", order: 9 },
-    { section: "Transaction History", key: "gain_loss_pct", label: "Gain / Loss % currently on plan", type: "percentage", order: 10 },
-
-    // ── Valuation & Fund Details ──
-    { section: "Valuation & Fund Details", key: "current_value", label: "Current Value (with date)", type: "text", order: 11 },
-    { section: "Valuation & Fund Details", key: "transfer_value", label: "Transfer Value", type: "currency", order: 12 },
-    { section: "Valuation & Fund Details", key: "transfer_value_difference_reason", label: "If transfer value is different from current value – mention the reason", type: "free_text", order: 13 },
-    // Fund Details is now a structured table — see ChecklistFundLine model.
-    { section: "Valuation & Fund Details", key: "fund_range_link", label: "Range of Funds Available for Investment (provide client-specific link)", type: "url", order: 15 },
-    { section: "Valuation & Fund Details", key: "restricted_funds", label: "Are any of the funds held restricted for trading? (provide details)", type: "free_text", order: 16 },
-
-    // ── With Profit Funds ──
-    { section: "With Profit Funds", key: "wp_fund_names_isin", label: "With-Profits Fund Names & ISIN", type: "free_text", order: 17 },
-    { section: "With Profit Funds", key: "wp_ppfm", label: "PPFM", type: "free_text", order: 18 },
-    { section: "With Profit Funds", key: "wp_historical_bonus_rate", label: "Historical Bonus Rate", type: "free_text", order: 19 },
-    { section: "With Profit Funds", key: "wp_mvr", label: "Market Value Reduction (MVR)", type: "free_text", order: 20 },
-
-    // ── Charges ──
-    { section: "Charges", key: "platform_charge", label: "Platform Charge / Wrapper Charge", type: "percentage", order: 21 },
-    { section: "Charges", key: "fund_charges_weighted", label: "Fund Charges (Weighted Average) + Base Cost of Funds", type: "percentage", order: 22 },
-    { section: "Charges", key: "transactional_fund_charge", label: "Transactional Fund Charge", type: "percentage", order: 23 },
-    { section: "Charges", key: "advice_charges", label: "Advice Charges", type: "currency", order: 24 },
-    { section: "Charges", key: "exit_charge", label: "Exit Charge / Penalty on Transfer", type: "text", order: 25 },
-    { section: "Charges", key: "setup_fees_to_adviser", label: "Setup Fees Paid to Adviser (required – can offset against CGT)", type: "currency", order: 26 },
-    { section: "Charges", key: "other_charges", label: "Any other charges (e.g. switch charge, bid-offer spread)", type: "free_text", order: 27 },
-
-    // ── Guarantees ──
-    { section: "Guarantees", key: "any_guarantees", label: "Any Guarantees Applicable", type: "free_text", order: 28 },
-
-    // ── Benefits & Options Available ──
-    { section: "Benefits & Options Available", key: "origo_option", label: "Origo Option Available", type: "yes_no", order: 29 },
-    { section: "Benefits & Options Available", key: "discharge_forms", label: "Discharge Forms", type: "free_text", order: 30 },
-    { section: "Benefits & Options Available", key: "realised_unrealised_gain_report", label: "Provide unrealised and realised gain report for wrapper (CGT calculation)", type: "free_text", order: 31 },
-    { section: "Benefits & Options Available", key: "in_specie_transfer_out", label: "Are in-specie transfers available if transferring AWAY?", type: "yes_no", order: 32 },
-    { section: "Benefits & Options Available", key: "other_notes", label: "Other Notes", type: "free_text", order: 33 },
-  ];
-
-  for (const f of giaFields) {
-    await prisma.checklistTemplate.upsert({
-      where: { planType_fieldKey: { planType: PlanType.GIA, fieldKey: f.key } },
-      update: {
-        sectionName: f.section,
-        fieldName: f.label,
-        fieldType: f.type,
-        dropdownOptions: f.options ?? [],
-        displayOrder: f.order,
-        conditionalNote: f.note ?? null,
-        isActive: true,
-      },
-      create: {
-        planType: PlanType.GIA,
-        sectionName: f.section,
-        fieldName: f.label,
-        fieldKey: f.key,
-        fieldType: f.type,
-        dropdownOptions: f.options ?? [],
-        displayOrder: f.order,
-        conditionalNote: f.note ?? null,
-        isRequired: true,
-        isActive: true,
-      },
-    });
-  }
-
-  // ── Deactivate legacy free-text fund_details fields (now superseded by ChecklistFundLine) ──
-  const deactivated = await prisma.checklistTemplate.updateMany({
-    where: { fieldKey: "fund_details" },
-    data: { isActive: false },
-  });
-  if (deactivated.count > 0) {
-    console.log(`ℹ️  Deactivated ${deactivated.count} legacy 'fund_details' template field(s).`);
-  }
-
-  console.log(
-    `✅ Seeding complete — Pension: ${pensionFields.length} fields | ISA: ${isaFields.length} fields | GIA: ${giaFields.length} fields`,
-  );
+  await seedChecklistFromCanonical();
 }
 
 main()

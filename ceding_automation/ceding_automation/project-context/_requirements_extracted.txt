@@ -1,0 +1,1525 @@
+FURNLEY HOUSE
+Financial Planning Partners
+Ceding Scheme Process Automation
+Requirements and Sign-Off Document
+Field
+Details
+Project Name
+Ceding Scheme Process Automation
+Version
+1.0 -- Draft for Sign-Off
+Prepared by
+Chennai Technology Team (Revathy S)
+Date
+March 2026
+Project Sponsor
+Lee Parkinson / Dan -- Accountable for successful delivery
+Project Coordinator
+Natalie (TBC) -- Managing plan, RAID log, actions and weekly SLT reporting
+Comms Lead
+Matt Hughes (TBC) -- Internal comms, weekly colleague updates, launch comms
+Requirements Lead
+Revathy S -- Capturing and tracking requirements through to delivery
+Current Phase
+INITIATE -- Scope, requirements and plan being defined
+Target Go-Live
+End of Q2 2026 (MVP)
+Primary Success KPI
+Increase ceding throughput from 20-25 cases per week to 78 cases per week
+Sign-Off
+This document requires written sign-off from all stakeholders listed below before the MVP build proceeds to the Deliver phase. Each signatory confirms they have read and agreed the requirements within their area of ownership.
+Stakeholder
+Role
+Signature
+Date
+Lee Parkinson
+Project Sponsor
+Natalie (TBC)
+Project Coordinator
+Matt Hughes
+Comms Lead
+Revathy S
+Requirements Lead
+Aruna
+Operations Lead
+Nishant
+Technical Lead
+John / Lee
+GDPR / Compliance Sign-Off
+RAG Status key: GREEN = complete or agreed AMBER = in progress or partial RED = not started or blocked
+Project Framework
+Superbia Project Phase Structure
+Phase
+Description
+IDEA
+Define the problem, goals and expected outcomes. Agree what success looks like for the business, clients and colleagues.
+INITIATE
+Generate ideas, define scope and requirements. Transform goals into milestones and tasks. Align roles and responsibilities.
+DELIVER
+Build the solution. Prepare for launch with comms, training and change readiness. Test for fitness for purpose.
+LAUNCH &amp; MEASURE
+Go live. Hypercare support period. Measure and report success metrics. Capture lessons learned.
+Requirement Types Used in This Document
+Type
+Code
+Definition
+Business Requirement
+BR
+WHY -- Defines goals, ROI, outcomes for stakeholders. Business value and customer impact.
+Functional Requirement
+FR
+WHAT -- What the system must do for end users. User tasks, inputs, outputs, features.
+Technical Requirement
+TR
+HOW -- Architecture, integrations, security, tools. For developers and IT.
+Non-Functional Requirement
+NFR
+PERFORMANCE -- SMART, testable quality standards. e.g. system loads in under 2 seconds.
+1. Problem Statement
+Obtaining scheme and policy information from providers following Letters of Authority is currently slow, inconsistent, and heavily manual. Provider response methods vary widely and incomplete information is common, creating delays, rework, and risk of data errors.
+The project covers all 10 stages of the ceding process:
+Preparing the Letter of Authority (LOA)
+Collecting client policy details and getting the LOA signed
+Setting up ceding on Zoho CRM
+Requesting information from the provider (via Origo or email / post)
+Chasing the provider
+Uploading documents and using AI to capture data
+Handling missing information via call scripts and RingCentral / Palindrome transcription
+Verifying the checklist
+Notifying and sending to the adviser / paraplanner
+Preparing recommendations
+2. MVP Scope
+2.1 In Scope and Out of Scope
+The table below defines what is included in the MVP and what is explicitly excluded. Items marked as Phase 2 will be scoped separately after MVP go-live.
+In Scope (MVP -- Phase 1)
+Out of Scope / Phase 2
+Pension (all sub-types -- see Section 2.2)
+Bond (Investment Bond / Offshore Bond) -- Phase 2
+ISA (all sub-types -- see Section 2.2)
+Final Salary / Defined Benefit -- Phase 2
+GIA (General Investment Account)
+Protection -- Phase 2
+Azure-hosted app with Lovable AI (prototype)
+EIS / VCT / alternative investments -- fully out of scope
+Origo URL link integration
+Suitability Report automation -- out of scope
+Palindrome transcript analysis
+FE fundinfo APIs -- out of scope
+Zoho WorkDrive export (stub)
+Fact Find integration -- out of scope
+Actual Zoho CRM API wiring -- stubbed in prototype
+Actual Zoho WorkDrive API wiring -- stubbed in prototype
+RingCentral API for recording retrieval -- stubbed in prototype
+Full SSO implementation -- demo role-selector in prototype
+Origo API -- URL link only in MVP
+2.2 Plan Types in Scope
+ISA (Stocks and Shares / Cash)
+GIA (General Investment Account)
+Personal Pension (including SIPP, Stakeholder, Workplace, Group)
+Bond (Investment Bond / Offshore Bond)
+Final Salary / Defined Benefit
+Protection -- plan-type level only; sub-type detail is Phase 2
+2.3 Integrations in MVP
+Zoho CRM: Stubbed in prototype with toast notifications. Full API wiring in MVP.
+Zoho WorkDrive: Stubbed in prototype. Full API wiring in MVP.
+Origo: URL link only (https://loa.unipass.co.uk/login). No API integration in MVP.
+RingCentral: Stubbed in prototype. Wire to Palindrome in production build.
+Palindrome: Confirmed as the transcription solution. Used for call transcript analysis.
+SSO: Demo role-selector used in prototype. Full SSO implementation is in MVP.
+Azure OpenAI: Lovable AI (Anthropic API) used in prototype. Azure-hosted OpenAI deployment used in production.
+3. Project Deliverables
+The project will deliver four things aligned to the 10-stage ceding process:
+1. Ceding Application: An app that automatically reads provider documents, fills the checklist using AI, shows only the relevant fields for the specific plan type, flags missing information, generates call scripts, analyses RingCentral recordings via Palindrome to fill gaps, and produces a verified completed checklist for the adviser.
+2. Revised Ceding Process: An updated LOA template with mandatory fields (provider name, address, plan type, policy number) and an updated advice standard requiring advisers to collect client policy details at the meeting (Stage 2). Note: the Zoho Blueprint checklist deliverable has been removed following confirmation from Matt that Blueprint checklist improvements are not practical as part of this project (Q-23).
+3. Origo Workflow: Providers on Origo receive requests via URL link navigation rather than manual email or post.
+4. Process Automation: AI data extraction, confidence-scored checklist, full audit trail, call script generation, Palindrome transcript analysis, and WorkDrive output -- eliminating current manual re-keying and reducing provider calls from 3-4 per case to 1.
+4. Project KPIs
+KPI
+Baseline (Current)
+Target (Post Go-Live)
+Evidence / Notes
+Ceding cases processed per week
+20-25 cases
+78+ cases
+Primary Q1 KPI confirmed by Lee.
+Time per case (data processing)
+~195 minutes
+~60 minutes
+60% reduction target. Remaining time used for pending cases.
+AI extraction accuracy (HIGH confidence)
+Not yet measured
+85% or more of fields per case
+Pre-launch survey confirms 85% accuracy would make a demonstrable improvement for advisers and paraplanners. UAT go-live gate.
+Provider calls per case
+3-4 calls
+0 calls (where CA team feedback loop active)
+Survey: 60% of cases -- advisers/PPs average 25 minutes of call time per case. With full CA team feedback loop, this should reduce to zero.
+PDF extraction time (per document)
+15-20 minutes manual
+Under 2 minutes automated
+~87% time saving at Stage 6. AI extraction removes manual re-keying.
+Ceding research returned to CA team
+~40% of cases
+100% of cases
+Survey finding: ~60% of cases not returned to CA team. Guidance and training required. Aruna to manage team feedback and pass AI training gaps to Revathy/Nishant.
+The AI extraction accuracy target of 85% of fields at HIGH confidence per case is the UAT go-live gate. The system cannot go live until this threshold is met across a minimum of 50 PDFs from 6 or more providers.
+5. Proposed Workflow -- 10-Stage Process
+Each ceding case moves through 10 stages in sequence. The CA Team can navigate back to any previous stage to make corrections. Stage completion is tracked in a visible progress timeline on the case detail page.
+Stage
+Name
+Primary Actor
+Description
+1
+Prepare LOA
+CA Team / Adviser
+Create a Letter of Authority for the adviser to send to the client. The client will need to sign this, either online or on paper.
+2
+Collect Client Policy Details and Get LOA Signed
+Adviser
+At the client meeting, the adviser collects key policy details (provider name, address, plan type, policy number) manually or using Zoho Scan. Client to be told before the meeting to bring this information. Client signs the LOA -- some providers accept electronic signatures, others require a wet signature.
+3
+Set Up Ceding on Zoho CRM
+CA Team
+Create and configure the ceding case in Zoho CRM. Link case to client record and assign to CA Team.
+4
+Request Information from Provider
+CA Team
+If provider is on Origo: send electronic request via Origo portal (https://loa.unipass.co.uk/login). If not on Origo: send LOA and request form by email or post. Use post if a wet signature is required.
+5
+Chase the Provider
+CA Team
+If no response is received after 5 working days, follow up with the provider by phone or email.
+6
+Upload Documents and Use AI to Capture Data
+CA Team
+When the provider sends information: upload or scan documents into the system. The AI tool reads the documents and fills the checklist automatically. The CA team must check the information and edit anything incorrect. The system shows only the fields needed for the specific plan type. Accepted file types: PDF, Excel, Word, text.
+7
+Handle Missing Information
+CA Team
+If any information is missing: the system creates a call script to guide a provider call. The CA team calls the provider using RingCentral and records the call. The recording is passed to Palindrome for transcription and AI analysis to fill remaining gaps.
+8
+Verify Checklist
+CA Team
+Once all fields are complete: review and approve the checklist. Mark case as Ready for Review.
+9
+Notify and Send to Adviser / Paraplanner
+CA Team
+Notify the adviser and paraplanner that all information has been received. Assign a Zoho CRM task with a deep link to the case. Send the completed checklist for approval.
+10
+Prepare Recommendations
+Adviser / Paraplanner
+The adviser can now review the information, carry out analysis, and create recommendations. Paraplanner approves the checklist. Export to WorkDrive and trigger the Suitability Report process in Zoho CRM.
+Re-review loop: if the Paraplanner or Adviser sends any field or the full case back for review at Stage 9 with a comment, the CA Team receives an in-app notification. The case status reverts to In Review. The CA Team must resolve the comment, make corrections, and re-mark as Ready for Review. A fresh approval cycle at Stage 9 is then required before the case can proceed to Stage 10.
+6. Roles and Access Control
+Authentication uses SSO in production. Roles are captured through SSO. The prototype uses a role-selector on the login screen for demonstration purposes.
+Capability
+CA Team (Chennai)
+Adviser / Paraplanner (UK)
+Admin
+View dashboard (own cases)
+Yes
+Yes
+Yes (all cases)
+Create / edit case
+Yes
+No
+Yes
+Upload documents
+Yes
+No
+Yes
+Run AI extraction
+Yes
+No
+Yes
+Edit checklist fields
+Yes
+Yes (logged)
+Yes
+Side-by-side PDF view
+Yes
+Yes
+Yes
+View call transcripts
+Yes
+Yes
+Yes
+Use Call Assist / generate script
+Yes
+No
+Yes
+Upload / analyse transcript
+Yes
+No
+Yes
+Mark case Ready for Review
+Yes
+No
+Yes
+Approve / request review on fields
+No
+Yes
+No
+View Audit Trail
+Yes
+Yes
+Yes
+Assign to Paraplanner
+Yes
+No
+Yes
+Export checklist
+Yes
+No
+Yes
+Manage Provider Directory
+No
+No
+Yes
+Manage Users
+No
+No
+Yes
+Manage Checklist Templates
+No
+No
+Yes
+Admin Panel User Management: if SSO is used in production, this section may become read-only with role assignment only. Full panel implemented in prototype.
+7. Functional Requirements by Stage
+Stage 1: Prepare LOA
+Create a Letter of Authority for the adviser to send to the client.
+LOA Status options: Not Sent / Sent / Signed (with date). LOA status must be confirmed before Stage 2 is accessible.
+If provider is on Origo: show Open in Origo button linking to https://loa.unipass.co.uk/login.
+If provider is NOT on Origo: show Send via Email button opening a pre-composed Outlook email via mailto link, with ceding department email pre-filled based on plan type prefix from the policy reference number, and the main provider email included as CC.
+If wet signature required: show Print LOA button and display postal address from the Provider Directory.
+All changes to case details are logged in the Audit Trail.
+Stage 2: Collect Client Policy Details and Get LOA Signed
+At the client meeting, the adviser collects key policy details: provider name, address, plan type, policy number.
+Collection can be done manually or using Zoho Scan.
+Client must be told before the meeting to have this information ready.
+Client signs the LOA -- some providers accept electronic signatures, others require a wet signature.
+LOA status must be recorded in the case before Stage 3 is accessible.
+Stage 3: Set Up Ceding on Zoho CRM
+Create and configure the ceding case in Zoho CRM. Link to client record and assign to CA Team member.
+Stage 4: Request Information from Provider
+Origo providers: send electronic request via Origo portal.
+Non-Origo providers: send LOA and request form by email or post. Use post if wet signature required.
+Provider contact details, routing method, and accepted signature type auto-populated from Provider Directory.
+Stage 5: Chase the Provider
+If no response received after 5 working days: follow up with provider by phone or email.
+CA Team logs chase attempt in Audit Trail with date and method.
+Stage 6: Upload Documents and Use AI to Capture Data
+Drag-and-drop or click-to-upload. Accepted file types: PDF, Excel (.xlsx/.xls), Word (.docx/.doc), plain text (.txt), email-exported text.
+Each document shown with: filename, file type icon, upload date, status (Uploaded / Processing / Extracted / Error).
+Run AI Extraction button (or auto-trigger on upload). Progress bar with message: Extracting data from [filename] -- this may take up to 2 minutes.
+Checklist fields update with extracted values, confidence scores (HIGH / MEDIUM / LOW / MISSING), and source citations.
+Split-panel view: document viewer opens alongside checklist. Each field source citation is clickable and scrolls the PDF panel to the exact page.
+Conflict handling: if a new document contradicts an existing value, the field is flagged as CONFLICT and CA Team is asked to choose which value to keep.
+Stage 7: Handle Missing Information -- Call Assist with AI Script
+Missing fields summary grouped by category (Charges, Pension Details, Benefits, Scheme Information).
+Auto-generated call script: opening greeting, provider phone number and department from Provider Directory, specific questions for each missing field, inline answer space.
+Provider lookup card: main phone, main email, ceding department direct line and email, accepted LOA formats, Origo status, call notes.
+Regenerate Script button if fields have changed.
+Call Assist is not visible to Adviser and Paraplanner roles.
+Stage 7 (cont.): Call Transcript with AI Assist
+In production: call recording pulled from RingCentral via API, pushed to Palindrome, transcript returned automatically.
+In prototype: Fetch from RingCentral button (stubbed with toast) plus manual paste as fallback.
+Transcript input: paste Palindrome transcript into labelled text area or upload a .txt file.
+Pre-defined expected questions panel (collapsible): lists questions that should have been asked, auto-generated from missing fields.
+Analyse Transcript: AI matches answers to MISSING / LOW fields, pre-fills them, tags each with call source (date and CA user name).
+Post-analysis summary: X fields filled from transcript. Y fields still missing.
+Stage 8: Verify Checklist
+Summary panel (pinned at top): count of HIGH confidence, MEDIUM/LOW, and MISSING fields. Progress bar. Updates in real time.
+CA Team edits remaining fields manually. Auto-saves with 500ms debounce.
+Mark as Ready for Review button enabled only when 0 MISSING fields remain.
+All edits logged in Audit Trail with user name, timestamp, original AI value, and new value.
+Stage 9: Notify and Send to Adviser / Paraplanner
+Assign to Paraplanner modal: select user, add optional note. Case status updates to In Review.
+In-app notification banner sent to paraplanner. Zoho CRM task created (stubbed). Deep link to case shown with copy-to-clipboard.
+Checklist shown in clean read-focused layout with side-by-side PDF view.
+Per-field: Approve, Request Review (routes back to CA Team with comment), Add Comment, Edit Value (logged).
+Bulk checkbox selection for Approve Selected or Send Selected for Review with shared comment.
+Approve All button (confirmation required). Request Full Re-review button (with comment).
+Re-review loop: any field sent back triggers in-app notification to CA Team; fresh approval cycle required.
+Once all fields approved: case status changes to Approved. Proceed to Export button activates.
+Stage 10: Export and Upload to WorkDrive
+Download Checklist: Excel (.xlsx) with Tab 1 (checklist: fields, values, confidence levels, source citations) and Tab 2 (audit trail). File naming: [ClientName]_[Provider]_[PlanRef]_[YYYYMMDD].xlsx.
+Save to WorkDrive: button with toast. Folder path: Client / [ClientName] / Deal WIP. Case status updates to Complete on success.
+Suitability Report summary card: key case facts (client, provider, plan type, transfer value, charges, key flags). Copy to Clipboard button.
+Prepare Suitability Report button links out to Zoho CRM blueprint to trigger the suitability report process.
+Audit Trail -- All Stages
+Immutable log of every action. Cannot be deleted or edited by any role.
+Log entry columns: Timestamp, User, Role, Action, Field, Old Value, New Value, Source.
+Actions logged: case created, document uploaded, AI extraction run, field edited, conflict resolved, call script generated, transcript analysed, field approved, review requested, comment added, status changed, task assigned, case approved, checklist exported.
+Display: vertical timeline with icons per action type. Filterable by action type and user.
+8. Plan-Type Checklist Fields
+The fields below are sourced directly from the latest checklist file and supersede all previous versions. The Admin Panel Checklist Template Management section allows fields to be added, edited, reordered, or deactivated without a code change.
+The Admin Panel Checklist Template Management section allows fields to be added, edited, reordered, or deactivated without a code change. Each field displays a confidence badge (HIGH / MEDIUM / LOW / MISSING), a source citation linking to the PDF page, and an edit indicator if manually overridden.
+Pension
+Field Name
+Type
+Conditional Logic
+Provider Name
+Text
+Provider Telephone number and Email address
+Text
+Plan number
+Text
+Type of pension (personal pension / SIPP / other)
+Text
+e.g. Personal Pension Plan, IPP, Group Stakeholder, Stakeholder, Occupational DC, Workplace, Section 32, Group Pension Plan
+Name of Policy / Scheme
+Text
+Is the plan Contract based or Trust based?
+Dropdown: Contract / Trust
+Status
+Dropdown: Inforce Active / Paid up
+Inforce Active = ongoing contribution. Paid up = no ongoing contribution.
+Start Date
+Date
+Normal Retirement Date / Age / Protected Retirement Age
+Date / Age
+What age can client access benefits?
+Inherited Pension? (If yes, check all or part of pension? And if it is taxable?)
+Yes / No
+If Yes: continue with checklist but notify PP/ADV immediately. Check if deceased died pre or post age 75. Pre-75 = often tax-free. Post-75 = income tax on withdrawals.
+Amount of ongoing regular contributions - personal (GROSS or NET)
+Currency (GBP)
+Amount of ongoing regular contributions - employee
+Currency (GBP)
+Amount of ongoing regular contributions - employer
+Currency (GBP)
+Withdrawals details (regular / lump sum / ongoing amount being paid)
+Free text
+% crystallised
+Percentage
+Tax free cash taken (GBP and %)
+Currency (GBP) + Percentage
+Contributions this tax year: 06/04/2025 to 05/04/2026
+Currency (GBP)
+Proof of past 4 tax years required
+Contributions this tax year: 06/04/2024 to 05/04/2025
+Currency (GBP)
+Contributions this tax year: 06/04/2023 to 05/04/2024
+Currency (GBP)
+Contributions this tax year: 06/04/2022 to 05/04/2023
+Currency (GBP)
+Current Value (with date)
+Currency (GBP) + Date
+Transfer Value (if higher than CV, state any bonuses)
+Currency (GBP)
+Are there any loyalty or other bonuses applied? If yes, provide details
+Yes / No + Details
+Crystallised and Uncrystallised split
+Currency (GBP)
+Fund Details: Fund Name
+Text list
+Repeat per fund
+Fund Details: ISIN / Sedol / City code
+Text
+Repeat per fund
+Fund Details: Number of units
+Number
+Repeat per fund
+Fund Details: Price per unit
+Currency (GBP)
+Repeat per fund
+Fund Details: Value
+Currency (GBP)
+Repeat per fund
+Fund Details: Fund charge
+Percentage
+Repeat per fund
+Range of funds available for investment (provide link)
+URL / Text
+Link specific to client&apos;s investment options
+Are any of the funds held restricted for trading? Provide details.
+Yes / No + Details
+With-profits: Fund Names and ISIN
+Text
+Only if invested in with-profits fund
+With-profits: Guaranteed Growth Rate (if applicable)
+Percentage
+Only if invested in with-profits fund
+With-profits: PPFM
+Text
+Only if invested in with-profits fund
+With-profits: Historical bonus rate
+Percentage
+Only if invested in with-profits fund
+With-profits: Market Value Reduction (MVR)
+Yes / No + Amount
+Only if invested in with-profits fund
+With-profits: Terminal Bonus
+Currency (GBP)
+Only if invested in with-profits fund
+Platform Charge / Plan charges
+Percentage
+Wrapper charges
+Percentage
+Fund charges (Weighted average)
+Percentage
+Transactional Fund Charge
+Percentage
+Advice charges
+Currency (GBP)
+Exit charge / Penalty on transfer
+Percentage / Amount
+Does a discount on charges apply? If yes, provide details.
+Yes / No + Details
+Any other charges (switch charge, Bid offer spread)
+Free text
+Guaranteed Minimum Pension (GMP)
+Yes / No + Amount
+Guaranteed Annuity Rate (GAR)
+Yes / No + Rate
+Guaranteed Income
+Yes / No + Details
+Guaranteed Capital Value
+Yes / No + Details
+Any other Guarantees applicable
+Free text
+Protected Tax-Free Cash
+Yes / No + % / Amount
+Only if pension started before 06/04/2006
+Waiver of Premiums / Contributions
+Yes / No + Details
+Additional Life Cover
+Yes / No + Details
+A-Day Value
+Currency (GBP)
+Only if Protected TFC applicable (pension started before 06/04/2006)
+A-Day tax free cash
+Currency (GBP)
+Only if Protected TFC applicable
+Tax free cash on current basis
+Currency (GBP)
+Only if Protected TFC applicable
+Is drawdown facility available?
+Yes / No
+Drawdown options: FAD / UFPLS / Annuity in house / Annuity OMO
+Multi-select
+Only if drawdown available
+If FAD not available, can plan be transferred internally?
+Yes / No
+Origo Option available OR discharge forms required if Origo not available?
+Yes / No
+Is partial transfer available? How much must remain for account to stay open?
+Yes / No + Amount
+Lifestyling: available and active?
+Yes / No
+Death Benefits: Fund value payout / Beneficiary drawdown
+Multi-select
+Does client have to take benefits from plan prior to age 75?
+Yes / No
+Former Protected Rights? If yes, what is the value?
+Yes / No + Currency (GBP)
+Is the pension subject to: pension sharing order / earmarking / bankruptcy?
+Yes / No
+If Yes: continue with checklist but notify PP/ADV immediately.
+Can external plans be transferred in?
+Yes / No
+Are there any named beneficiaries and if so, the % split between each?
+Yes / No + Details
+Are in-specie transfers available if transferring away?
+Yes / No
+ISA
+Field Name
+Type
+Conditional Logic
+Provider Name
+Text
+Provider Telephone number and Email address
+Text
+Plan number
+Text
+Type of ISA (Stocks and Shares / Cash / Lifetime / Junior)
+Dropdown
+Match to Zoho CRM sub-type: ISA, Cash ISA, Junior ISA, Stocks and Shares ISA
+Start Date
+Date
+Is this a Flexible ISA?
+Yes / No
+Total Investment
+Currency (GBP)
+Amount of ongoing regular contributions
+Currency (GBP)
+Current year subscriptions (allowance used this tax year)
+Currency (GBP)
+Withdrawals details (regular / lump sum / ongoing amount being paid)
+Free text
+Current Value (with date)
+Currency (GBP) + Date
+Transfer Value (if higher than CV, disclose why)
+Currency (GBP)
+Fund Details: Fund Name
+Text list
+Repeat per fund
+Fund Details: ISIN / Sedol / City code
+Text
+Repeat per fund
+Fund Details: Number of units
+Number
+Repeat per fund
+Fund Details: Price per unit
+Currency (GBP)
+Repeat per fund
+Fund Details: Value
+Currency (GBP)
+Repeat per fund
+Fund Details: Fund charge
+Percentage
+Repeat per fund
+Range of funds available for investment (provide link)
+URL / Text
+Link specific to client&apos;s investment options
+Are any of the funds held restricted for trading? Provide details.
+Yes / No + Details
+With-profits: Fund Names and ISIN
+Text
+Only if invested in with-profits fund
+With-profits: PPFM
+Text
+Only if invested in with-profits fund
+With-profits: Historical bonus rate
+Percentage
+Only if invested in with-profits fund
+With-profits: Market Value Reduction (MVR)
+Yes / No + Amount
+Only if invested in with-profits fund
+Platform Charge
+Percentage
+Fund charges (Weighted average)
+Percentage
+Transactional Fund Charge
+Percentage
+Advice charges
+Currency (GBP)
+Exit charge / Penalty on transfer
+Percentage / Amount
+Any other charges (switch charge, Bid offer spread)
+Free text
+Any Guarantees applicable
+Yes / No + Details
+Origo Option available
+Yes / No
+Discharge forms
+Required / Not required
+Transfer systems
+Text
+Do you allow an ISA APS transfer for the client&apos;s spouse / beneficiary?
+Yes / No
+Additional Permitted Subscription
+Are in-specie transfers available if transferring away?
+Yes / No
+Other Notes
+Free text
+GIA
+Field Name
+Type
+Conditional Logic
+Single or Joint client
+Dropdown: Single / Joint
+Provider Name
+Text
+Provider Telephone number and Email address
+Text
+Plan number
+Text
+Start Date
+Date
+Total Contributions
+Currency (GBP)
+Amount of ongoing regular contributions
+Currency (GBP)
+Withdrawals details
+Free text
+Contributions made this tax year
+Currency (GBP)
+Gain / Loss % currently on plan
+Percentage
+Current Value (with date)
+Currency (GBP) + Date
+Transfer Value
+Currency (GBP)
+If transfer value differs from current value, state reason
+Free text
+Fund Details: Fund Name
+Text list
+Repeat per fund
+Fund Details: ISIN / Sedol / City code
+Text
+Repeat per fund
+Fund Details: Number of units
+Number
+Repeat per fund
+Fund Details: Price per unit
+Currency (GBP)
+Repeat per fund
+Fund Details: Value
+Currency (GBP)
+Repeat per fund
+Fund Details: Fund charge
+Percentage
+Repeat per fund
+Range of funds available for investment (provide link)
+URL / Text
+Link specific to client&apos;s investment options
+Are any of the funds held restricted for trading? Provide details.
+Yes / No + Details
+With-profits: Fund Names and ISIN
+Text
+Only if invested in with-profits fund
+With-profits: PPFM
+Text
+Only if invested in with-profits fund
+With-profits: Historical bonus rate
+Percentage
+Only if invested in with-profits fund
+With-profits: Market Value Reduction (MVR)
+Yes / No + Amount
+Only if invested in with-profits fund
+Platform Charge / Wrapper charge
+Percentage
+Fund charges (Weighted average) + Base cost of funds
+Percentage
+Transactional Fund Charge
+Percentage
+Advice charges
+Currency (GBP)
+Exit charge / Penalty on transfer
+Percentage / Amount
+Setup fees paid to adviser (can offset against CGT)
+Currency (GBP)
+Required for CGT calculation
+Any other charges (switch charge, Bid offer spread)
+Free text
+Any Guarantees applicable
+Yes / No + Details
+Origo Option available
+Yes / No
+Discharge forms
+Required / Not required
+Please provide unrealised and realised gain report for wrapper to allow for CGT calculation.
+Yes / No
+Required for CGT planning
+Are in-specie transfers available if transferring away?
+Yes / No
+Other Notes
+Free text
+9. Provider Directory
+A searchable table of all providers, accessible from the main navigation. Admin can add, edit, and delete entries. CA Team can view and use entries within cases. Advisers can view only.
+9.1 LOA Signature Requirements
+Providers are categorised by their accepted LOA signature type. This drives the routing logic in Stage 1 of every case.
+Category
+Providers
+Does NOT accept Zoho Signature
+Aegon, Parmenion (Parmenion Capital Partners LLP)
+Accepts Wet Signature ONLY
+Quilter Cheviot, Amati Global Investor, Willis Towers Watson Limited, Nest, Prudential, Octopus Investments, St James&apos;s Place, Trafalgar, Capita, Scottish Friendly, Aon, BT Pension Scheme, Aviva (plans beginning with AV)
+Accepts DocSign / Adobe Sign
+Aegon, Transact (Electronic and Zoho Sign but does not use Origo)
+Providers who refuse to give info to third parties
+Vanguard, Forester Financial, AJ Bell, Barclays Smart Investors, John Hood, PIC (partial information only), Abrdn
+Cannot be contacted by email or call
+WTW plans (HSBC, Honeywell, DHL etc.)
+9.2 Origo Provider List
+The following providers are live on Origo and should receive LOA requests via the Origo portal (https://loa.unipass.co.uk/login) rather than by email or post.
+Origo Providers (alphabetical)
+7IM
+Aberdeen
+Aberdeen (Elevate)
+AIG Life
+AJ Bell Investcenter (Advised only)
+Albion Capital Group LLP
+Alliance Witan
+AON
+Aptia
+Aviva
+Barnett Waddingham
+Benchmark
+BestInvest
+Blackfinch
+British Friendly
+Brooks Macdonald
+Bupa - PMI
+Canada Life
+Capita
+Cazenove Capital
+Cirencester Friendly
+Clerical Medical
+Columbia Threadneedle
+Creative Pension Trust
+Curtis Banks
+Day Cooper Day
+Dentists Provident
+Dentons Pension Management
+DP Pensions
+Embark Pensions
+Evelyn Partners
+Foresight Group
+Forester Life
+Freetrade
+Friends Provident
+Fundment Pension
+Fundsmith
+Guardian 1821
+Halifax
+Hargreaves Lansdown
+Hartley Pensions
+Holloway Friendly
+HS Administrative Services
+Ingenious
+Intelligent Money
+InvestAcc
+Investec Wealth and Investment
+iPensions Group Ltd
+J.P. Morgan Personal Investing
+James Hay
+Janus Henderson
+Jupiter Asset Management
+Just Group
+L&amp;G
+LGT Wealth Management
+Liontrust
+Lloyds Banking Group
+London and Colonial
+LV=
+Marlborough Group
+MetLife
+Moneybox
+Moneyfarm
+Morgan Lloyd
+Morningstar Wealth Platform
+National Friendly
+NEST
+NFU Mutual
+NHS Pensions Scheme
+Nucleus
+Octopus
+OneFamily
+Options Workplace Trust
+Parmenion
+PensionBee
+Peoples Partnership
+Phoenix Wealth (AXA Wealth)
+Prudential
+Quilter
+Rathbones
+ReAssure
+RL360
+Royal London
+Ruffer LLP
+Sanlam
+Scottish Friendly
+Scottish Widows Ltd
+Scottish Widows Platform (formerly Embark)
+SEI Master Trust
+Smart Pension
+Sovereign Pension Services
+St James&apos;s Place Wealth Management
+Standard Life
+Sun Life
+Sun Life Financial of Canada
+Talbot and Muir
+The People&apos;s Pension
+Transact
+Trinity Bridge
+True Potential Investments
+Unum
+Utmost International
+Utmost Life and Pensions
+Vitality
+Wealthtime (T/N of Novia Financial plc)
+Wealthtime Select
+Wesleyan Assurance
+Willis Towers Watson
+Xafinity
+Yorsipp
+Zurich Assurance Ltd
+9.3 Provider Contact Details
+Full provider contact details are maintained in the Admin Panel Provider Directory. A sample of known entries is shown below. All entries must be verified before go-live.
+Full provider directory file to be confirmed by Aruna / Nat. Plan type prefix routing must be populated per provider before go-live.
+Provider Name
+Plan Type
+Contact Number
+Email Address
+Response Time
+Aegon (Personal)
+Personal Pension
+03456 10 00 10
+Clientsupport@arc.aegon.co.uk
+8-10 WDS
+Aviva (Personal Pension)
+Personal Pension
+0800 953 17 77
+enquiries@aviva.co.uk
+10 WDS
+Aviva Platform
+Investment
+0800 068 2170
+advisedplatform@aviva.com
+TBC
+Scottish Widows (Pension)
+Pension
+0345 716 6777
+TBC
+TBC
+Royal London (Protection)
+Protection
+0345 6094 500
+protectionhelp@royallondon.com
+10 WDS
+Hargreaves Lansdown (ISA)
+ISA
+0117 900 9000
+operations.queryteam@hl.co.uk
+TBC
+Legal &amp; General (DC Pension)
+Pension
+0345 070 8686
+DCthirdparty.response@landg.com
+5-10 WDS
+Standard Life (Elevate)
+Pension
+0345 300 4177
+Elevate_enquiries@abrdn.com
+25 WDS
+Prudential (Retirement Account)
+Retirement Account
+0800 640 9200
+GeneralServicing.PruWealth@Prudential.co.uk
+15 WDS
+Fidelity
+All plan types
+0800 414181
+No email (call only)
+TBC
+Nucleus
+Pension
+0131 226 9535
+client.relations@nucleusfinancial.com
+TBC
+True Potential (ISA)
+ISA
+0191 242 4866
+Platform@tpllp.com
+10-15 WDS
+10. Zoho CRM Field Mapping
+The table below defines how Zoho CRM plan fields map to API field names used in the ceding app.
+CRM Field Name
+API Name
+Used In Ceding App
+Client Owners
+Client_Owners
+Case owner / assigned adviser
+Plan Owner
+Owner
+Case assigned user
+Provider
+Provider
+Provider name on case detail
+Plan Start Date
+Plan_Start_Date
+Case details Stage 1
+Plan Type
+Plan Type
+Checklist template selection
+Non Advised
+Non_Advised
+Case flag
+Policy Ref
+Policy_Ref
+Policy reference on case
+Plan Status
+Plan_Status
+Case status tracking
+Crystallisation Status
+Crystallisation_Status
+Pension checklist field
+Valuation Date
+Valuation_Date
+Checklist current value date
+Valuation
+Valuation
+Current value field
+Normal Retirement Age
+Normal_Retirement_Age
+Pension checklist field
+Plan X Clients Module will also be updated as part of the case export process. Zoho API field name confirmation required from Aruna before production wiring.
+11. Technical Requirements
+11.1 Architecture
+Application hosted on Furnley House Azure tenant using the organisation&apos;s own Azure OpenAI deployment.
+No client or provider data to be sent to public OpenAI endpoints or external AI services.
+Lovable AI (Anthropic API, claude-sonnet-4-20250514) used in prototype only. Production uses Azure-hosted OpenAI (confirmed by Nishant, 26 March).
+Palindrome used exclusively for call audio transcription.
+Three full-stack developers: Revathy S, Nishant, Srinath.
+11.2 Integrations
+Zoho CRM (TR-03, TR-04): Case auto-created via API when blueprint task reaches trigger stage (&apos;Request ceding&apos; in &apos;New Client, New Business&apos; blueprint). Pre-populated with client name, case ID, provider, plan type. Deep link from Zoho CRM task to app. Stubbed in prototype.
+Zoho WorkDrive (TR-06): Checklist and audit trail exported as .xlsx and saved to WorkDrive. Folder: Client / Deal WIP. Naming: [ClientName]_[Provider]_[PlanRef]_[YYYYMMDD].xlsx. Stubbed in prototype.
+RingCentral (TR-05): Call recordings retrieved via API and passed to Palindrome for transcription. Stubbed in prototype.
+Origo (TR-12): URL link only to https://loa.unipass.co.uk/login. No API in MVP.
+SSO (TR-02): Single Sign-On between Zoho CRM and the ceding app. Confirmed as feasible. Full implementation post-MVP.
+11.3 Security and Compliance
+All documents and extracted data encrypted at rest (AES-256) and in transit (TLS 1.2 or higher) within the Furnley House Azure tenant.
+GDPR compliance sign-off required from IT Manager / SLT before processing any real client data. HARD BLOCKER. Sign-off owner: John / Lee.
+Data retention: 1 year backup for app and AI pipeline only (not for WorkDrive and Zoho CRM). Automated deletion after 1 year.
+Role-based access control: CA Team = edit; Adviser / Paraplanner = approve and comment; Admin = manage directory and users.
+11.4 Non-Functional Requirements
+AI extraction completes within 2 minutes for standard documents up to 20 pages. Progress indicator shown for documents over 20 pages.
+Page load under 3 seconds on 10Mbps+ connection. Tested from UK and Chennai.
+99.5% uptime during UK business hours (08:00 to 18:00 GMT, Monday to Friday).
+85% or more of fields at HIGH confidence across minimum 50 PDFs from 6+ providers before UAT clearance.
+Adviser and Paraplanner complete review and approval tasks with no more than 10 minutes of training.
+Supports concurrent use by up to 20 Chennai CA team users without performance degradation.
+12. Open Questions and Design Decisions
+This section contains all open questions from the Requirements Register. Green rows are resolved. Amber rows are partially answered. Red rows are blockers that must be resolved before the MVP build proceeds.
+12.1 Resolved Questions (GREEN)
+Q Ref
+Question Summary
+Answer / Decision
+Owner
+Q-01
+Who makes the LOA confirmation call the next business day?
+CA Team. Post: within 72 hours. Email: within 24 hours.
+Aruna / Rachel
+Q-02
+Who initiates the gap-filling provider call?
+CA Team exclusively.
+Lee Parkinson
+Q-04
+Is scanning client statement at meeting mandatory?
+Mandatory if info available; optional if not.
+Nat
+Q-11
+Is Palindrome licensed for ceding calls?
+Palindrome CONFIRMED as transcription solution.
+Lee / Jan
+Q-15
+What is FH data retention policy for provider PDFs?
+1 year backup for app and AI pipeline only. Not for WorkDrive and Zoho CRM.
+Compliance
+Q-19
+Is the MVP output a PDF, Excel, or both?
+Excel with audit trail tab.
+Lee / Aruna
+Q-20
+Is cases per week the official Q1 KPI?
+Yes. Remaining time can be used for pending ceding cases.
+Lee
+Q-22
+Does Origo expose an API for automated PDF retrieval?
+No API. URL link only.
+Nishant
+Q-26
+Can the Zoho Scan file naming issue be fixed?
+Yes. Name set when saving from Zoho Scan app.
+Matt / IT
+Q-28
+Has Margaret been briefed on the prototype demo?
+Completed.
+Revathy
+Q-30
+What are the formal project deliverables?
+Completed -- see Section 3.
+Lee / Revathy
+Q-31
+What are the formally agreed project KPIs?
+Completed -- see Section 4.
+Lee / Revathy
+Q-34
+Has Zoho Projects access been granted?
+Completed.
+Louise / Natalie
+12.2 Partially Answered Questions (AMBER)
+Q Ref
+Question Summary
+Partial Answer
+Owner
+Remaining Action
+Q-03
+Who performs final data sign-off?
+Nicki confirmed this should be picked up by the paraplanner.
+Lee / Natalie
+Formal sign-off process to be confirmed.
+Q-05
+What is the exact Zoho CRM blueprint stage name?
+&apos;Request ceding&apos; stage in the &apos;New Client, New Business&apos; blueprint triggers case creation.
+Aruna
+Zoho module confirmation still required (Deal or Activity?).
+Q-09
+What are alternative jargon terms per field?
+May not be practical to list -- expected to be learned by AI over time.
+Matt
+Confirm before UAT.
+Q-16
+Does Zoho Scan produce PDF or JPEG?
+Can produce PDF or JPG, renamed on save, shared to WorkDrive. Handwritten notes inconsistent quality.
+Lee / IT
+Confirm all advisor device support.
+Q-18
+Who selects UAT cases?
+TBC.
+Natalie
+Confirm UAT scope before Deliver phase.
+Q-21
+Which Zoho CRM Plan record fields should be mapped?
+CRM field mapping file provided -- see Section 10.
+Aruna
+API field names for fund value and annual charge still to be confirmed.
+Q-33
+What BAU handover KPIs are needed?
+TBC.
+Aruna / Alain / Nicki
+Needed for launch readiness planning.
+12.3 Blocked Questions (RED) -- Must Be Answered Before MVP Build
+Q Ref
+Question Summary
+Requirements Blocked
+Owner
+Q-06
+Can the provider directory (LOA format + sig types) be loaded immediately?
+FR-19, FR-23
+Aruna
+Q-07
+Are there policy reference prefix patterns that indicate the correct dept within a provider?
+FR-19
+Aruna
+Q-08
+Who leads the checklist field review? Which advisers and paraplanners must participate?
+FR-12
+Nat
+Q-24
+For each pension sub-type, which checklist fields apply and which do NOT?
+FR-12, checklist AI training
+Matt / Stu / Natalie
+Q-29
+Should the checklist have separate tabs per pension sub-type or one consolidated tab?
+FR-12, checklist design
+Matt
+Appendix A: Full Requirements Register
+Every requirement below requires sign-off from the named Business Owner. MoSCoW priority and current RAG status are shown.
+Business Requirements
+Req ID
+Description
+Priority
+Owner
+RAG
+Notes
+BR-01
+Reduce time per ceding case from ~195 minutes to ~60 minutes, enabling 78+ cases per week.
+Must Have
+Lee Parkinson
+RED
+Agreed verbally.
+BR-02
+Eliminate manual re-keying of provider data into Zoho by automating extraction from provider PDFs.
+Must Have
+Lee Parkinson
+AMBER
+AI extraction (own internal LLM) addresses this.
+BR-03
+Reduce provider calls per case from 3-4 to 1 (60% reduction) using AI-generated call scripts.
+Must Have
+Lee Parkinson
+AMBER
+Target agreed in workshop.
+BR-04
+Full audit trail per data point so advisers can trust data without re-doing provider calls.
+Must Have
+Lee Parkinson
+AMBER
+Audit trail shown at page level.
+BR-05
+Define and agree quantifiable success metrics before build begins.
+Must Have
+Lee Parkinson
+GREEN
+KPIs confirmed -- see Section 4.
+BR-06
+Weekly SLT reporting on case throughput, time saved, AI accuracy rate, and manual intervention rates.
+Must Have
+Lee / Natalie
+RED
+Dashboard or report format TBD.
+Functional Requirements
+Req ID
+Area
+Description
+Priority
+Owner
+RAG
+FR-01
+Case Management
+Dashboard: active cases with RAG status, status stages, link to Zoho CRM Tasks.
+Must Have
+Natalie / Lee
+AMBER
+FR-02
+Case Management
+Each case linked to Zoho CRM Task and client record. Client name search returns all cases.
+Must Have
+Aruna / Revathy
+RED
+FR-03
+Case Management
+New case auto-created in app when ceding task reaches correct stage in Zoho CRM blueprint.
+Must Have
+Revathy / IT
+RED
+FR-04
+Case Management
+Plan type from CRM drives which checklist is loaded automatically (Pension / ISA / GIA in Phase 1).
+Must Have
+Aruna
+AMBER
+FR-05
+Case Management
+Immutable case audit trail: PDF uploaded, field extracted, field edited, call made, adviser approved.
+Must Have
+Revathy / IT
+AMBER
+FR-06
+Document Ingestion
+Upload one or more documents per case (PDF, Word, Excel, text). Each upload triggers AI extraction.
+Must Have
+Revathy
+GREEN
+FR-07
+Document Ingestion
+Multiple documents per case -- each new document re-runs extraction and updates confidence scores.
+Must Have
+Revathy / Aruna
+AMBER
+FR-08
+Document Ingestion
+Document source tracked per extracted field: filename, page number, table or section heading.
+Must Have
+Revathy
+GREEN
+FR-09
+Document Ingestion
+Zoho Scan -- adviser scans client statement via Zoho mobile app and saves to WorkDrive client folder.
+Should Have
+Lee / IT
+RED
+FR-10
+AI Extraction
+AI extracts data from uploaded documents and maps to correct checklist field for plan type. Under 2 minutes.
+Must Have
+Revathy
+AMBER
+FR-11
+AI Extraction
+Confidence level shown per field: HIGH / MEDIUM / LOW / MISSING.
+Must Have
+Revathy
+AMBER
+FR-12
+AI Extraction
+Plan-type-specific extraction -- Pension / ISA / GIA rules applied correctly. Wrong-type fields not shown.
+Must Have
+Revathy / Aruna
+AMBER
+FR-13
+Checklist &amp; Review
+CA team: view all extracted fields, edit manually, save with manually entered flag. Both values stored.
+Must Have
+Aruna
+AMBER
+FR-14
+Checklist &amp; Review
+Summary panel: count of HIGH / MEDIUM/LOW / MISSING fields, updated in real time.
+Must Have
+Revathy
+GREEN
+FR-15
+Checklist &amp; Review
+Adviser/paraplanner review: Approve field, Request Review (with comment), Add Comment.
+Must Have
+Natalie
+AMBER
+FR-16
+Checklist &amp; Review
+Zoho task created for paraplanner when CA team marks case Ready for Review. Includes deep link.
+Must Have
+Natalie
+RED
+FR-17
+Checklist &amp; Review
+Output export: checklist auto-saved as Excel to Zoho WorkDrive when adviser approves.
+Must Have
+Revathy / Nat
+RED
+FR-18
+Call Assist
+AI-generated call script from missing/low-confidence fields. Correct provider phone, department, questions.
+Must Have
+Revathy / IT
+AMBER
+FR-19
+Call Assist
+Provider directory lookup: correct phone, email, department, LOA format for provider / plan type / prefix.
+Must Have
+Aruna / Revathy
+RED
+FR-20
+Call Assist
+After call, AI extracts answers from transcript and pre-fills checklist fields. Tagged with transcript source.
+Must Have
+Revathy / Lee
+AMBER
+FR-21
+LOA Process
+Updated LOA template: policy reference, scheme name, plan type, client data protection consent.
+Must Have
+Aruna / Natalie
+RED
+FR-22
+LOA Process
+Advice standard updated: advisers must scan client&apos;s latest provider statement at point of client meeting.
+Must Have
+Matt
+RED
+FR-23
+LOA Process
+App surfaces correct provider send address / email / Origo routing based on provider directory.
+Must Have
+Aruna
+RED
+FR-24
+Checklist
+Protection plan type checklist and AI extraction rules. DEFERRED TO PHASE 2.
+Could Have
+Lee / Nat
+RED
+FR-25
+Case Management
+Case status On Hold when client cannot provide policy details. Case paused and adviser notified.
+Must Have
+Natalie / Aruna
+RED
+FR-26
+LOA Process
+Zoho Blueprint checklist before first client meeting. NOTE: Matt confirmed this deliverable should be removed from scope (Q-23).
+Must Have
+Matt / Stu
+RED
+FR-27
+Document Ingestion
+Origo: once LOA submitted and PDF received, manually upload into ceding app and create case.
+Must Have
+Nishant
+RED
+FR-29
+Collaboration
+Shared WorkDrive project folder for all ceding project working documents.
+Must Have
+Matt Hughes
+RED
+Technical Requirements
+Req ID
+Area
+Description
+Priority
+Owner
+RAG
+TR-01
+Architecture
+App on Furnley House Azure tenant using Azure OpenAI. No client data to public OpenAI endpoints.
+Must Have
+Nishant
+RED
+TR-02
+Integration -- Zoho
+SSO between Zoho CRM and ceding app via SAML or OAuth. Confirmed as feasible.
+Must Have
+IT / Revathy
+RED
+TR-03
+Integration -- Zoho
+Deep link from Zoho CRM ceding task to relevant case in app. Passes client ID and case ID as URL parameters.
+Must Have
+Revathy / IT
+RED
+TR-04
+Integration -- Zoho
+New case auto-created via Zoho CRM API when blueprint task transitions to agreed trigger stage.
+Must Have
+Revathy / IT
+RED
+TR-05
+Integration -- RingCentral
+Call recordings retrieved via API and passed to Palindrome for transcription.
+Should Have
+IT / Revathy
+RED
+TR-06
+Integration -- WorkDrive
+Checklist and audit trail exported as .xlsx and saved to Zoho WorkDrive. Folder: Client / Deal WIP.
+Must Have
+Revathy / Aruna
+RED
+TR-07
+Security &amp; Access
+RBAC: CA team = edit; Adviser/Paraplanner = approve/comment; Admin = manage directory and users.
+Must Have
+IT / Lee
+AMBER
+TR-08
+Security &amp; Access
+All data encrypted at rest (AES-256) and in transit (TLS 1.2+). Deletion automated.
+Must Have
+IT / Compliance
+RED
+TR-09
+Security &amp; Compliance
+Formal GDPR sign-off from IT Manager/SLT. HARD BLOCKER. Cannot process live data without this.
+Must Have
+John / Lee
+RED
+TR-10
+Security &amp; Compliance
+Data retention policy: 1 year for app and AI. Aligned to FCA COBS rules.
+Must Have
+Compliance / IT
+RED
+TR-11
+AI / Architecture
+Azure OpenAI = PDF extraction. Palindrome = transcription. Lovable AI = prototype only.
+Must Have
+Nishant / Revathy
+AMBER
+TR-12
+Integration -- Origo
+Origo = URL link only. No API. Auto-integration Phase 2.
+Must Have
+Nishant
+RED
+TR-13
+Integration -- WorkDrive
+Zoho Scan file naming: user names file when saving from Zoho Scan app.
+Must Have
+Matt
+AMBER
+Non-Functional Requirements
+Req ID
+Area
+Description
+Priority
+Owner
+RAG
+NFR-01
+Performance
+AI extraction within 2 minutes for documents up to 20 pages. Progress indicator for larger documents.
+Must Have
+Revathy
+AMBER
+NFR-02
+Performance
+Page load under 3 seconds on 10Mbps+ connection. Tested from UK and Chennai.
+Must Have
+IT / Revathy
+RED
+NFR-03
+Reliability
+99.5% uptime during UK business hours (08:00-18:00 GMT, Mon-Fri).
+Must Have
+IT
+RED
+NFR-04
+AI Accuracy
+85% or more of fields at HIGH confidence across minimum 50 PDFs from 6+ providers before UAT clearance.
+Must Have
+Revathy / IT
+RED
+NFR-05
+Usability
+Adviser and paraplanner complete review and approval with no more than 10 minutes of training.
+Should Have
+Lee / Natalie
+RED
+NFR-06
+Scalability
+Supports up to 20 concurrent Chennai CA team users without performance degradation.
+Must Have
+IT / Revathy
+RED
+13. Admin Panel -- Planning might be in Phase 2
+A full Admin Panel is accessible to the Admin role only. It contains three sections.
+Section A -- User Management
+If SSO is used in production, this section may become read-only with role assignment only. Full panel implemented in prototype.
+List of all users: name, email, role, status (Active / Inactive).
+Add new user: name, email, role assignment.
+Edit role of existing user.
+Deactivate or activate user.
+Section B -- Provider Directory Management
+Full edit, delete, and add controls for the provider directory table.
+Fields: Provider Name, Phone (Main), Phone (Ceding Dept), Main Email, Ceding Dept Email, LOA Format, Origo, Accepted Sig Type, Plan Type Prefixes, Notes.
+Section C -- Checklist Template Management
+View the current list of checklist fields for each plan type (Pension / ISA / GIA in Phase 1).
+Add a new field: field name, type (text / number / dropdown / yes-no), required (yes / no).
+Edit field name or type.
+Reorder fields via drag-and-drop.
+Deactivate a field: hidden from checklist but not deleted; historical data preserved.
+14. UI / UX Requirements
+Branding
+Primary colour: Dark navy #0D1B2A
+Accent colour: Teal #00C2CB
+Font: Inter or similar clean sans-serif
+Furnley House lion logo in the top-left navbar
+Design must feel professional and financial-grade
+Layout
+Top navbar: Logo, Ceding Application app name, user name and role badge, settings icon
+Left sidebar: Dashboard, Cases, Provider Directory, Admin Panel (Admin role only)
+Main content: full-width white background with card-based layout
+Dashboard: pagination or infinite scroll, compact rows, sticky headers, quick-filter chips
+States
+Loading: Skeleton loaders for data tables; progress spinner during AI extraction; disabled buttons with spinner during API calls.
+Error: AI extraction failure shows red banner; unreadable document shows specific message; required fields highlighted in red on save attempt.
+Empty: Dashboard shows call to action; Provider Directory shows contact Admin message.
+15. Phase 2 Items (Out of Scope for MVP)
+The following items have been formally deferred to Phase 2 and must not be included in the MVP build:
+Protection sub-types: whole of life trust structures, reviewable premiums detail (confirmed by Lee Parkinson, 25 March -- described as a hidden beast by Stu)
+EIS / VCT / alternative investments -- fully out of scope
+Suitability Report automation
+FE fundinfo APIs / Investment Strategy work in CRM
+Fact Find integration
+Origo API integration (URL link only in MVP)
+Custom in-house AI model trained on FH call conversations (Phase 3 -- identified by Nishant, 26 March)
+Admin Panel
+16. Glossary
+Term
+Definition
+CA Team
+Client Analyst Team based in Chennai. Responsible for processing ceding cases in the application.
+CETV
+Cash Equivalent Transfer Value. The transfer value offered for a Defined Benefit / Final Salary pension.
+CRM
+Customer Relationship Management system. Furnley House uses Zoho CRM.
+DB
+Defined Benefit pension scheme. Also referred to as Final Salary.
+GIA
+General Investment Account.
+ISA
+Individual Savings Account. Can be Stocks and Shares or Cash.
+LOA
+Letter of Authority. A document signed by the client authorising the adviser to obtain policy information from a provider.
+MVP
+Minimum Viable Product. The first production-ready version of the application.
+Origo
+A financial services data exchange platform used by many UK providers. LOA requests can be sent electronically via Origo.
+Palindrome
+Third-party call transcription service used to convert RingCentral call recordings into text transcripts for AI analysis.
+RAG
+Red / Amber / Green status indicator showing the health of a ceding case.
+RingCentral
+Cloud-based telephony platform used by the CA Team for provider calls.
+SIPP
+Self-Invested Personal Pension.
+SSO
+Single Sign-On. Allows users logged into Zoho CRM to be automatically authenticated in the ceding application.
+UAT
+User Acceptance Testing. The final testing phase before go-live.
+WorkDrive
+Zoho WorkDrive is the cloud storage and document management platform used by Furnley House.

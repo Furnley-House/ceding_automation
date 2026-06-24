@@ -4,9 +4,9 @@ const DEMO_CASES = [
   {
     case_ref: "FH-SIPP-28471",
     client_name: "James Richardson",
-    provider_name: "Aviva",
+    Provider_group: "Aviva",
     plan_number: "AV-SIPP-2847",
-    plan_type: "Personal Pension",
+    plan_type: "Pension",
     status: "in_review",
     current_stage: 9,
     stages_completed: [1, 2, 3, 4, 5, 6, 7, 8],
@@ -21,7 +21,7 @@ const DEMO_CASES = [
   {
     case_ref: "FH-ISA-91034",
     client_name: "Sarah Matthews",
-    provider_name: "Hargreaves Lansdown",
+    Provider_group: "Hargreaves Lansdown",
     plan_number: "HL-ISA-91034",
     plan_type: "ISA",
     status: "extraction_complete",
@@ -37,9 +37,9 @@ const DEMO_CASES = [
   {
     case_ref: "FH-PP-44721",
     client_name: "David Park",
-    provider_name: "Scottish Widows",
+    Provider_group: "Scottish Widows",
     plan_number: "SW-PP-44721",
-    plan_type: "Personal Pension",
+    plan_type: "Pension",
     status: "on_hold",
     current_stage: 1,
     stages_completed: [],
@@ -52,7 +52,7 @@ const DEMO_CASES = [
   {
     case_ref: "FH-BND-78832",
     client_name: "Margaret Ellison",
-    provider_name: "Prudential",
+    Provider_group: "Prudential",
     plan_number: "PRU-IB-78832",
     plan_type: "Bond",
     status: "awaiting_documents",
@@ -68,7 +68,7 @@ const DEMO_CASES = [
   {
     case_ref: "FH-DB-12009",
     client_name: "Robert Haines",
-    provider_name: "Legal & General",
+    Provider_group: "Legal & General",
     plan_number: "LG-DB-12009",
     plan_type: "Final Salary",
     status: "approved",

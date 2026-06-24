@@ -1,7 +1,11 @@
 // backend/src/routes/checklist.ts
 import { Router, Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
+import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireInternalKey } from "../middleware/internalKey";
+import { applyFieldExtraction } from "../services/aiBffApply";
+import { mirrorChecklistToCase } from "../services/caseFieldMirror";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -111,6 +115,11 @@ router.post(
       update: {}, // leave existing data untouched
     });
 
+    // If the seed carried a value, mirror it to the Case row.
+    if (value) {
+      await mirrorChecklistToCase(req.params.caseId, template.fieldKey, value);
+    }
+
     // Return the field with template fields flattened so the frontend can use
     // field.fieldKey / field.label / field.section directly (after snake_keys).
     res.status(201).json({
@@ -139,6 +148,17 @@ router.patch(
 
     const oldValue = field.value;
 
+    // Conflict cleanup hygiene: a manual edit that sets a value on a
+    // conflicted field implicitly resolves the conflict — the operator has
+    // chosen one of the candidates (or typed a third value). Clear BOTH
+    // the hasConflict flag AND the stale conflictValues JSON so the row
+    // doesn't leave stale state behind. Previously this path only cleared
+    // hasConflict when `resolvedConflict: true` was explicitly passed, and
+    // conflictValues was never cleared by PATCH at all (only by the
+    // dedicated POST /resolve-conflict endpoint).
+    const isResolvingConflict =
+      field.hasConflict && (value !== undefined || resolvedConflict === true);
+
     const updated = await prisma.checklistField.update({
       where: { id: req.params.fieldId },
       data: {
@@ -147,7 +167,12 @@ router.patch(
         status: "MANUALLY_OVERRIDDEN",
         manualEditedById: req.user!.id,
         manualEditedAt: new Date(),
-        hasConflict: resolvedConflict ? false : field.hasConflict,
+        hasConflict: isResolvingConflict ? false : field.hasConflict,
+        // Only include the key when we mean to clear it. Spreading an
+        // empty object on the non-resolving branch lets Prisma leave the
+        // existing JSON untouched. Prisma.JsonNull writes SQL JSON null
+        // — actually clears the column rather than skipping the update.
+        ...(isResolvingConflict ? { conflictValues: Prisma.JsonNull } : {}),
         // Promote confidence to HIGH on manual edit
         confidence: value ? "HIGH" : "MISSING",
       },
@@ -165,6 +190,10 @@ router.patch(
         source: "MANUAL",
       },
     });
+
+    // Propagate provider_name / plan_number / start_date to the Case row
+    // so the header and dashboard reflect the latest value immediately.
+    await mirrorChecklistToCase(req.params.caseId, field.template.fieldKey, value);
 
     res.json(updated);
   }
@@ -310,6 +339,105 @@ router.post(
   }
 );
 
+// ── Bulk-fill missing fields with dummy test data ─────────
+// Testing-only helper. Walks every active template for the case's plan
+// type, and for any field with no value (whether the DB row exists or
+// not) writes a type-aware placeholder so the end-to-end approval flow
+// can be tested without scrubbing 33+ real fields.
+router.post(
+  "/:caseId/checklist/fill-test-data",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const caseRecord = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      select: { id: true, planType: true },
+    });
+    if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+    const templates = await prisma.checklistTemplate.findMany({
+      where: { planType: caseRecord.planType, isActive: true },
+    });
+    const existing = await prisma.checklistField.findMany({
+      where: { caseId: caseRecord.id },
+      select: { id: true, templateId: true, value: true },
+    });
+    const existingByTemplateId = new Map(existing.map((f) => [f.templateId, f]));
+
+    const dummyFor = (t: { fieldType: string; fieldName: string; dropdownOptions: string[] }) => {
+      switch ((t.fieldType || "").toLowerCase()) {
+        case "number":
+          return "42";
+        case "currency":
+          return "£100.00";
+        case "percent":
+        case "percentage":
+          return "0.75%";
+        case "yesno":
+        case "yes_no":
+          return "Yes";
+        case "date":
+          return "01/01/2025";
+        case "select":
+        case "dropdown":
+          return t.dropdownOptions?.[0] ?? "Option 1";
+        case "url":
+          return "https://example.com";
+        default:
+          return `Test ${t.fieldName}`;
+      }
+    };
+
+    let filled = 0;
+    for (const tpl of templates) {
+      const value = dummyFor(tpl);
+      const found = existingByTemplateId.get(tpl.id);
+      if (found && found.value) continue; // already has a real value — skip
+      if (found) {
+        await prisma.checklistField.update({
+          where: { id: found.id },
+          data: {
+            value,
+            confidence: "HIGH",
+            status: "MANUALLY_OVERRIDDEN",
+            isManuallyOverridden: true,
+            manualEditedById: req.user!.id,
+            manualEditedAt: new Date(),
+          },
+        });
+      } else {
+        await prisma.checklistField.create({
+          data: {
+            caseId: caseRecord.id,
+            templateId: tpl.id,
+            value,
+            confidence: "HIGH",
+            status: "MANUALLY_OVERRIDDEN",
+            isManuallyOverridden: true,
+            manualEditedById: req.user!.id,
+            manualEditedAt: new Date(),
+          },
+        });
+      }
+      // Mirror to Case columns (provider / policy ref / start date).
+      await mirrorChecklistToCase(caseRecord.id, tpl.fieldKey, value);
+      filled++;
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        caseId: caseRecord.id,
+        userId: req.user!.id,
+        action: "CASE_UPDATED",
+        source: "MANUAL",
+        newValue: `Filled ${filled} field${filled === 1 ? "" : "s"} with test data`,
+      },
+    });
+
+    res.json({ message: `Filled ${filled} field${filled === 1 ? "" : "s"} with test data`, filled });
+  },
+);
+
 // ── Bulk approve all fields ───────────────────────────────
 router.post(
   "/:caseId/checklist/approve-all",
@@ -382,8 +510,9 @@ router.post(
         caseId: req.params.caseId,
         scriptContent: script,
         missingFieldIds: missingFields.map((f) => f.id),
-        providerPhone: caseRecord.provider?.phoneCedingDept,
-        providerDept: "Ceding / Transfers",
+        // Provider phone/dept now live inside scriptContent (the JSON above)
+        // instead of as separate columns — read live from case.provider in
+        // the UI if you need the current value, else from the snapshot.
       },
     });
 
@@ -458,5 +587,150 @@ function generateQuestion(fieldName: string, fieldType: string): string {
   return questions[fieldName.toLowerCase().replace(/ /g, "_")] ||
     `Could you confirm the ${fieldName} for the policy?`;
 }
+
+// ── BFF write-back: single field ──────────────────────────
+// Called by the BFF (NOT by the frontend). Uses X-Internal-Key auth.
+// Contract: docs/ai-integration-design.md §4(a). The actual apply logic
+// lives in services/aiBffApply.ts so the poller uses the same path.
+const aiFieldWriteBackSchema = z.object({
+  job_id: z.string().regex(/^bff-[0-9a-f]{8,16}$/),
+  field_key: z.string().min(1),
+  value: z.union([z.string(), z.number(), z.null()]),
+  raw_value: z.string().nullable().optional(),
+  confidence: z.enum(["HIGH", "MEDIUM", "LOW", "MISSING"]),
+  source_page: z.number().int().positive().nullable().optional(),
+  source_quote: z.string().max(2000).nullable().optional(),
+  reasoning: z.string().max(2000).nullable().optional(),
+  document_id: z.string().min(1),
+});
+
+router.patch(
+  "/:caseId/checklist/:fieldId/ai-extract",
+  requireInternalKey,
+  async (req: Request, res: Response) => {
+    const parse = aiFieldWriteBackSchema.safeParse(req.body);
+    if (!parse.success) {
+      return res
+        .status(400)
+        .json({ error: "Invalid payload", details: parse.error.flatten() });
+    }
+    const body = parse.data;
+
+    // NOTE (per docs/monday-execution-plan.md D3):
+    // For /ai-extract only, :fieldId is the template.fieldKey
+    // (e.g. "plan_number"), NOT ChecklistField.id UUID. Stage 4
+    // of the BFF pipeline outputs each field keyed by field_key,
+    // so the BFF passes that as the URL param. Other routes in
+    // this file still use UUID-based lookup.
+    const field = await prisma.checklistField.findFirst({
+      where: {
+        caseId: req.params.caseId,
+        template: { fieldKey: req.params.fieldId },
+      },
+      include: {
+        template: true,
+        // Pull the case's canonical provider so we can plumb it into
+        // compareFieldValues via applyFieldExtraction. Only used for
+        // provider_name alias collapsing. No extra round-trip vs the
+        // existing query — same join.
+        case: { select: { provider: { select: { name: true } } } },
+      },
+    });
+    if (!field) {
+      return res
+        .status(404)
+        .json({ error: "Field not found for this case" });
+    }
+
+    // Defense-in-depth: BFF must send the same field_key in URL and body.
+    // Catches BFF bugs where URL routing and payload construction diverge.
+    if (body.field_key !== req.params.fieldId) {
+      return res.status(400).json({
+        error: "field_key mismatch between URL and body",
+        urlFieldKey: req.params.fieldId,
+        bodyFieldKey: body.field_key,
+      });
+    }
+
+    // Guard the BFF write-back call. Without this try/catch, any Prisma
+    // error (P2003 FK violation when the source doc was deleted mid-flight,
+    // P2025 record-not-found, transient connection drops) bubbles up as an
+    // unhandled promise rejection and crashes the Node process. The BFF
+    // typically multi-PATCHes 65 fields per doc, so one bad field would
+    // restart the whole backend mid-batch — observed as a 13-restart loop
+    // on 2026-06-10. Catch here, return 500 for THIS request, keep the
+    // process alive for everyone else.
+    let result;
+    try {
+      result = await applyFieldExtraction({
+        caseId: req.params.caseId,
+        fieldKey: field.template.fieldKey,
+        data: {
+          fieldKey: body.field_key,
+          value: body.value,
+          rawValue: body.raw_value ?? null,
+          confidence: body.confidence,
+          sourcePage: body.source_page ?? null,
+          sourceQuote: body.source_quote ?? null,
+          reasoning: body.reasoning ?? null,
+        },
+        jobId: body.job_id,
+        documentId: body.document_id,
+        // PATCH body doesn't carry detected_provider; fall back to the case's
+        // registry-known provider name (canonical by construction since the
+        // Provider table is the source of truth).
+        providerCanonical: field.case?.provider?.name ?? undefined,
+      });
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      console.error(
+        "[ai-extract] applyFieldExtraction failed for case=%s field=%s job=%s doc=%s code=%s:",
+        req.params.caseId,
+        req.params.fieldId,
+        body.job_id,
+        body.document_id,
+        code ?? "unknown",
+        err,
+      );
+      return res.status(500).json({
+        error: "Field extraction write failed",
+        code: code ?? "unknown",
+      });
+    }
+
+    if (result.outcome === "preserved") {
+      return res.json({ ok: true, fieldId: field.id, skipped: "preserved" });
+    }
+    if (result.outcome === "no-overwrite-missing") {
+      return res.json({
+        ok: true,
+        fieldId: field.id,
+        skipped: "no-overwrite-with-missing",
+      });
+    }
+    if (result.outcome === "skipped-manual-only") {
+      // Template is manual-entry-only — AI never writes it. No-op success so
+      // the BFF can tally it without treating it as an error.
+      return res.json({ ok: true, fieldId: field.id, skipped: "manual-entry-only" });
+    }
+    if (result.outcome === "field-not-found") {
+      return res.status(404).json({ error: "Field not found" });
+    }
+
+    // applied or conflict — re-read for the response so the BFF sees the
+    // post-state (helpful for its own telemetry).
+    const updated = await prisma.checklistField.findUnique({
+      where: { id: field.id },
+      select: { id: true, confidence: true, hasConflict: true },
+    });
+    return res.json({
+      ok: true,
+      fieldId: updated?.id,
+      confidence: updated?.confidence,
+      hasConflict: updated?.hasConflict ?? false,
+      outcome: result.outcome,
+    });
+  }
+);
 
 export { router as checklistRoutes };

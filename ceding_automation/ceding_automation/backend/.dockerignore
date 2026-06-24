@@ -1,0 +1,52 @@
+# Build artifacts
+node_modules
+dist
+*.log
+
+# Local dev case uploads — NEVER ship into the image. AZURE_STORAGE_ACCOUNT_NAME
+# is the runtime path. Including these blew up `az acr build` on Windows with
+# MAX_PATH for deep case-folder filenames.
+uploads
+
+# Local config (should NEVER end up in an image — use env vars / KV)
+.env
+.env.local
+.env.development
+.env.production
+.env*.local
+
+# OS / editor
+.DS_Store
+.vscode
+.idea
+*.swp
+
+# Source control
+.git
+.gitignore
+
+# Testing
+coverage
+.nyc_output
+*.test.ts.snap
+
+# Documentation (not needed in runtime)
+README.md
+docs
+
+# Prisma local artifacts
+prisma/migrations/migration_lock.toml.bak
+prisma/dev.db
+prisma/dev.db-journal
+
+# Docker meta (avoid recursive copies)
+Dockerfile
+.dockerignore
+
+# Misc
+.gitattributes
+.editorconfig
+.prettierrc*
+.eslintrc*
+.husky
+nodemon.json
