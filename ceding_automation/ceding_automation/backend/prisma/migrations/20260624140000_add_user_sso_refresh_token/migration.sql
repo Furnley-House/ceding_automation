@@ -5,4 +5,8 @@
 --
 -- Additive: no backfill, no data risk. Existing rows get NULL — those users
 -- will fall back to the existing SSO redirect flow on token expiry.
-ALTER TABLE "User" ADD COLUMN "ssoRefreshToken" TEXT;
+--
+-- Table name is "users" (lowercase plural) — Prisma's @@map directive on
+-- the User model. Matches the casing convention used by the prior migration
+-- 20260615143000_add_user_ringcentral_columns.
+ALTER TABLE "users" ADD COLUMN "ssoRefreshToken" TEXT;
