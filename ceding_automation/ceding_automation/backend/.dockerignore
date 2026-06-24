@@ -3,6 +3,11 @@ node_modules
 dist
 *.log
 
+# Local dev case uploads — NEVER ship into the image. AZURE_STORAGE_ACCOUNT_NAME
+# is the runtime path. Including these blew up `az acr build` on Windows with
+# MAX_PATH for deep case-folder filenames.
+uploads
+
 # Local config (should NEVER end up in an image — use env vars / KV)
 .env
 .env.local

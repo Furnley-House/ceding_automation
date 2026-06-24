@@ -148,7 +148,7 @@ async function seedChecklistFromCanonical(): Promise<void> {
           data: { isActive: false },
         });
       }
-    });
+    }, { timeout: 60_000 });
   }
 
   // Legacy: deactivate the free-text fund_details rows (now superseded by ChecklistFundLine
