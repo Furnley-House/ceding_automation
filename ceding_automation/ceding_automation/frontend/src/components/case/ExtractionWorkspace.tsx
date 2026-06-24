@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDocuments, getSignedUrl } from "@/hooks/useDocuments";
 import { useExtractionStatus, type ExtractionStatus } from "@/hooks/useExtractionStatus";
 import { useExtractionDisplay } from "@/hooks/useExtractionDisplay";
@@ -78,11 +78,22 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
   // through the backend to dodge Azure Blob CORS). We have to revoke the
   // previous URL when the selection changes or the component unmounts —
   // otherwise the underlying Blob is pinned in memory for the page lifetime.
+  //
+  // Deps deliberately exclude `documents` — its identity changes every 5s
+  // when useDocuments refreshes, which would otherwise re-fire this effect
+  // and revoke the blob mid-pdf.js load (→ "ERR_FILE_NOT_FOUND" + Headers
+  // "Invalid name" console spam during in-flight extractions). The lookup
+  // below still resolves because selectedId is only set from rows that
+  // already exist in `documents`, and deletion of the selected doc clears
+  // selectedId (onRemove → setSelectedId(null)) which DOES re-fire this.
+  const documentsRef = useRef(documents);
+  documentsRef.current = documents;
+
   useEffect(() => {
     let cancelled = false;
     let createdUrl: string | null = null;
     (async () => {
-      const doc = documents.find((d) => d.id === selectedId);
+      const doc = documentsRef.current.find((d) => d.id === selectedId);
       if (!doc) {
         setPdfUrl((prev) => {
           if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
@@ -105,7 +116,7 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
       cancelled = true;
       if (createdUrl && createdUrl.startsWith("blob:")) URL.revokeObjectURL(createdUrl);
     };
-  }, [selectedId, documents, caseId]);
+  }, [selectedId, caseId]);
 
   const selectedDoc = useMemo(
     () => documents.find((d) => d.id === selectedId) ?? null,
@@ -140,14 +151,16 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     resetKey: selectedId,
   });
 
-  // Batch summary anchors — pure status counts off the list. Only shown
-  // when more than one doc is concurrently PROCESSING; single-doc
-  // extractions keep just the per-doc banner.
+  // Batch summary anchors — pure status counts off the list. Shown while
+  // ANY doc is still processing AND the batch is multi-doc (batchTotal>1),
+  // so "Extracting 1 of 2 documents…" stays visible when the second doc
+  // is still finishing after the first one completed. Single-doc runs
+  // (batchTotal === 1) still skip the summary in favour of the banner.
   const processingCount = documents.filter((d) => d.status === "PROCESSING").length;
   const batchTotal = documents.filter(
     (d) => d.status === "PROCESSING" || d.status === "EXTRACTED" || d.status === "ERROR",
   ).length;
-  const showBatchSummary = processingCount > 1;
+  const showBatchSummary = processingCount >= 1 && batchTotal > 1;
 
   const handleJumpToSource = (
     sourcePage: number | null,
@@ -237,6 +250,13 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
   // ── Banner content for the selected document's extraction state ─────────
   // We render a banner when the selected doc is mid-extraction or in a
   // terminal state we still want to call out (failed / just-completed).
+  // Multi-doc mode: hide the big per-doc PROCESSING bar (it tracks only
+  // the selected doc and disappears when that one finishes — misleading
+  // when other docs are still running). Per-row bars in DocumentList +
+  // the "Extracting N of M documents…" text already cover multi-doc.
+  // The failed/error banner branch is NOT gated — a single errored doc
+  // still surfaces with its Retry button even in multi-doc.
+  const isMultiDoc = batchTotal > 1;
   const banner = renderExtractionBanner(
     selectedStatus,
     extractionStatus,
@@ -246,6 +266,8 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     display.displayedLabel,
     display.displayedStageNum,
     display.displayedSeconds,
+    display.isOverdue,
+    isMultiDoc,
   );
 
   return (
@@ -344,6 +366,8 @@ function renderExtractionBanner(
   displayedLabel: string | null,
   displayedStageNum: string | null,
   displayedSeconds: number,
+  isOverdue: boolean,
+  isMultiDoc: boolean,
 ) {
   // No selection → nothing.
   if (!documentStatus) return null;
@@ -385,7 +409,11 @@ function renderExtractionBanner(
   // Stage 4 override + smooth crawl + 1Hz timer all flow in here ready to
   // render. The bar's CSS transition-all eases small hops (25→50→75) and
   // the parent's interval feeds incremental values during the Stage 4 wait.
+  //
+  // Multi-doc: suppressed here — per-row bars + batch summary text cover
+  // multi-doc progress. Only the single-doc PROCESSING path renders.
   if (documentStatus === "PROCESSING") {
+    if (isMultiDoc) return null;
     const text =
       extraction.status === "queued"
         ? "Submitted to AI — waiting for pickup…"
@@ -397,7 +425,7 @@ function renderExtractionBanner(
 
     const mm = Math.floor(displayedSeconds / 60);
     const ss = String(displayedSeconds % 60).padStart(2, "0");
-    const timer = `${mm}:${ss}`;
+    const timer = isOverdue ? `${mm}:${ss}+` : `${mm}:${ss}`;
 
     const pct = typeof displayedPct === "number" ? displayedPct : null;
 
@@ -409,6 +437,11 @@ function renderExtractionBanner(
             <p className="text-xs font-semibold text-foreground">
               {text}
               <span className="text-muted-foreground font-normal"> · {timer}</span>
+              {isOverdue && (
+                <span className="text-muted-foreground font-normal italic">
+                  {" "}· taking longer than expected
+                </span>
+              )}
             </p>
             {pct !== null && (
               <div className="mt-1.5 h-1 bg-background rounded overflow-hidden">
