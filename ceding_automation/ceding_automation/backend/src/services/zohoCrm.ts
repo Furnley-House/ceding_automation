@@ -178,6 +178,25 @@ export interface ContactUserFields {
   clientOwners: ZohoUserRef[];     // Plans.Client_Owners ← Contact.Client_Owners
   paraplanner: ZohoUserRef | null;  // single user — used to derive Client_Owners if multi-select empty
   owner: ZohoUserRef | null;        // Plans.Owner ← Contact.Owner (CRM record-owner)
+  workDriveFolderId: string | null; // Contact.Client_Record_Folder_ID — per-client WorkDrive folder
+}
+
+// Read Contact.Client_Record_Folder_ID — the per-client WorkDrive folder
+// where Stage 9 exports (the case XLSX + later call recordings) land. Each
+// client gets their own folder in Zoho WorkDrive, populated on the Contact
+// record by CRM workflows. Stage 9 hard-fails if this is missing so CAs
+// fix the data in Zoho rather than dumping exports into a generic folder.
+//
+// Field name is env-configurable for the rare case where the CRM admin
+// renamed the API field (Zoho UI relabel only changes display, not API).
+export function extractContactWorkDriveFolderId(
+  contact: Record<string, unknown>,
+): string | null {
+  const fieldKey = process.env.ZOHO_CONTACT_FIELD_WORKDRIVE_FOLDER ?? 'Client_Record_Folder_ID';
+  const v = contact[fieldKey];
+  if (typeof v !== 'string') return null;
+  const trimmed = v.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 export function extractContactUserFields(
@@ -192,6 +211,7 @@ export function extractContactUserFields(
     clientOwners: readMultiUserRefs(contact, clientOwnersField),
     paraplanner: readUserRef(contact, paraplannerField),
     owner: readUserRef(contact, ownerField),
+    workDriveFolderId: extractContactWorkDriveFolderId(contact),
   };
 }
 

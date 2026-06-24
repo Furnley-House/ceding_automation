@@ -11,7 +11,7 @@ import { Router, Request, Response } from "express";
 import multer from "multer";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { uploadToWorkDrive } from "../services/workdrive";
+import { uploadToWorkDrive, resolveCaseFolderId, WorkDriveFolderResolutionError } from "../services/workdrive";
 import {
   updatePlanRecord,
   findPlanRecordByPolicyRef,
@@ -173,21 +173,53 @@ router.post(
       : null;
 
     // ── 1. WorkDrive upload ──────────────────────────────
+    // Folder is resolved per-client from Contact.Client_Record_Folder_ID
+    // (each client has their own WorkDrive folder, populated on the CRM
+    // Contact by Zoho workflows). Hard-fail with 422 if the field is empty
+    // so the CA fixes the data in Zoho rather than dumping the export into
+    // a shared folder.
     const fileName =
       (req.body?.fileName as string | undefined) ??
       req.file.originalname ??
       `${caseRecord.caseRef}_ceding.xlsx`;
 
-    let workdrive: { id: string; permalink?: string; name: string } | null = null;
+    let workdrive: {
+      id: string;
+      permalink?: string;
+      name: string;
+      folderId: string;
+    } | null = null;
     let workdriveError: string | null = null;
+
+    let resolvedFolderId: string | null = null;
+    try {
+      const resolved = await resolveCaseFolderId(caseRecord.clientZohoId);
+      resolvedFolderId = resolved.folderId;
+    } catch (err) {
+      if (err instanceof WorkDriveFolderResolutionError) {
+        return res.status(422).json({
+          error: "WorkDrive folder not resolvable",
+          code: err.code,
+          contactZohoId: err.contactZohoId,
+          message: err.message,
+        });
+      }
+      throw err;
+    }
+
     try {
       const result = await uploadToWorkDrive(
         req.file.buffer,
         fileName,
-        undefined, // use default folder
+        resolvedFolderId,
         req.file.mimetype || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       );
-      workdrive = { id: result.id, permalink: result.permalink, name: result.name };
+      workdrive = {
+        id: result.id,
+        permalink: result.permalink,
+        name: result.name,
+        folderId: resolvedFolderId,
+      };
     } catch (err) {
       workdriveError = err instanceof Error ? err.message : String(err);
     }
