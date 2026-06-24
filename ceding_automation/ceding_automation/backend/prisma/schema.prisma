@@ -138,6 +138,11 @@ model User {
   role      UserRole
   status    UserStatus @default(ACTIVE)
   ssoId     String?    @unique // Zoho SSO identifier
+  // Microsoft (Entra) refresh_token captured at SSO callback. Used by
+  // POST /auth/refresh to silently mint a new app JWT when the previous one
+  // expires, so users mid-extraction don't get dumped to the login screen.
+  // Rotated on each refresh; nullable for users who pre-date this column.
+  ssoRefreshToken String? @db.Text
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useRole, ROLE_LABELS, ROLE_USERS, type Role } from "@/hooks/useRole";
 import { useAuthStore } from "@/lib/store";
@@ -8,6 +8,13 @@ import logo from "@/assets/logo-dark.png";
 
 // Backend base URL for SSO redirect (browser navigates directly to it)
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:3001/api";
+
+// In production we bypass this page entirely — users arrive via the Zoho
+// task button, must be SSO-authenticated, and never see demo role tiles.
+// Toggle via VITE_DISABLE_DEMO_LOGIN=true at build time. Staging keeps the
+// picker for cross-role testing.
+const DEMO_LOGIN_DISABLED =
+  String(import.meta.env.VITE_DISABLE_DEMO_LOGIN).toLowerCase() === "true";
 
 // Demo email per role — must match seeded users in the backend.
 // `ca_team` resolves to Revathy S so it lines up with the real Zoho task owner.
@@ -76,6 +83,30 @@ const RolePicker = () => {
   const ssoLogin = () => {
     window.location.href = `${API_BASE}/auth/azure?returnTo=${encodeURIComponent(returnTo)}`;
   };
+
+  // Prod: skip the picker entirely. We fire the SSO redirect on mount so
+  // users from the Zoho task button land at their target screen with at
+  // most a brief Microsoft-session round-trip. Microsoft does silent SSO
+  // (prompt=none) when the user already has an active session, so the
+  // detour is usually invisible.
+  useEffect(() => {
+    if (DEMO_LOGIN_DISABLED) {
+      window.location.replace(
+        `${API_BASE}/auth/azure?returnTo=${encodeURIComponent(returnTo)}`,
+      );
+    }
+  }, [returnTo]);
+
+  if (DEMO_LOGIN_DISABLED) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-center">
+          <Loader2 className="h-8 w-8 animate-spin text-primary mx-auto mb-4" />
+          <p className="text-sm text-muted-foreground">Signing you in with Microsoft…</p>
+        </div>
+      </div>
+    );
+  }
 
   const pick = async (r: Role) => {
     setLoading(r);
