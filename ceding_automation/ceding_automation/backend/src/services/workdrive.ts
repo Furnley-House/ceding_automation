@@ -2,19 +2,108 @@
 // Upload files (call recordings, transcripts, generated PDFs) to Zoho WorkDrive.
 import axios from 'axios';
 import FormData from 'form-data';
-import { getZohoAccessToken } from './zohoCrm';
+import { getZohoAccessToken, getContactRecord, extractContactWorkDriveFolderId } from './zohoCrm';
 
 // Read env at call-time, not module-load, so .env edits are picked up without rebuilding
 const workdriveApiBase = () => process.env.ZOHO_WORKDRIVE_API_BASE ?? 'https://www.zohoapis.eu/workdrive/api/v1';
-// Sandbox/test default for the Furnley House ceding recordings folder. Used
-// when ZOHO_WORKDRIVE_FOLDER_ID isn't set (or is still the .env.example
-// placeholder). Production deployments MUST set the env var explicitly.
-const DEFAULT_WORKDRIVE_FOLDER_ID = 'j0qma656e29ffedef476ebf89cdc1bb40edb8';
-const defaultFolderId = () => {
+
+// Optional org-wide fallback for call-recording uploads when no per-case
+// folder is supplied. Stage 9 exports do NOT use this — they resolve a
+// per-client folder via resolveCaseFolderId() and hard-fail if it's missing.
+// Returns the configured value or null; callers decide how to handle null.
+const envFolderId = (): string | null => {
   const fromEnv = process.env.ZOHO_WORKDRIVE_FOLDER_ID;
-  if (fromEnv && !fromEnv.startsWith('your-')) return fromEnv;
-  return DEFAULT_WORKDRIVE_FOLDER_ID;
+  if (!fromEnv) return null;
+  if (fromEnv.startsWith('your-') || fromEnv.startsWith('PLACEHOLDER')) return null;
+  return fromEnv;
 };
+
+// Per-client WorkDrive folder resolution for Stage 9 exports. The folder
+// lives on Contact.Client_Record_Folder_ID — each client gets a dedicated
+// folder in WorkDrive, populated on the Contact by CRM workflows.
+//
+// Behaviour is gated by WORKDRIVE_REQUIRE_PER_CLIENT_FOLDER:
+//   - "true"  (prod)              → hard-fail with a discriminated error if
+//                                   the Contact has no Client_Record_Folder_ID.
+//                                   Forces CAs to fix the data in Zoho rather
+//                                   than dumping the export in a shared folder.
+//   - "false" / unset (staging)   → fall back to ZOHO_WORKDRIVE_FOLDER_ID env
+//                                   var, preserving the pre-existing behaviour
+//                                   so test data without the Contact field
+//                                   keeps working.
+//
+// Either way we *prefer* the per-client folder when it's populated; the flag
+// only changes what happens when the field is empty / Contact is missing.
+export interface ResolvedFolder {
+  folderId: string;
+  source: 'contact' | 'env-fallback';
+  contactZohoId: string | null;
+}
+export class WorkDriveFolderResolutionError extends Error {
+  readonly code: 'NO_CLIENT_ZOHO_ID' | 'CONTACT_NOT_FOUND' | 'FOLDER_FIELD_EMPTY';
+  readonly contactZohoId: string | null;
+  constructor(
+    code: 'NO_CLIENT_ZOHO_ID' | 'CONTACT_NOT_FOUND' | 'FOLDER_FIELD_EMPTY',
+    contactZohoId: string | null,
+    message: string,
+  ) {
+    super(message);
+    this.code = code;
+    this.contactZohoId = contactZohoId;
+    this.name = 'WorkDriveFolderResolutionError';
+  }
+}
+
+const perClientRequired = (): boolean =>
+  String(process.env.WORKDRIVE_REQUIRE_PER_CLIENT_FOLDER).toLowerCase() === 'true';
+
+export async function resolveCaseFolderId(clientZohoId: string | null): Promise<ResolvedFolder> {
+  // Try the per-client folder first — always preferred when available.
+  if (clientZohoId) {
+    const contact = await getContactRecord(clientZohoId).catch(() => null);
+    if (contact) {
+      const folderId = extractContactWorkDriveFolderId(contact);
+      if (folderId) {
+        return { folderId, source: 'contact', contactZohoId: clientZohoId };
+      }
+    } else if (perClientRequired()) {
+      // Strict mode: missing Contact is a fail-stop, no silent fallback.
+      throw new WorkDriveFolderResolutionError(
+        'CONTACT_NOT_FOUND',
+        clientZohoId,
+        `Zoho Contact ${clientZohoId} not found. Check the case's clientZohoId or refresh from Zoho.`,
+      );
+    }
+  }
+
+  if (perClientRequired()) {
+    if (!clientZohoId) {
+      throw new WorkDriveFolderResolutionError(
+        'NO_CLIENT_ZOHO_ID',
+        null,
+        "Case has no linked Zoho Contact (clientZohoId is null). Link the case to a Contact in Zoho before exporting.",
+      );
+    }
+    throw new WorkDriveFolderResolutionError(
+      'FOLDER_FIELD_EMPTY',
+      clientZohoId,
+      `Zoho Contact ${clientZohoId} has no Client_Record_Folder_ID set. Populate that field on the Contact in Zoho and retry.`,
+    );
+  }
+
+  // Lenient mode (staging / local) — fall back to the org-wide env folder.
+  const envFallback = envFolderId();
+  if (!envFallback) {
+    // Lenient mode but no env fallback either — surface the same
+    // FOLDER_FIELD_EMPTY error so the caller's 422 handler kicks in cleanly.
+    throw new WorkDriveFolderResolutionError(
+      'FOLDER_FIELD_EMPTY',
+      clientZohoId,
+      `No WorkDrive folder available: Contact.Client_Record_Folder_ID is empty and ZOHO_WORKDRIVE_FOLDER_ID env fallback is not set.`,
+    );
+  }
+  return { folderId: envFallback, source: 'env-fallback', contactZohoId: clientZohoId };
+}
 
 export interface WorkDriveUploadResult {
   id: string;
@@ -34,11 +123,12 @@ export interface WorkDriveFile {
   downloadUrl?: string;
 }
 
-// List files in a WorkDrive folder (default folder if no ID provided).
+// List files in a WorkDrive folder. Folder ID must be supplied explicitly,
+// either by the caller or via the ZOHO_WORKDRIVE_FOLDER_ID env fallback.
 export async function listWorkDriveFiles(folderId?: string): Promise<WorkDriveFile[]> {
-  const parentId = folderId ?? defaultFolderId();
-  if (!parentId || parentId.startsWith('your-')) {
-    throw new Error('ZOHO_WORKDRIVE_FOLDER_ID not configured');
+  const parentId = folderId ?? envFolderId();
+  if (!parentId) {
+    throw new Error('No WorkDrive folder ID supplied and ZOHO_WORKDRIVE_FOLDER_ID env fallback not configured');
   }
   const token = await getZohoAccessToken();
   const { data } = await axios.get(
@@ -84,9 +174,9 @@ export async function uploadToWorkDrive(
   folderId?: string,
   contentType: string = 'application/octet-stream'
 ): Promise<WorkDriveUploadResult> {
-  const parentId = folderId ?? defaultFolderId();
-  if (!parentId || parentId.startsWith('your-')) {
-    throw new Error('ZOHO_WORKDRIVE_FOLDER_ID not configured');
+  const parentId = folderId ?? envFolderId();
+  if (!parentId) {
+    throw new Error('No WorkDrive folder ID supplied and ZOHO_WORKDRIVE_FOLDER_ID env fallback not configured');
   }
 
   const token = await getZohoAccessToken();
