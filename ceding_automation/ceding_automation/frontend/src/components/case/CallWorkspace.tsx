@@ -738,16 +738,35 @@ export function CallWorkspace({
   };
 
   // ── WorkDrive: list MP3s already saved in the folder ────────────────────
-  const fetchWorkDriveFiles = async () => {
+  // Backend caches the response per folder for 60s to avoid Zoho's F7008
+  // burst-rate-limit. Pass `fresh: true` to bypass the cache when the user
+  // explicitly clicks "Refresh".
+  const fetchWorkDriveFiles = async (opts: { fresh?: boolean } = {}) => {
     setWdLoading(true);
     try {
-      const res = await api.get(`/cases/${caseId}/calls/workdrive-recordings`);
+      const url = opts.fresh
+        ? `/cases/${caseId}/calls/workdrive-recordings?fresh=1`
+        : `/cases/${caseId}/calls/workdrive-recordings`;
+      const res = await api.get(url);
       const files = (res.data as { files: WorkDriveFile[] }).files ?? [];
       // Show newest first
       files.sort((a, b) => (b.createdTime ?? "").localeCompare(a.createdTime ?? ""));
       setWdFiles(files);
     } catch (err: unknown) {
-      toast.error("Failed to load WorkDrive files", { description: (err as any)?.response?.data?.error ?? (err as Error).message });
+      const status = (err as any)?.response?.status;
+      const body = (err as any)?.response?.data;
+      // Friendlier messages for the two known failure modes — Zoho rate
+      // limit (transient, just wait) and missing per-client folder ID
+      // (data hygiene issue, needs CRM fix).
+      if (status === 429) {
+        toast.error("Zoho is rate-limiting WorkDrive — try Refresh in about a minute.");
+      } else if (status === 422 && body?.code === "FOLDER_FIELD_EMPTY") {
+        toast.error("No WorkDrive folder set on this client's Zoho Contact", {
+          description: "Set Client_Record_Folder_ID on the Contact and click Refresh.",
+        });
+      } else {
+        toast.error("Failed to load WorkDrive files", { description: body?.error ?? (err as Error).message });
+      }
     } finally {
       setWdLoading(false);
     }
@@ -1728,7 +1747,8 @@ export function CallWorkspace({
               disabled={wdLoading}
               onClick={(e) => {
                 e.stopPropagation();
-                void fetchWorkDriveFiles();
+                // Refresh button bypasses the backend's 60s cache.
+                void fetchWorkDriveFiles({ fresh: true });
               }}
             >
               {wdLoading ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <RefreshCw className="h-3 w-3 mr-1" />}
