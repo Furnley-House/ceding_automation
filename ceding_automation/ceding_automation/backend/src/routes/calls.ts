@@ -274,6 +274,19 @@ router.get(
 // own folder. Falls back to ZOHO_WORKDRIVE_FOLDER_ID env in lenient mode
 // (staging / local); hard-fails 422 in strict mode (prod, where
 // WORKDRIVE_REQUIRE_PER_CLIENT_FOLDER=true).
+//
+// Caching: Zoho WorkDrive's API has a tight per-org burst limit that returned
+// 429 (Zoho code F7008) on real prod usage. We cache the file list per folder
+// for 60s in memory. Pages can navigate away/back and panel can be reopened
+// without re-hitting Zoho. The "Refresh" button bypasses the cache by sending
+// ?fresh=1.
+const WORKDRIVE_LIST_TTL_MS = 60_000;
+interface WorkDriveListCacheEntry {
+  files: unknown[];
+  expiresAt: number;
+}
+const workdriveListCache = new Map<string, WorkDriveListCacheEntry>();
+
 router.get(
   "/:caseId/calls/workdrive-recordings",
   requireAuth,
@@ -302,22 +315,46 @@ router.get(
         throw err;
       }
 
+      // Cache check (skipped when ?fresh=1 — the "Refresh" button)
+      const bypassCache = String(req.query.fresh ?? "").toLowerCase() === "1";
+      if (!bypassCache) {
+        const hit = workdriveListCache.get(folderId);
+        if (hit && hit.expiresAt > Date.now()) {
+          return res.json({ files: hit.files, folderId, cached: true });
+        }
+      }
+
       const files = await listWorkDriveFiles(folderId);
-      res.json({ files, folderId });
+      workdriveListCache.set(folderId, {
+        files,
+        expiresAt: Date.now() + WORKDRIVE_LIST_TTL_MS,
+      });
+      res.json({ files, folderId, cached: false });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to list WorkDrive files";
-      // Surface Zoho's actual error body (folder/permission/team-id details)
-      // when present — the bare axios "status code 500" message hides
-      // everything useful. Log SERVER-SIDE only; the client response shape
-      // stays {error: msg} so no Zoho internals leak through the API.
       const respStatus = (err as any)?.response?.status;
       const respData = (err as any)?.response?.data;
+      // Surface Zoho's actual error body server-side for triage.
       console.error(
         "[calls] workdrive list error:",
         msg,
         respStatus !== undefined ? `zohoStatus=${respStatus}` : "",
         respData !== undefined ? `zohoBody=${typeof respData === "string" ? respData : JSON.stringify(respData)}` : "",
       );
+
+      // 429 from Zoho (rate limit / F7008): pass it through as a 429 with
+      // Retry-After so the UI can show "Zoho is throttling — try again in
+      // a moment" instead of looking like a generic server crash. If we
+      // have a stale-but-recent cache entry for the folder, also serve it
+      // alongside the warning so the user sees what we last knew.
+      if (respStatus === 429) {
+        res.set("Retry-After", "60");
+        return res.status(429).json({
+          error: "Zoho WorkDrive rate limit hit — try again in ~1 minute",
+          code: "ZOHO_RATE_LIMIT",
+          zohoCode: (respData as any)?.errors?.[0]?.id ?? null,
+        });
+      }
       res.status(500).json({ error: msg });
     }
   }
