@@ -15,7 +15,13 @@ import {
   transcribeRecordingWithToken,
   transcribeAudioBuffer,
 } from "../services/ringcentral";
-import { uploadToWorkDrive, listWorkDriveFiles, downloadWorkDriveFile } from "../services/workdrive";
+import {
+  uploadToWorkDrive,
+  listWorkDriveFiles,
+  downloadWorkDriveFile,
+  resolveCaseFolderId,
+  WorkDriveFolderResolutionError,
+} from "../services/workdrive";
 import { getUserRcExtensionId } from "../services/rcUserAuth";
 import { generateCallScript, analyseTranscript } from "../services/aiCallAssist";
 
@@ -262,15 +268,42 @@ router.get(
   }
 );
 
-// ── List MP3 recordings already saved in the WorkDrive folder ──────────────
+// ── List MP3 recordings already saved in the case's WorkDrive folder ──────
+// Resolves the folder per-client from Contact.Client_Record_Folder_ID (same
+// path the Stage 9 export uses), so each client's recordings stay in their
+// own folder. Falls back to ZOHO_WORKDRIVE_FOLDER_ID env in lenient mode
+// (staging / local); hard-fails 422 in strict mode (prod, where
+// WORKDRIVE_REQUIRE_PER_CLIENT_FOLDER=true).
 router.get(
   "/:caseId/calls/workdrive-recordings",
   requireAuth,
-  async (_req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     res.set("Cache-Control", "no-store");
     try {
-      const files = await listWorkDriveFiles();
-      res.json({ files });
+      const caseRecord = await prisma.case.findUnique({
+        where: { id: req.params.caseId },
+        select: { clientZohoId: true },
+      });
+      if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+      let folderId: string;
+      try {
+        const resolved = await resolveCaseFolderId(caseRecord.clientZohoId);
+        folderId = resolved.folderId;
+      } catch (err) {
+        if (err instanceof WorkDriveFolderResolutionError) {
+          return res.status(422).json({
+            error: "WorkDrive folder not resolvable",
+            code: err.code,
+            contactZohoId: err.contactZohoId,
+            message: err.message,
+          });
+        }
+        throw err;
+      }
+
+      const files = await listWorkDriveFiles(folderId);
+      res.json({ files, folderId });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to list WorkDrive files";
       // Surface Zoho's actual error body (folder/permission/team-id details)
