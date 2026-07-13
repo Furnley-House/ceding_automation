@@ -2,13 +2,28 @@
 // Renders the Fund Details sub-table for a case.
 //   - readOnly mode → tidy table with totals (Stage 6 Review, Stage 8 Approval)
 //   - editable mode → CA can add / edit / delete rows (Stage 4 Extract & Fill)
-import { useMemo, useState } from "react";
+//     Editable cells: click a cell → in-place Input → blur / Enter saves via
+//     updateRow, Escape cancels. One cell at a time; other cells stay display-only.
+import { useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Plus, Trash2, Loader2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { useFundLines, type FundLine, type FundLineDraft } from "@/hooks/useFundLines";
 import { FundDetailsImportDialog } from "./FundDetailsImportDialog";
+
+// Which FundLineDraft keys are inline-editable via a cell click. Excludes
+// isWithProfits (renders as a badge, toggle would need a different UX) and
+// backend-managed fields (id, createdAt, etc.).
+type EditableField =
+  | "fundName"
+  | "isinSedolCiti"
+  | "numberOfUnits"
+  | "pricePerUnit"
+  | "value"
+  | "ocf"
+  | "transactionCosts";
 
 function gbp(n: string | number | null | undefined): string {
   if (n === null || n === undefined || n === "") return "—";
@@ -46,6 +61,110 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
   const [draft, setDraft] = useState<FundLineDraft | null>(null);
   const [saving, setSaving] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+
+  // ── Inline-edit state ────────────────────────────────────────────────────
+  // Only one cell can be in edit mode at a time. `value` is the current
+  // input contents; `original` snapshots the value at edit-start so Escape
+  // can revert and blur-with-no-change can skip the network call.
+  const [editing, setEditing] = useState<{
+    rowId: string;
+    field: EditableField;
+    value: string;
+    original: string;
+  } | null>(null);
+  const [cellSaving, setCellSaving] = useState(false);
+  // Guards against double-save when Enter (which blurs the input) fires both
+  // onKeyDown and onBlur handlers in the same commit.
+  const commitInFlight = useRef(false);
+
+  const startEdit = (row: FundLine, field: EditableField) => {
+    if (readOnly || editing || cellSaving) return;
+    const current = ((row[field] as string | null) ?? "").toString();
+    setEditing({ rowId: row.id, field, value: current, original: current });
+  };
+
+  const cancelEdit = () => {
+    setEditing(null);
+  };
+
+  const commitEdit = async () => {
+    if (!editing || commitInFlight.current) return;
+    // No-op if value unchanged — skip the round-trip.
+    if (editing.value === editing.original) {
+      setEditing(null);
+      return;
+    }
+    commitInFlight.current = true;
+    setCellSaving(true);
+    try {
+      const patch: Partial<FundLineDraft> = {
+        // Empty string → null so backend clears the field rather than storing "".
+        [editing.field]: editing.value === "" ? null : editing.value,
+      };
+      await updateRow(editing.rowId, patch);
+      setEditing(null);
+    } catch (err) {
+      toast.error("Failed to update fund row", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+      // Leave editing state up so the user can retry without re-typing.
+    } finally {
+      setCellSaving(false);
+      commitInFlight.current = false;
+    }
+  };
+
+  const handleCellKey = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void commitEdit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelEdit();
+    }
+  };
+
+  // Renders either the display value (with click-to-edit affordance) or an
+  // Input if this cell is currently being edited. `formatted` is what to
+  // show in view mode; `rawInputType` shapes the Input when in edit mode.
+  const renderEditableCell = (
+    row: FundLine,
+    field: EditableField,
+    formatted: string,
+    rawInputType: "text" | "number",
+    inputStep?: string,
+    extraInputClassName?: string,
+  ) => {
+    const isEditing = editing?.rowId === row.id && editing.field === field;
+    if (isEditing) {
+      return (
+        <Input
+          autoFocus
+          type={rawInputType}
+          step={inputStep}
+          value={editing.value}
+          onChange={(e) => setEditing({ ...editing, value: e.target.value })}
+          onBlur={() => void commitEdit()}
+          onKeyDown={handleCellKey}
+          disabled={cellSaving}
+          className={`h-7 text-xs ${extraInputClassName ?? ""}`}
+        />
+      );
+    }
+    if (readOnly) {
+      return <span className="text-foreground">{formatted}</span>;
+    }
+    return (
+      <button
+        type="button"
+        onClick={() => startEdit(row, field)}
+        className="w-full text-left cursor-text hover:bg-muted/40 rounded px-1 -mx-1 py-0.5 -my-0.5 transition-colors"
+        title="Click to edit"
+      >
+        {formatted}
+      </button>
+    );
+  };
 
   const sorted = useMemo(
     () =>
@@ -138,7 +257,7 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
               {sorted.map((r) => (
                 <tr key={r.id} className="hover:bg-muted/20">
                   <td className="px-3 py-2 font-medium text-foreground">
-                    {r.fundName}
+                    {renderEditableCell(r, "fundName", r.fundName || "—", "text")}
                     {r.isWithProfits && (
                       <span className="ml-2 text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-warning/15 text-warning font-semibold">
                         With-profits
@@ -146,15 +265,23 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
                     )}
                   </td>
                   <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">
-                    {r.isinSedolCiti ?? "—"}
+                    {renderEditableCell(r, "isinSedolCiti", r.isinSedolCiti ?? "—", "text", undefined, "font-mono")}
                   </td>
-                  <td className="px-3 py-2 text-right tabular-nums">{num(r.numberOfUnits)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{gbp(r.pricePerUnit)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    {renderEditableCell(r, "numberOfUnits", num(r.numberOfUnits), "number", "0.0001", "text-right")}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    {renderEditableCell(r, "pricePerUnit", gbp(r.pricePerUnit), "number", "0.0001", "text-right")}
+                  </td>
                   <td className="px-3 py-2 text-right tabular-nums font-semibold text-foreground">
-                    {gbp(r.value)}
+                    {renderEditableCell(r, "value", gbp(r.value), "number", "0.01", "text-right")}
                   </td>
-                  <td className="px-3 py-2 text-right tabular-nums">{pct(r.ocf)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{pct(r.transactionCosts)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    {renderEditableCell(r, "ocf", pct(r.ocf), "number", "0.0001", "text-right")}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    {renderEditableCell(r, "transactionCosts", pct(r.transactionCosts), "number", "0.0001", "text-right")}
+                  </td>
                   {!readOnly && (
                     <td className="px-2 py-2">
                       <button
@@ -162,6 +289,7 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
                         onClick={() => handleDelete(r)}
                         className="text-muted-foreground hover:text-destructive"
                         title="Remove row"
+                        disabled={cellSaving}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -242,6 +370,12 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
               )}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {!readOnly && sorted.length > 0 && !draft && (
+        <div className="px-3 py-1 text-[10px] text-muted-foreground italic border-t border-border/50">
+          Click any cell to edit — Enter saves, Escape cancels.
         </div>
       )}
 
