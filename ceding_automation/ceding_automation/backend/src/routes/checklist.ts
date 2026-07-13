@@ -339,16 +339,27 @@ router.post(
   }
 );
 
-// ── Bulk-fill missing fields with dummy test data ─────────
-// Testing-only helper. Walks every active template for the case's plan
-// type, and for any field with no value (whether the DB row exists or
-// not) writes a type-aware placeholder so the end-to-end approval flow
-// can be tested without scrubbing 33+ real fields.
+// ── Bulk-mark missing fields as N/A ───────────────────────
+// For fields that genuinely don't apply to this ceding case, the CA can
+// mark every currently-missing field as "N/A" in one action rather than
+// typing it into each one. Available from Stage 4 (Extract & Fill Gaps)
+// and Stage 6 (Review Checklist).
+//
+// "Missing" definition matches frontend hooks/useChecklistFields.isMissing:
+//   value is null / empty / whitespace, OR value equals "MISSING" (any
+//   case), OR confidence === "MISSING". Approved rows and rows that
+//   already have a non-empty non-"MISSING" value are left untouched.
+//
+// Replaced the older /fill-test-data route (bulk-fill with type-aware
+// dummy data) — that was a dev-only helper and shouldn't ship to real
+// users. If you need it back for local testing, see git history for the
+// same route path pre this change.
 router.post(
-  "/:caseId/checklist/fill-test-data",
+  "/:caseId/checklist/mark-missing-na",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
   async (req: Request, res: Response) => {
+    const NA_VALUE = "N/A";
     const caseRecord = await prisma.case.findUnique({
       where: { id: req.params.caseId },
       select: { id: true, planType: true },
@@ -360,44 +371,30 @@ router.post(
     });
     const existing = await prisma.checklistField.findMany({
       where: { caseId: caseRecord.id },
-      select: { id: true, templateId: true, value: true },
+      select: { id: true, templateId: true, value: true, confidence: true, status: true },
     });
     const existingByTemplateId = new Map(existing.map((f) => [f.templateId, f]));
 
-    const dummyFor = (t: { fieldType: string; fieldName: string; dropdownOptions: string[] }) => {
-      switch ((t.fieldType || "").toLowerCase()) {
-        case "number":
-          return "42";
-        case "currency":
-          return "£100.00";
-        case "percent":
-        case "percentage":
-          return "0.75%";
-        case "yesno":
-        case "yes_no":
-          return "Yes";
-        case "date":
-          return "01/01/2025";
-        case "select":
-        case "dropdown":
-          return t.dropdownOptions?.[0] ?? "Option 1";
-        case "url":
-          return "https://example.com";
-        default:
-          return `Test ${t.fieldName}`;
-      }
-    };
+    const isEmptyOrMissingValue = (v: string | null): boolean =>
+      v === null || v.trim() === "" || v.trim().toUpperCase() === "MISSING";
 
     let filled = 0;
     for (const tpl of templates) {
-      const value = dummyFor(tpl);
       const found = existingByTemplateId.get(tpl.id);
-      if (found && found.value) continue; // already has a real value — skip
+
+      // Existing row with a real value → skip (don't clobber CA/AI work).
+      if (found && !isEmptyOrMissingValue(found.value) && found.confidence !== "MISSING") {
+        continue;
+      }
+      // Already approved → also skip. Adviser / paraplanner explicitly signed
+      // off; don't quietly rewrite that with N/A.
+      if (found && found.status === "APPROVED") continue;
+
       if (found) {
         await prisma.checklistField.update({
           where: { id: found.id },
           data: {
-            value,
+            value: NA_VALUE,
             confidence: "HIGH",
             status: "MANUALLY_OVERRIDDEN",
             isManuallyOverridden: true,
@@ -410,7 +407,7 @@ router.post(
           data: {
             caseId: caseRecord.id,
             templateId: tpl.id,
-            value,
+            value: NA_VALUE,
             confidence: "HIGH",
             status: "MANUALLY_OVERRIDDEN",
             isManuallyOverridden: true,
@@ -420,7 +417,7 @@ router.post(
         });
       }
       // Mirror to Case columns (provider / policy ref / start date).
-      await mirrorChecklistToCase(caseRecord.id, tpl.fieldKey, value);
+      await mirrorChecklistToCase(caseRecord.id, tpl.fieldKey, NA_VALUE);
       filled++;
     }
 
@@ -430,11 +427,14 @@ router.post(
         userId: req.user!.id,
         action: "CASE_UPDATED",
         source: "MANUAL",
-        newValue: `Filled ${filled} field${filled === 1 ? "" : "s"} with test data`,
+        newValue: `Marked ${filled} missing field${filled === 1 ? "" : "s"} as N/A`,
       },
     });
 
-    res.json({ message: `Filled ${filled} field${filled === 1 ? "" : "s"} with test data`, filled });
+    res.json({
+      message: `Marked ${filled} missing field${filled === 1 ? "" : "s"} as N/A`,
+      filled,
+    });
   },
 );
 
