@@ -130,22 +130,20 @@ export function SendLOAWorkspace({ caseItem }: Props) {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const subject = `Letter of Authority - ${caseItem.client_name} - ${caseItem.plan_number}`;
-  const initialBody = `Dear ${provider?.name ?? caseItem.Provider_group} Team,
+  const subject = `Letter of Authority and Information Request – ${caseItem.client_name}`;
+  const initialBody = `Dear Team,
 
-Please find attached a signed Letter of Authority for the following client:
+Please find attached the signed Letter of Authority (LOA) and Information Request Letter (IRL) for the following client:
 
-  Client name: ${caseItem.client_name}
-  Plan / Policy reference: ${caseItem.plan_number}
-  Plan type: ${caseItem.plan_type}
-  Case reference: ${caseItem.case_ref}
+Client Name: ${caseItem.client_name}
+Plan / Policy Reference: ${caseItem.plan_number}
+Plan Type: ${caseItem.plan_type}
 
-Please provide a full policy information pack at your earliest convenience, including current valuation, charges, fund holdings, guarantees and any relevant benefits.
+We would be grateful if you could provide the information requested in the attached IRL at your earliest convenience.
 
 If you require any further information to process this request, please reply to this email.
 
-Kind regards,
-ProviderHub on behalf of the client`;
+Kind regards,`;
 
   const followUpBody = `Dear ${provider?.name ?? caseItem.Provider_group} Team,
 
