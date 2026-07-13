@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, AlertTriangle, CircleDashed, ListChecks, ThumbsUp } from "lucide-react";
+import { CheckCircle2, AlertTriangle, CircleDashed, ListChecks, ThumbsUp, Ban } from "lucide-react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChecklistField, type ChecklistFieldState, type Confidence, type ConflictResolution } from "./ChecklistField";
 import { getTemplate, groupBySection, type ChecklistFieldDef } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
@@ -264,6 +265,37 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     });
   };
 
+  // ── Bulk-mark all missing checklist fields as "N/A" ────────────────────
+  // Real workflow, not a test helper: some providers legitimately don't
+  // return every field, and typing N/A into each one is slow. Fund Details
+  // is left alone (separate table with its own edit UX). Server enforces
+  // CA_TEAM / ADMIN role and won't clobber existing values or approved
+  // fields, so the confirmation prompt is UX-only.
+  const qcMark = useQueryClient();
+  const markMissingNA = useMutation({
+    mutationFn: async () => {
+      const res = await checklistApi.markMissingNA(caseId);
+      return res.data as { filled: number; message: string };
+    },
+    onSuccess: (d) => {
+      toast.success(d.message ?? "Marked missing fields as N/A");
+      refresh();
+      qcMark.invalidateQueries({ queryKey: ["case", caseId] });
+    },
+    onError: (e: Error) =>
+      toast.error("Mark-as-N/A failed", { description: e.message }),
+  });
+
+  const confirmAndMarkNA = () => {
+    if (stats.missing === 0) return;
+    const ok = window.confirm(
+      `Mark ${stats.missing} missing field${stats.missing === 1 ? "" : "s"} as "N/A"?\n\n` +
+        "Approved fields and fields with existing values are untouched. " +
+        "You can still edit individual fields afterwards.",
+    );
+    if (ok) markMissingNA.mutate();
+  };
+
   const markReadyForReview = () => {
     if (stats.missing > 0) {
       toast.error("Cannot mark Ready for Review", {
@@ -360,9 +392,24 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
           <p className="text-xs text-muted-foreground">
             <strong className="text-foreground">CA Team:</strong> edit any field — changes auto-save and are audit-logged.
           </p>
-          <Button size="sm" onClick={markReadyForReview} disabled={stats.missing > 0} className="gap-1">
-            <CheckCircle2 className="h-3.5 w-3.5" /> Mark Ready for Review
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={confirmAndMarkNA}
+              disabled={markMissingNA.isPending || stats.missing === 0}
+              className="gap-1"
+              title="Set every currently-missing field to N/A. Approved fields and fields with real values are left alone."
+            >
+              <Ban className="h-3.5 w-3.5" />
+              {markMissingNA.isPending
+                ? "Marking…"
+                : `Mark ${stats.missing} missing as N/A`}
+            </Button>
+            <Button size="sm" onClick={markReadyForReview} disabled={stats.missing > 0} className="gap-1">
+              <CheckCircle2 className="h-3.5 w-3.5" /> Mark Ready for Review
+            </Button>
+          </div>
         </div>
       )}
 
