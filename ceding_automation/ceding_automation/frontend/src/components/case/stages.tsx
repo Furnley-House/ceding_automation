@@ -34,7 +34,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation } from "react-router-dom";
 import { casesApi, checklistApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
-import { Pencil, FlaskConical } from "lucide-react";
+import { Pencil, Ban } from "lucide-react";
 import { toast } from "sonner";
 interface StageProps {
   caseItem: CaseRow;
@@ -219,18 +219,34 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
     navigate(location.pathname, { state: { goToStage: n }, replace: false });
   };
 
-  const fillTestData = useMutation({
+  // Bulk-marks every currently-missing checklist field as "N/A". Replaces
+  // the previous test-fill helper (which populated type-aware dummy values
+  // for QA). The N/A path is a real production workflow: for cases where a
+  // provider genuinely doesn't populate certain fields, marking them N/A
+  // in one click is faster than typing "N/A" 20 times.
+  const markMissingNA = useMutation({
     mutationFn: async () => {
-      const res = await checklistApi.fillTestData(caseItem.id);
+      const res = await checklistApi.markMissingNA(caseItem.id);
       return res.data as { filled: number; message: string };
     },
     onSuccess: (d) => {
-      toast.success(d.message ?? "Filled missing fields with test data");
+      toast.success(d.message ?? "Marked missing fields as N/A");
       refresh();
       qc.invalidateQueries({ queryKey: ["case", caseItem.id] });
     },
-    onError: (e: Error) => toast.error("Test-fill failed", { description: e.message }),
+    onError: (e: Error) =>
+      toast.error("Mark-as-N/A failed", { description: e.message }),
   });
+
+  const confirmAndMarkNA = () => {
+    if (totals.missing === 0) return;
+    const ok = window.confirm(
+      `Mark ${totals.missing} missing field${totals.missing === 1 ? "" : "s"} as "N/A"?\n\n` +
+        "Approved fields and fields with existing values are untouched. " +
+        "You can still edit individual fields afterwards.",
+    );
+    if (ok) markMissingNA.mutate();
+  };
 
   const openEditor = (key: string, currentValue: string | null | undefined) => {
     setEditingKey(key);
@@ -361,13 +377,15 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => fillTestData.mutate()}
-              disabled={fillTestData.isPending || totals.missing === 0}
+              onClick={confirmAndMarkNA}
+              disabled={markMissingNA.isPending || totals.missing === 0}
               className="h-7 gap-1.5 text-xs ml-auto"
-              title="Testing only: bulk-fill any missing field with type-aware dummy data"
+              title="Set every currently-missing field to N/A. Approved fields and fields with real values are left alone."
             >
-              <FlaskConical className="h-3.5 w-3.5" />
-              {fillTestData.isPending ? "Filling…" : `Fill ${totals.missing} missing (test)`}
+              <Ban className="h-3.5 w-3.5" />
+              {markMissingNA.isPending
+                ? "Marking…"
+                : `Mark ${totals.missing} missing as N/A`}
             </Button>
           </div>
         )}

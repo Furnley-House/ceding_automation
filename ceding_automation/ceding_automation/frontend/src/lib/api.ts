@@ -178,8 +178,13 @@ export const checklistApi = {
     api.post(`/cases/${caseId}/checklist/${fieldId}/request-review`, { comment }),
   approveAll: (caseId: string) =>
     api.post(`/cases/${caseId}/checklist/approve-all`),
-  fillTestData: (caseId: string) =>
-    api.post(`/cases/${caseId}/checklist/fill-test-data`),
+  // Bulk-marks every currently-missing scalar checklist field on the case
+  // as "N/A" with confidence=HIGH. Existing values and approved rows are
+  // untouched. Available to CA_TEAM / ADMIN roles; server-side enforced.
+  markMissingNA: (caseId: string) =>
+    api.post<{ filled: number; message: string }>(
+      `/cases/${caseId}/checklist/mark-missing-na`,
+    ),
   generateCallScript: (caseId: string) =>
     api.post(`/cases/${caseId}/call-script`),
   uploadTranscript: (caseId: string, text: string, source?: string) =>
