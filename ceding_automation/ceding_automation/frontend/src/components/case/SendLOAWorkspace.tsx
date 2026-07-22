@@ -22,7 +22,8 @@ type Method = "origo" | "email" | "courier";
 
 // DB Provider shape as it reaches this component (snake_case — the API
 // returns camelCase but services/api.ts:getCaseById runs the response
-// through a recursive snakeKeys() before it gets here).
+// through a recursive snakeKeys() before it gets here). "website" is a
+// single word so it looks the same in both cases.
 type DbProvider = {
   id: string;
   name: string;
@@ -31,6 +32,7 @@ type DbProvider = {
   phone_main: string | null;
   phone_ceding_dept: string | null;
   postal_address: string | null;
+  website: string | null;
   loa_format: string;
   is_on_origo: boolean;
   plan_type_prefixes: string[];

@@ -180,6 +180,12 @@ model Provider {
   emailMain        String?
   emailCedingDept  String?
   postalAddress    String?
+  // Public URL — provider corporate site, cede-team login portal, or any
+  // page the CA might want to open one click away from the case (e.g. to
+  // sanity-check a fund reference or download a discharge form).
+  // Free text, no protocol validation; the UI can prepend https:// on
+  // display if the value is missing one.
+  website          String?
   loaFormat        LOAFormat @default(EITHER)
   isOnOrigo        Boolean   @default(false)
   planTypePrefixes String[] // e.g. ["PP", "ISA", "DC"]

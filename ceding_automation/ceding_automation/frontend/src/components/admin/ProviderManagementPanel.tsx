@@ -47,6 +47,7 @@ interface Provider {
   emailMain: string | null;
   emailCedingDept: string | null;
   postalAddress: string | null;
+  website: string | null;
   loaFormat: LOAFormat;
   isOnOrigo: boolean;
   acceptedSigType: string | null;
@@ -70,6 +71,7 @@ const EMPTY_FORM: ProviderFormState = {
   emailMain: "",
   emailCedingDept: "",
   postalAddress: "",
+  website: "",
   loaFormat: "EITHER",
   isOnOrigo: false,
   acceptedSigType: "",
@@ -84,6 +86,7 @@ interface ProviderFormState {
   emailMain: string;
   emailCedingDept: string;
   postalAddress: string;
+  website: string;
   loaFormat: LOAFormat;
   isOnOrigo: boolean;
   acceptedSigType: string;
@@ -383,6 +386,7 @@ function ProviderEditorDialog({
         emailMain: form.emailMain.trim() || null,
         emailCedingDept: form.emailCedingDept.trim() || null,
         postalAddress: form.postalAddress.trim() || null,
+        website: form.website.trim() || null,
         loaFormat: form.loaFormat,
         isOnOrigo: form.isOnOrigo,
         acceptedSigType: form.acceptedSigType.trim() || null,
@@ -517,6 +521,19 @@ function ProviderEditorDialog({
               onChange={(e) => setForm({ ...form, postalAddress: e.target.value })}
               rows={2}
               placeholder="(optional)"
+              className="mt-1"
+            />
+          </div>
+
+          <div className="sm:col-span-2">
+            <Label className="text-xs uppercase tracking-wider font-semibold">
+              Website
+            </Label>
+            <Input
+              type="url"
+              value={form.website}
+              onChange={(e) => setForm({ ...form, website: e.target.value })}
+              placeholder="https://www.aviva.co.uk (optional)"
               className="mt-1"
             />
           </div>
@@ -656,6 +673,7 @@ function toFormState(p: Provider): ProviderFormState {
     emailMain: p.emailMain ?? "",
     emailCedingDept: p.emailCedingDept ?? "",
     postalAddress: p.postalAddress ?? "",
+    website: p.website ?? "",
     loaFormat: p.loaFormat,
     isOnOrigo: p.isOnOrigo,
     acceptedSigType: p.acceptedSigType ?? "",
