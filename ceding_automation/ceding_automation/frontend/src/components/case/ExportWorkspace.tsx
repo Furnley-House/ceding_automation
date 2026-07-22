@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import * as XLSX from "xlsx";
 import {
   Download,
   Cloud,
@@ -15,9 +14,10 @@ import { toast } from "sonner";
 import { auditApi, casesApi, fundLinesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { useChecklistFields, isMissing, displayValue } from "@/hooks/useChecklistFields";
-import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
+import { getTemplate } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
 import type { CaseRow } from "@/lib/caseHelpers";
+import { buildStyledExport, type ExportInput } from "@/lib/exportTemplate";
 
 interface AuditRow {
   id: string;
@@ -153,189 +153,56 @@ export function ExportWorkspace({ caseItem }: Props) {
     return { total, approved, missing, pending, allApproved: approved === total && total > 0 };
   }, [fields, template]);
 
-  const buildWorkbook = async (): Promise<XLSX.WorkBook> => {
-    // ---- Checklist sheet ----
-    const sectionGroups = groupBySection(template);
-    const byKey = new Map(fields.map((f) => [f.field_key, f]));
-    const checklistRows: (string | number)[][] = [
-      [
-        "Section",
-        "Field",
-        "Value",
-        "Status",
-        "Confidence",
-        "Source page",
-        "Manually edited",
-        "Notes",
-        "Last updated",
-      ],
-    ];
-    sectionGroups.forEach((group) => {
-      group.fields.forEach((tf) => {
-        const row = byKey.get(tf.key);
-        // Use displayValue so literal "MISSING" strings render as "—"
-        // and the spreadsheet status column ("missing") agrees with it.
-        const missing = isMissing(row);
-        checklistRows.push([
-          group.section,
-          tf.label,
-          missing ? "—" : displayValue(row),
-          missing ? "missing" : (row?.status ?? "missing"),
-          row?.confidence ?? "",
-          row?.source_page ?? "",
-          row?.manually_edited ? "Yes" : "No",
-          row?.notes ?? "",
-          formatTs(row?.updated_at ?? null),
-        ]);
-      });
-    });
-
-    // Case summary at top — separate sheet
-    const summaryRows: (string | number)[][] = [
-      ["Case reference", caseItem.case_ref],
-      ["Client", caseItem.client_name],
-      ["Provider", caseItem.Provider_group],
-      ["Plan type", caseItem.plan_type],
-      ["Plan number", caseItem.plan_number],
-      ["Status", caseItem.status],
-      ["Assigned to", caseItem.owner_name ?? ""],
-      ["LOA sent", caseItem.loa_sent_date ?? ""],
-      ["Total fields", stats.total],
-      ["Approved", stats.approved],
-      ["Pending", stats.pending],
-      ["Missing", stats.missing],
-      ["Exported by", userName ?? "Unknown"],
-      ["Exported at", new Date().toLocaleString("en-GB")],
-    ];
-
-    // ---- Fund Details sheet ----
-    // Multi-row sub-table (per-fund breakdown). Headers mirror the in-app
-    // FundDetailsTable so the spreadsheet matches what the CA / paraplanner
-    // saw on screen. Totals row appended at the bottom.
-    interface FundLineRow {
-      fundName: string;
-      isinSedolCiti: string | null;
-      numberOfUnits: string | null;
-      pricePerUnit: string | null;
-      value: string | null;
-      ocf: string | null;
-      transactionCosts: string | null;
-      isWithProfits: boolean;
-      status: string;
-      confidence: string;
-      sourcePageNumber: number | null;
-      updatedAt: string | null;
-    }
-    let fundLines: FundLineRow[] = [];
-    let fundTotalValue = "0";
+  const buildWorkbookBytes = async (): Promise<Uint8Array> => {
+    // Fetch fund lines (best-effort — empty on failure).
+    let fundLines: ExportInput["fundLines"] = [];
     try {
       const res = await fundLinesApi.list(caseItem.id);
-      const data = res.data as {
-        rows?: FundLineRow[];
-        summary?: { totalValue?: string };
-      };
+      const data = res.data as { rows?: ExportInput["fundLines"] };
       fundLines = data.rows ?? [];
-      fundTotalValue = data.summary?.totalValue ?? "0";
     } catch {
-      // fund lines unavailable — sheet still rendered with header only
-    }
-    const fundRows: (string | number)[][] = [
-      [
-        "Fund Name",
-        "ISIN / Sedol",
-        "Units",
-        "Price",
-        "Value (£)",
-        "OCF (%)",
-        "Transaction Costs (%)",
-        "With-profits",
-        "Status",
-        "Confidence",
-        "Source page",
-        "Last updated",
-      ],
-    ];
-    fundLines.forEach((f) => {
-      fundRows.push([
-        f.fundName,
-        f.isinSedolCiti ?? "",
-        f.numberOfUnits ?? "",
-        f.pricePerUnit ?? "",
-        f.value ?? "",
-        f.ocf ?? "",
-        f.transactionCosts ?? "",
-        f.isWithProfits ? "Yes" : "No",
-        f.status,
-        f.confidence,
-        f.sourcePageNumber ?? "",
-        formatTs(f.updatedAt ?? null),
-      ]);
-    });
-    if (fundLines.length > 0) {
-      fundRows.push([]); // blank separator row
-      fundRows.push(["", "", "", "TOTAL", fundTotalValue, "", "", "", "", "", "", ""]);
+      /* fund lines unavailable — export continues without them */
     }
 
-    // ---- Audit sheet ----
-    let auditList: AuditRow[] = [];
+    // Fetch audit rows (best-effort).
+    let auditRows: ExportInput["auditRows"] = [];
     try {
       const res = await auditApi.getForCase(caseItem.id);
-      auditList = (res.data as AuditRow[]) ?? [];
+      const list = (res.data as AuditRow[]) ?? [];
+      auditRows = list.map((a) => ({
+        timestamp: formatTs(a.created_at),
+        field: a.field_label ?? a.field_key ?? "",
+        action: a.action,
+        actor: a.actor_name ?? "",
+        old_value: a.old_value ?? "",
+        new_value: a.new_value ?? "",
+      }));
     } catch {
-      // audit unavailable — sheet will be empty
+      /* audit unavailable — sheet will be empty */
     }
-    const auditRows: (string | number)[][] = [
-      [
-        "Timestamp",
-        "Field",
-        "Action",
-        "Source",
-        "Actor",
-        "Role",
-        "Old value",
-        "New value",
-        "Confidence",
-        "Notes",
-      ],
-    ];
-    auditList.forEach((a) => {
-      auditRows.push([
-        formatTs(a.created_at),
-        a.field_label ?? a.field_key ?? "",
-        a.action,
-        a.source,
-        a.actor_name ?? "",
-        a.actor_role ?? "",
-        a.old_value ?? "",
-        a.new_value ?? "",
-        a.confidence ?? "",
-        a.notes ?? "",
-      ]);
-    });
 
-    const wb = XLSX.utils.book_new();
-    const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
-    summarySheet["!cols"] = [{ wch: 22 }, { wch: 40 }];
-    const checklistSheet = XLSX.utils.aoa_to_sheet(checklistRows);
-    checklistSheet["!cols"] = [
-      { wch: 24 }, { wch: 32 }, { wch: 36 }, { wch: 14 },
-      { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 30 }, { wch: 18 },
-    ];
-    const fundSheet = XLSX.utils.aoa_to_sheet(fundRows);
-    fundSheet["!cols"] = [
-      { wch: 32 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 14 },
-      { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 18 },
-    ];
-    const auditSheet = XLSX.utils.aoa_to_sheet(auditRows);
-    auditSheet["!cols"] = [
-      { wch: 18 }, { wch: 28 }, { wch: 16 }, { wch: 12 },
-      { wch: 18 }, { wch: 14 }, { wch: 26 }, { wch: 26 }, { wch: 12 }, { wch: 32 },
-    ];
-    XLSX.utils.book_append_sheet(wb, summarySheet, "Summary");
-    XLSX.utils.book_append_sheet(wb, checklistSheet, "Checklist");
-    XLSX.utils.book_append_sheet(wb, fundSheet, "Fund Details");
-    XLSX.utils.book_append_sheet(wb, auditSheet, "Audit Trail");
-    return wb;
+    // Normalise the plan type onto the enum the template builder expects.
+    // Anything unrecognised falls back to PENSION so the export still runs;
+    // the resulting sheet will just have no field values populated.
+    const planType = (
+      ["PENSION", "ISA", "GIA"] as const
+    ).find((p) => p === (caseItem.plan_type ?? "").toUpperCase()) ?? "PENSION";
+
+    const input: ExportInput = {
+      planType,
+      caseRef: caseItem.case_ref,
+      clientName: caseItem.client_name,
+      fields: fields.map((f) => ({
+        field_key: f.field_key,
+        value: isMissing(f) ? "" : displayValue(f),
+        confidence: f.confidence ?? null,
+        status: f.status ?? null,
+      })),
+      fundLines,
+      auditRows,
+    };
+
+    return buildStyledExport(input);
   };
 
   const fileName = `${caseItem.case_ref}_${caseItem.client_name.replace(/\s+/g, "_")}_ceding.xlsx`;
@@ -349,16 +216,21 @@ export function ExportWorkspace({ caseItem }: Props) {
     setExporting(true);
     setUploading(true);
     try {
-      const wb = await buildWorkbook();
-
-      // 1. Local download
-      XLSX.writeFile(wb, fileName);
-
-      // 2. Build a Blob from the same workbook (writeFile doesn't return bytes)
-      const arrayBuf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-      const blob = new Blob([arrayBuf], {
+      const bytes = await buildWorkbookBytes();
+      const blob = new Blob([bytes], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
+
+      // 1. Local download — synthetic <a download> click since we already
+      //    have the bytes in-hand (ExcelJS returned them directly).
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
 
       // 3. Backend does WorkDrive + Zoho in one call
       const res = await casesApi.completeExport(caseItem.id, blob, fileName);
