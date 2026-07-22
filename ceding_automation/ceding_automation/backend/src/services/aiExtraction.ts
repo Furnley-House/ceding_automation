@@ -5,6 +5,7 @@
 
 import { AzureOpenAI } from "openai";
 import { downloadBlobAsBuffer } from "./storage";
+import { parseJsonCompletionOrFallback } from "../utils/openaiJsonSafe";
 
 const client = new AzureOpenAI({
   endpoint: process.env.AZURE_OPENAI_ENDPOINT!,
@@ -103,13 +104,19 @@ Return JSON in this exact format:
   const response = await client.chat.completions.create({
     model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4o",
     messages: messages as Parameters<typeof client.chat.completions.create>[0]["messages"],
-    max_tokens: 4000,
+    max_tokens: 8000,
     temperature: 0,
     response_format: { type: "json_object" },
   });
 
-  const content = response.choices[0].message.content || "{}";
-  const parsed = JSON.parse(content);
+  const parsed = parseJsonCompletionOrFallback<{
+    fields?: ExtractedField[];
+    pageCount?: number;
+  }>(
+    response,
+    { fields: [], pageCount: 0 },
+    "pdf-extract-legacy",
+  );
 
   return {
     fields: parsed.fields || [],
