@@ -2,6 +2,7 @@
 // Azure OpenAI helpers for Call Assist: script generation + transcript analysis.
 // Provides static fallbacks when Azure OpenAI is not configured.
 import { AzureOpenAI } from "openai";
+import { parseJsonCompletionOrFallback } from "../utils/openaiJsonSafe";
 
 function isAIConfigured(): boolean {
   const key = process.env.AZURE_OPENAI_API_KEY ?? "";
@@ -117,12 +118,16 @@ Return ONLY valid JSON (no preamble) matching this exact schema:
   const response = await client.chat.completions.create({
     model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4o",
     messages: [{ role: "user", content: prompt }],
-    max_tokens: 2000,
+    max_tokens: 6000,
     temperature: 0.3,
     response_format: { type: "json_object" },
   });
 
-  return JSON.parse(response.choices[0].message.content || "{}") as CallScript;
+  return parseJsonCompletionOrFallback<CallScript>(
+    response,
+    buildStaticScript(input),
+    "callscript",
+  );
 }
 
 function buildStaticScript(input: ScriptInput): CallScript {
@@ -224,15 +229,28 @@ Return ONLY valid JSON:
   const response = await client.chat.completions.create({
     model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4o",
     messages: [{ role: "user", content: prompt }],
-    max_tokens: 2500,
+    max_tokens: 8000,
     temperature: 0,
     response_format: { type: "json_object" },
   });
 
-  const parsed = JSON.parse(response.choices[0].message.content || "{}");
+  // Fallback shape conforms to AnalysisResult so no post-processing branch
+  // is needed — the caller path below is a no-op over the empty array.
+  const parsed = parseJsonCompletionOrFallback<{
+    extracted?: AnalysedField[];
+    summary?: string;
+  }>(
+    response,
+    {
+      extracted: [],
+      summary:
+        "AI analysis unavailable — response could not be parsed. Please review the transcript and enter fields manually.",
+    },
+    "transcript-analyse",
+  );
 
   return {
-    extracted: ((parsed.extracted as AnalysedField[]) ?? []).filter(
+    extracted: (parsed.extracted ?? []).filter(
       (f) => f.confidence !== "MISSING" && f.value
     ),
     summary: parsed.summary ?? "",
