@@ -8,9 +8,11 @@ import {
   Phone,
   Mail,
   MapPin,
+  Globe,
   Loader2,
   FileText,
   Tag,
+  ExternalLink,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +25,7 @@ export interface Provider {
   email_main?: string;
   email_ceding_dept?: string;
   postal_address?: string;
+  website?: string;
   loa_format: string;
   is_on_origo: boolean;
   accepted_sig_type?: string;
@@ -244,6 +247,30 @@ const ProviderDirectory = () => {
                   </p>
                 </div>
               )}
+
+              {/* Website — clickable link. If the CA typed "aviva.co.uk"
+                  without a scheme, we prepend https:// on click so browsers
+                  don't resolve it relative to the current page. */}
+              {active.website && (
+                <div className="mt-4 pt-4 border-t border-border">
+                  <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                    <Globe className="h-3 w-3" /> Website
+                  </p>
+                  <a
+                    href={
+                      /^https?:\/\//i.test(active.website)
+                        ? active.website
+                        : `https://${active.website}`
+                    }
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-sm text-primary hover:underline break-all"
+                  >
+                    {active.website}
+                    <ExternalLink className="h-3 w-3 shrink-0" />
+                  </a>
+                </div>
+              )}
             </div>
 
             {/* Plan type prefixes */}
@@ -278,7 +305,7 @@ const ProviderDirectory = () => {
             )}
 
             {/* Empty state for no contact details */}
-            {!active.phone_main && !active.email_main && !active.postal_address && !active.notes && (
+            {!active.phone_main && !active.email_main && !active.postal_address && !active.website && !active.notes && (
               <div className="rounded-xl border border-dashed border-border bg-muted/20 p-8 text-center">
                 <p className="text-sm text-muted-foreground">
                   No contact details on file for this provider.

@@ -23,6 +23,11 @@ const ProviderCreateSchema = z.object({
   emailMain: z.string().trim().optional().nullable(),
   emailCedingDept: z.string().trim().optional().nullable(),
   postalAddress: z.string().trim().optional().nullable(),
+  // Free-text URL — Furnley's CAs paste in whatever page they want to keep
+  // handy for the provider (login portal, discharge-form download, etc.).
+  // We don't validate the protocol; the UI adds "https://" on display if
+  // missing so a bare "aviva.com" still opens correctly when clicked.
+  website: z.string().trim().optional().nullable(),
   loaFormat: z.nativeEnum(LOAFormat).optional(),
   isOnOrigo: z.boolean().optional(),
   planTypePrefixes: z.array(z.string().trim().min(1)).optional(),
