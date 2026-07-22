@@ -166,6 +166,32 @@ ProviderHub`;
     return `https://outlook.office.com/mail/deeplink/compose?${qs}`;
   };
 
+  // ── Courier: "please post it for me" email to Sam ───────────────────────
+  // Furnley House's admin (Sam) handles physical LOA + IRL posting when the
+  // provider only accepts paper. This composes the request email so the CA
+  // just clicks Open in Outlook and hits Send.
+  const SAM_EMAIL = "samantha.cartwright@furnleyhouse.co.uk";
+  const samSubject = `Request to post LOA and IRL – ${caseItem.client_name}`;
+  const samInitialBody = `Hi Sam,
+
+Could you please post the LOA and IRL to the address below?
+
+Provider address: ${provider?.postal_address?.trim() || "[address not in Provider Directory — add it before requesting the post-out]"}
+
+Please let us know once the documents have been posted.
+
+Thank you in advance for your help.
+
+Kind regards,`;
+  const buildSamOutlookUrl = (body: string) => {
+    const qs =
+      `path=${encodeURIComponent("/mail/action/compose")}` +
+      `&to=${encodeURIComponent(SAM_EMAIL)}` +
+      `&subject=${encodeURIComponent(samSubject)}` +
+      `&body=${encodeURIComponent(body)}`;
+    return `https://outlook.office.com/mail/deeplink/compose?${qs}`;
+  };
+
   const copy = async (text: string, label: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -344,6 +370,12 @@ ProviderHub`;
           onProcessed={markProcessed}
           onReceived={markReceived}
           pending={updateMutation.isPending}
+          samEmail={SAM_EMAIL}
+          samSubject={samSubject}
+          samInitialBody={samInitialBody}
+          buildSamOutlookUrl={buildSamOutlookUrl}
+          providerHasAddress={Boolean(provider?.postal_address?.trim())}
+          copy={copy}
         />
       )}
     </div>
@@ -717,6 +749,12 @@ function CourierPanel({
   onProcessed,
   onReceived,
   pending,
+  samEmail,
+  samSubject,
+  samInitialBody,
+  buildSamOutlookUrl,
+  providerHasAddress,
+  copy,
 }: {
   trackingRef: string;
   setTrackingRef: (v: string) => void;
@@ -727,12 +765,66 @@ function CourierPanel({
   onProcessed: () => void;
   onReceived: () => void;
   pending: boolean;
+  samEmail: string;
+  samSubject: string;
+  samInitialBody: string;
+  buildSamOutlookUrl: (body: string) => string;
+  providerHasAddress: boolean;
+  copy: (text: string, label: string) => void;
 }) {
+  const [samBody, setSamBody] = useState(samInitialBody);
+
   return (
     <div className="space-y-3 rounded-md border border-border bg-card p-4">
       <div className="rounded-md bg-warning/10 border border-warning/40 p-3 text-xs text-foreground">
         This provider only accepts <strong>physical / courier</strong> LOAs. Send the LOA pack
         via your courier of choice and track manually below — no automated submission is possible.
+      </div>
+
+      {/* Ask Sam to post the LOA + IRL. Sam (samantha.cartwright@furnleyhouse.co.uk)
+          handles all physical post-outs from the Furnley office. The CA fills the
+          case with a signed LOA + generated IRL, then uses this panel to email Sam
+          who prints + posts them. */}
+      <div className="rounded-md border border-border bg-muted/20 p-3 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <p className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground">
+              Ask Sam to post the LOA + IRL
+            </p>
+            <p className="text-[10px] text-muted-foreground mt-0.5 font-mono">
+              To: {samEmail}
+            </p>
+          </div>
+          {!providerHasAddress && (
+            <span className="text-[10px] text-warning font-semibold">
+              ⚠ No postal address on the provider record
+            </span>
+          )}
+        </div>
+        <div>
+          <Label className="text-xs">Subject</Label>
+          <Input value={samSubject} readOnly className="mt-1 font-mono text-xs" />
+        </div>
+        <div>
+          <Label className="text-xs">Body</Label>
+          <Textarea
+            value={samBody}
+            onChange={(e) => setSamBody(e.target.value)}
+            rows={9}
+            className="mt-1 text-xs font-mono"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button asChild className="gap-1.5" size="sm">
+            <a href={buildSamOutlookUrl(samBody)} target="_blank" rel="noreferrer">
+              <Mail className="h-4 w-4" /> Open in Outlook Web
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          </Button>
+          <Button variant="outline" onClick={() => copy(samBody, "Body")} className="gap-1.5" size="sm">
+            <Copy className="h-4 w-4" /> Copy body
+          </Button>
+        </div>
       </div>
 
       <div>
