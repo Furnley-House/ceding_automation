@@ -50,7 +50,11 @@ const PENSION_ROWS: FieldRowMapping[] = [
   { fieldKey: "withdrawal_details", row: 17 },
   { fieldKey: "percent_crystallised", row: 18 },
   { fieldKey: "tax_free_cash_taken", row: 19 },
-  { fieldKey: "contributions_4yr_history", row: 20 },
+  // Row 20 is the tax-year DATE-RANGE header (06/04/YYYY – 05/04/YYYY per column).
+  // The AI produces a single formatted string ("2024/2025: £…; 2025/2026: £…"),
+  // so the value belongs on row 21 (the Amount/breakdown row). See the row-21
+  // merge collapse in buildStyledExport for the visual layout.
+  { fieldKey: "contributions_4yr_history", row: 21 },
   // Valuation & Fund Details
   { fieldKey: "current_value", row: 24 },
   { fieldKey: "transfer_value", row: 25 },
@@ -258,9 +262,10 @@ export interface ExportInput {
  * Load the template, populate the case's plan-type sheet, and return the
  * workbook as a Uint8Array ready to be wrapped in a Blob or downloaded.
  *
- * The Fund Details block is populated per FUND_BLOCKS above; if more fund
- * lines exist than the template has reserved rows, the overflow is written
- * to plain rows after the reserved block (unstyled but present).
+ * The Fund Details block is populated per FUND_BLOCKS above; if the case has
+ * more fund lines than the template has reserved rows, the block is expanded
+ * via duplicateRow (preserving styling) and scalar mappings below the block
+ * are shifted down accordingly.
  *
  * A separate "Audit Trail" sheet is appended at the end for compliance —
  * the reference template doesn't have one but the app has always shipped it.
@@ -299,20 +304,52 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
     wb.removeWorksheet(ws.id);
   }
 
-  // ── Populate scalar fields ───────────────────────────────────────────────
   const byKey = new Map(input.fields.map((f) => [f.field_key, f]));
   const mapping = ROWS_BY_PLAN[input.planType] ?? [];
+
+  // ── Expand the Fund Details block for overflow ──────────────────────────
+  // The template reserves N pre-styled data rows (see FUND_BLOCKS). If the
+  // case has more fund lines, we duplicate the last reserved row so its
+  // borders / merges / fills carry, then shift every scalar mapping past
+  // the block down by the overflow amount. This preserves the styled answer
+  // cells for `fund_range_link` (B{N}:G{N}), `restricted_funds`, etc. —
+  // without the shift, writeFundLines would clobber those rows.
+  const block = FUND_BLOCKS[input.planType];
+  const extraRows = block ? Math.max(0, input.fundLines.length - block.reservedRows) : 0;
+  if (block && extraRows > 0) {
+    // duplicateRow(source, count, insert=true) inserts `count` styled copies
+    // of `source` immediately after it, pushing all rows below down.
+    keep.duplicateRow(block.firstDataRow + block.reservedRows - 1, extraRows, true);
+  }
+  const shiftThreshold = block ? block.firstDataRow + block.reservedRows : Infinity;
+
+  // ── Populate scalar fields ───────────────────────────────────────────────
   for (const m of mapping) {
     const row = byKey.get(m.fieldKey);
     const value = row ? formatFieldValue(row) : "";
+    const targetRow = m.row >= shiftThreshold ? m.row + extraRows : m.row;
     // Anchor cell is B{row}. The template merges B..G on that row, so we
     // only need to write the top-left; ExcelJS writes into merged cells by
     // targeting the anchor.
-    keep.getCell(`B${m.row}`).value = value;
+    keep.getCell(`B${targetRow}`).value = value;
+  }
+
+  // ── Pension row 21 (Contributions – Amount): collapse tax-year merges ───
+  // Template row 21 is laid out as four per-year cells (B21, C21, D21:E21,
+  // F21:G21) each holding a "£" placeholder. The AI produces a single
+  // "YYYY/YYYY: £X; YYYY/YYYY: £Y" formatted string, so we replace the
+  // per-year merges with a single wide B21:G21 answer cell and clear the
+  // placeholders. Runs only if a value is available for this field.
+  if (input.planType === "PENSION" && byKey.get("contributions_4yr_history")) {
+    try { keep.unMergeCells("D21:E21"); } catch { /* not merged — ok */ }
+    try { keep.unMergeCells("F21:G21"); } catch { /* not merged — ok */ }
+    for (const col of ["C", "D", "E", "F", "G"] as const) {
+      keep.getCell(`${col}21`).value = "";
+    }
+    try { keep.mergeCells("B21:G21"); } catch { /* already merged — ok */ }
   }
 
   // ── Populate Fund Details ───────────────────────────────────────────────
-  const block = FUND_BLOCKS[input.planType];
   if (block) writeFundLines(keep, block, input.fundLines);
 
   // ── Append Audit Trail sheet ─────────────────────────────────────────────
@@ -397,16 +434,17 @@ function fundCharge(ocf: string | null, tc: string | null): string {
 /**
  * Write per-fund data into the template's Fund Details block. Data goes into
  * columns B (Fund Name), C (ISIN), D (Units), E (Price), F (Value), G (Fund
- * charge). The template's row N is the header; rows N+1..N+reservedRows are
- * pre-styled data slots. Overflow (rare) lands in plain rows after the block.
+ * charge). buildStyledExport pre-expands the block via duplicateRow when
+ * lines.length exceeds block.reservedRows, so we always have enough styled
+ * slots and can populate rows firstDataRow..firstDataRow+lines.length-1
+ * without overflowing into the field rows below.
  */
 function writeFundLines(
   ws: ExcelJS.Worksheet,
   block: FundBlock,
   lines: ExportFundLine[],
 ): void {
-  const reserved = block.reservedRows;
-  for (let i = 0; i < Math.min(lines.length, reserved); i++) {
+  for (let i = 0; i < lines.length; i++) {
     const f = lines[i];
     const rowNum = block.firstDataRow + i;
     ws.getCell(`B${rowNum}`).value = f.fundName || "";
@@ -415,20 +453,5 @@ function writeFundLines(
     ws.getCell(`E${rowNum}`).value = gbp(f.pricePerUnit);
     ws.getCell(`F${rowNum}`).value = gbp(f.value);
     ws.getCell(`G${rowNum}`).value = fundCharge(f.ocf, f.transactionCosts);
-  }
-  // Overflow: append below the reserved block. These rows will lack the
-  // template's cell borders / fills but at least the data is present.
-  if (lines.length > reserved) {
-    let rowNum = block.firstDataRow + reserved;
-    for (let i = reserved; i < lines.length; i++) {
-      const f = lines[i];
-      ws.getCell(`B${rowNum}`).value = f.fundName || "";
-      ws.getCell(`C${rowNum}`).value = f.isinSedolCiti ?? "";
-      ws.getCell(`D${rowNum}`).value = numeric(f.numberOfUnits);
-      ws.getCell(`E${rowNum}`).value = gbp(f.pricePerUnit);
-      ws.getCell(`F${rowNum}`).value = gbp(f.value);
-      ws.getCell(`G${rowNum}`).value = fundCharge(f.ocf, f.transactionCosts);
-      rowNum++;
-    }
   }
 }
