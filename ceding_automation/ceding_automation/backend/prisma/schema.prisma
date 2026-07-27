@@ -279,6 +279,7 @@ model Case {
   documents       Document[]
   checklistFields ChecklistField[]
   fundLines       ChecklistFundLine[]
+  contributions   ChecklistContribution[]
   auditLogs       AuditLog[]
   comments        Comment[]
   callScripts     CallScript[]
@@ -589,6 +590,43 @@ model ChecklistFundLine {
   @@index([caseId, isWithProfits])
   @@index([planType])
   @@map("checklist_fund_lines")
+}
+
+// ─────────────────────────────────────────────
+// CHECKLIST CONTRIBUTIONS (Pension only — 4-year history)
+// Pension checklist requires the CA to record contributions across the
+// current tax year plus the previous three (Excel row 20 = tax-year
+// labels, row 21 = amounts). Modelled as 4 rows per case (one per year)
+// keyed by position (1 = most recent, 4 = oldest) so amounts can be
+// edited independently without a JSON blob. Auto-seeded on first read.
+// ─────────────────────────────────────────────
+
+model ChecklistContribution {
+  id     String @id @default(cuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  // 1 = current tax year, 4 = current minus 3. Fixed 4-row set — position
+  // uniqueness is enforced below so a case can't accidentally end up with
+  // 8 or 5 rows.
+  position Int
+
+  // Human label, e.g. "06/04/2025 – 05/04/2026" or "2025/26". Editable
+  // per case so a CA can override the auto-seeded label if the source
+  // document uses a different convention.
+  taxYearLabel String
+
+  // Amount as free text — mirrors how ChecklistField stores currency
+  // values (users type "£10,713.81" or "10713.81" and the export
+  // handles rendering). Nullable so partial data can be saved.
+  amount String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([caseId, position])
+  @@index([caseId])
+  @@map("checklist_contributions")
 }
 
 // ─────────────────────────────────────────────

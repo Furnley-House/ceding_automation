@@ -198,6 +198,17 @@ export const fundLinesApi = {
     api.post(`/cases/${caseId}/fund-lines/bulk`, body),
 };
 
+// ── Contributions (Pension 4-year table) ─────────────────
+export const contributionsApi = {
+  list: (caseId: string) => api.get(`/cases/${caseId}/contributions`),
+  update: (
+    caseId: string,
+    id: string,
+    patch: { taxYearLabel?: string; amount?: string | null },
+  ) => api.patch(`/cases/${caseId}/contributions/${id}`, patch),
+  reset: (caseId: string) => api.post(`/cases/${caseId}/contributions/reset`, {}),
+};
+
 // ── Providers ────────────────────────────────────────────
 export const providersApi = {
   list: (includeInactive = false) =>

@@ -54,6 +54,11 @@ interface Props {
     sourceQuote: string | null,
   ) => void;
   caseId: string;
+  /** Per-section extra content injected below the section header and
+   *  above its scalar fields. Used by ChecklistPanel to render the Pension
+   *  <ContributionsTable> inline in the Transaction History section. Keys
+   *  match section names exactly (case-sensitive). */
+  extraContentBySection?: Record<string, React.ReactNode>;
 }
 
 const CONF_META: Record<Confidence, { label: string; cls: string; icon: React.ElementType }> = {
@@ -72,6 +77,7 @@ export function ChecklistTemplateView({
   onFieldChange,
   onJumpToSource,
   caseId,
+  extraContentBySection,
 }: Props) {
   return (
     <div className="rounded-md border border-border bg-card overflow-hidden">
@@ -84,9 +90,13 @@ export function ChecklistTemplateView({
       {grouped.map(({ section, fields }) => {
         const isFundSection =
           section.toLowerCase() === fundSectionName.toLowerCase();
+        const extra = extraContentBySection?.[section] ?? null;
         return (
           <div key={section}>
             <SectionHeaderRow title={section} />
+            {extra && (
+              <div className="border-t border-border bg-muted/10 p-3">{extra}</div>
+            )}
             {fields.map((def) => (
               <TemplateRow
                 key={def.key}
