@@ -287,10 +287,22 @@ const CaseDetail = () => {
         <ArrowLeft className="h-4 w-4" /> Back to cases
       </Link>
 
-      {/* Sticky: header + horizontal stepper */}
-      <div className="sticky top-16 z-20 -mx-6 px-6 pt-1 pb-3 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 border-b border-border mb-6">
+      {/* Sticky: header + horizontal stepper.
+          On Stage 4 (Extract & Fill Gaps) we compact everything above the
+          working area so the PDF↔checklist comparison view gets the full
+          viewport height. The header card auto-collapses (see effect
+          above); this class change tightens the surrounding padding. */}
+      <div
+        className={`sticky top-16 z-20 -mx-6 px-6 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 border-b border-border ${
+          viewStage === 4 ? "pt-1 pb-1.5 mb-2" : "pt-1 pb-3 mb-6"
+        }`}
+      >
         {/* Header — consolidated case details */}
-        <div className="rounded-lg border border-border bg-card p-4 mb-3">
+        <div
+          className={`rounded-lg border border-border bg-card ${
+            viewStage === 4 ? "px-3 py-2 mb-1.5" : "p-4 mb-3"
+          }`}
+        >
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-3 mb-2 flex-wrap">
@@ -418,8 +430,14 @@ const CaseDetail = () => {
           </div>
         </div>
 
-        {/* Horizontal stepper */}
-        <div className="rounded-lg border border-border bg-card p-3 overflow-x-auto">
+        {/* Horizontal stepper. On Stage 4 we render a compact chip strip
+            (smaller circles, labels hidden — tooltip on hover still shows
+            the stage name via the button's `title` attr). */}
+        <div
+          className={`rounded-lg border border-border bg-card overflow-x-auto ${
+            viewStage === 4 ? "p-1.5" : "p-3"
+          }`}
+        >
           <div className="flex items-start gap-1 min-w-[820px]">
             {CEDING_STAGES.map((s, i) => {
               const isDone = stagesCompleted.includes(s.num);
@@ -429,19 +447,24 @@ const CaseDetail = () => {
                 Math.min(10, (stagesCompleted.length > 0 ? Math.max(...stagesCompleted) : 0) + 1),
               );
               const isLocked = s.num > maxReachable;
+              const compact = viewStage === 4;
               return (
                 <button
                   key={s.num}
                   onClick={() => goToStage(s.num)}
                   disabled={isLocked}
-                  className={`flex-1 group text-center px-2 py-1.5 rounded-md transition-colors ${
-                    isCurrent ? "bg-teal/10" : "hover:bg-muted/50"
-                  } ${isLocked ? "opacity-50 cursor-not-allowed hover:bg-transparent" : ""}`}
+                  className={`flex-1 group text-center rounded-md transition-colors ${
+                    compact ? "px-1.5 py-1" : "px-2 py-1.5"
+                  } ${isCurrent ? "bg-teal/10" : "hover:bg-muted/50"} ${
+                    isLocked ? "opacity-50 cursor-not-allowed hover:bg-transparent" : ""
+                  }`}
                   title={isLocked ? "Complete previous steps first" : s.label}
                 >
                   <div className="flex items-center gap-1">
                     <div
-                      className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold shrink-0 ${
+                      className={`flex items-center justify-center rounded-full font-bold shrink-0 ${
+                        compact ? "h-5 w-5 text-[10px]" : "h-6 w-6 text-[11px]"
+                      } ${
                         isDone
                           ? "bg-success text-success-foreground"
                           : isCurrent
@@ -449,19 +472,25 @@ const CaseDetail = () => {
                           : "bg-muted text-muted-foreground"
                       }`}
                     >
-                      {isDone ? <CheckCircle2 className="h-3.5 w-3.5" /> : s.num}
+                      {isDone ? (
+                        <CheckCircle2 className={compact ? "h-3 w-3" : "h-3.5 w-3.5"} />
+                      ) : (
+                        s.num
+                      )}
                     </div>
                     {i < CEDING_STAGES.length - 1 && (
                       <div className={`flex-1 h-0.5 ${isDone ? "bg-success" : "bg-border"}`} />
                     )}
                   </div>
-                  <p
-                    className={`mt-1.5 text-[10px] font-semibold leading-tight ${
-                      isCurrent ? "text-foreground" : "text-muted-foreground"
-                    }`}
-                  >
-                    {s.label}
-                  </p>
+                  {!compact && (
+                    <p
+                      className={`mt-1.5 text-[10px] font-semibold leading-tight ${
+                        isCurrent ? "text-foreground" : "text-muted-foreground"
+                      }`}
+                    >
+                      {s.label}
+                    </p>
+                  )}
                 </button>
               );
             })}
