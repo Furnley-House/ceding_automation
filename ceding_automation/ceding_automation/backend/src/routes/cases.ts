@@ -18,6 +18,7 @@ import {
   linkTaskToPlan,
   mapPlanTypeToZoho,
   planProviderField,
+  inferPlanType,
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
 
@@ -727,26 +728,37 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   // 2. Map fields
   const mapping = mapZohoTaskToCase(taskRecord);
 
-  // 3a. Resolve provider from name → ID (only if the name has actually changed)
-  // Sticky operator pick (Fix 2): only auto-replace from Zoho when no provider
-  // is linked yet. After the operator uses the Stage 2 picker (or after import
-  // set the link), Zoho-side provider edits don't auto-flow — the operator
-  // re-picks in the app.
+  // 3a. Resolve provider from name → ID.
+  //
+  // We *used* to require `caseRecord.providerId === null` (a "sticky operator
+  // pick" — once a provider was linked, Zoho-side changes wouldn't flow), on
+  // the theory that operators would fix name-drift in the app. Furnley's
+  // real workflow flipped that assumption: they update Provider Name in the
+  // Zoho CRM (either on the Task or the Plans record — see 3d below), then
+  // hit Refresh in the app expecting the change to come through. Sticky-pick
+  // was blocking that entirely.
+  //
+  // New rule: on every refresh, if Zoho's provider name differs from what
+  // the app has, look it up in the Provider Directory and update. If no
+  // matching Provider row exists in our DB, leave the current link alone
+  // (never orphan a case just because Zoho has a name we haven't onboarded).
   let resolvedProviderId: string | null = caseRecord.providerId;
   const currentProviderName = caseRecord.provider?.name ?? null;
-  if (
-    caseRecord.providerId === null &&
-    mapping.providerName &&
-    mapping.providerName.trim().toLowerCase() !==
-      (currentProviderName ?? "").trim().toLowerCase()
-  ) {
+  const zohoProviderName =
+    mapping.providerName && mapping.providerName.trim() ? mapping.providerName.trim() : null;
+  const providerNameChanged =
+    zohoProviderName !== null &&
+    zohoProviderName.toLowerCase() !== (currentProviderName ?? "").trim().toLowerCase();
+  if (providerNameChanged) {
     const provider = await prisma.provider.findFirst({
-      where: { name: { equals: mapping.providerName, mode: "insensitive" } },
+      where: { name: { equals: zohoProviderName, mode: "insensitive" } },
     });
     if (provider) {
       resolvedProviderId = provider.id;
     }
     // If no match, leave the existing providerId alone — better than orphaning.
+    // The change still shows up in the `changes[]` array below because
+    // effectiveProviderName reflects the Zoho value.
   }
 
   // 3b. Resolve Zoho Owner → app user.
@@ -967,7 +979,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   considerChange("zohoCaseId", mapping.zohoCaseId, caseRecord.zohoCaseId);
   considerChange("clientZohoId", mapping.clientZohoId, caseRecord.clientZohoId);
 
-  // 3e. Plans-module linkage by Policy_Ref fallback + Plan Name capture.
+  // 3e. Plans-module linkage: Plan Name + authoritative Plan_Type / Provider.
   //
   // The Zoho Task carries a `What_Id` only when the operator linked the
   // Task to a Plans record before we imported it. In practice many tasks
@@ -976,12 +988,18 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   // header showed "⚠ Not linked" until a Stage 9 export ran, which felt
   // wrong to testers — the CRM clearly had the right record all along.
   //
-  // Two paths, both end up populating zohoPlanName (Plans.Name, e.g.
-  // "Plan119575") so the header can show <Name> (<Policy Ref>):
-  //   • If we still don't have a zohoCaseId, search Plans by Policy_Ref.
-  //   • If we have a zohoCaseId but no cached zohoPlanName (legacy rows
-  //     pre-dating this column), fetch the Plans record by id to backfill.
+  // When the Plans record is linked (either it was already, or we just
+  // resolved it via Policy_Ref search), we fetch the record and pull three
+  // things off it:
+  //   • Name → zohoPlanName (case header display)
+  //   • Plan_Type → overrides the Task's Plan_Type if present (Furnley
+  //     updates plan-type on the Plans record; the Task's copy goes stale)
+  //   • Provider (Lookup.name) → overrides Task Provider_group for the
+  //     same reason
+  // Both overrides feed considerChange so the response's `changes[]`
+  // reflects the real diff.
   let planSyncNote: string | null = null;
+  let planRecord: Record<string, unknown> | null = null;
   const effectiveZohoCaseId =
     (updates.zohoCaseId as string | undefined) ?? caseRecord.zohoCaseId;
   const effectivePolicyRef =
@@ -995,6 +1013,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
       const hit = await findPlanRecordByPolicyRef(effectivePolicyRef);
       if (hit) {
         updates.zohoCaseId = hit.id;
+        planRecord = hit.record;
         const planName = pickPlanName(hit.record);
         if (planName) updates.zohoPlanName = planName;
         changes.push({
@@ -1008,26 +1027,89 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
     } catch (err) {
       planSyncNote = `Plans search by Policy_Ref failed: ${(err as Error).message}`;
     }
-  } else if (effectiveZohoCaseId && !caseRecord.zohoPlanName) {
-    // Backfill Plan Name for cases that already had zohoCaseId cached but
-    // are missing the display name. One-shot — once stored, sync won't
-    // re-fetch it.
+  } else if (effectiveZohoCaseId) {
+    // Case already linked to a Plans record — refetch on every sync so
+    // Plans-record edits (Plan_Type, Provider) come through. Also
+    // opportunistically backfills zohoPlanName on legacy rows that
+    // predate that column.
     try {
       const rec = await findPlanRecordById(effectiveZohoCaseId);
       if (rec) {
+        planRecord = rec.record;
         const planName = pickPlanName(rec.record);
-        if (planName) updates.zohoPlanName = planName;
+        if (planName && planName !== caseRecord.zohoPlanName) {
+          updates.zohoPlanName = planName;
+        }
       }
     } catch (err) {
-      planSyncNote = `Plan Name backfill failed: ${(err as Error).message}`;
+      planSyncNote = `Plans record fetch failed: ${(err as Error).message}`;
     }
   }
+
+  // 3f. Plan_Type + Provider Name from the Plans record (authoritative).
+  //     Only fires when we have a linked record; falls back to the Task
+  //     values already handled by the considerChange calls above.
+  if (planRecord) {
+    // Plan_Type on the Plans module is a picklist string ("Pension" / "ISA"
+    // / "GIA" / …). inferPlanType handles casing + word variations and
+    // returns the app's PlanType enum.
+    const rawPlanTypeFromPlans =
+      typeof planRecord.Plan_Type === "string" ? planRecord.Plan_Type.trim() : "";
+    if (rawPlanTypeFromPlans) {
+      const inferred = inferPlanType(rawPlanTypeFromPlans);
+      // Track under the same "planType" field name so an earlier Task-based
+      // update gets overwritten by the more authoritative Plans value.
+      const currentPlanType = (updates.planType as PlanType | undefined) ?? caseRecord.planType;
+      if (inferred !== currentPlanType) {
+        updates.planType = inferred;
+        // Remove any previously-pushed planType change so we don't emit
+        // two entries in the response's changes[] for the same field.
+        const existingIdx = changes.findIndex((c) => c.field === "planType");
+        if (existingIdx >= 0) changes.splice(existingIdx, 1);
+        changes.push({ field: "planType", from: caseRecord.planType, to: inferred });
+      }
+    }
+
+    // Provider on Plans is a Lookup ({id, name, module}). Prefer its name
+    // over the Task's Provider_group — again, that's the field the operator
+    // actually edits on the Plans record.
+    const providerRef = planRecord[planProviderField()];
+    let plansProviderName: string | null = null;
+    if (providerRef && typeof providerRef === "object") {
+      const nm = (providerRef as Record<string, unknown>).name;
+      if (typeof nm === "string" && nm.trim()) plansProviderName = nm.trim();
+    }
+    if (plansProviderName && plansProviderName.toLowerCase() !== (currentProviderName ?? "").trim().toLowerCase()) {
+      // Overrides the Task-based decision from step 3a.
+      const provider = await prisma.provider.findFirst({
+        where: { name: { equals: plansProviderName, mode: "insensitive" } },
+      });
+      if (provider) {
+        resolvedProviderId = provider.id;
+      }
+      // If no matching Provider row in our DB, resolvedProviderId stays as
+      // it was after step 3a — again, don't orphan an active case.
+    }
+  }
+
   if (resolvedProviderId !== caseRecord.providerId) {
     updates.providerId = resolvedProviderId;
+    // Prefer the Plans-record provider name in the change log if present,
+    // otherwise fall back to the Task's name (mapping.providerName).
+    const toName = planRecord
+      ? (() => {
+          const ref = planRecord[planProviderField()];
+          if (ref && typeof ref === "object") {
+            const nm = (ref as Record<string, unknown>).name;
+            if (typeof nm === "string" && nm.trim()) return nm.trim();
+          }
+          return null;
+        })()
+      : null;
     changes.push({
       field: "provider",
       from: currentProviderName,
-      to: mapping.providerName ?? null,
+      to: toName ?? mapping.providerName ?? null,
     });
   }
   if (resolvedAssignedToId !== caseRecord.assignedToId) {

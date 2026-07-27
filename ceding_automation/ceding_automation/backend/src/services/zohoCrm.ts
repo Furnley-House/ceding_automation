@@ -699,7 +699,7 @@ function pickId(obj: Record<string, unknown>, keys: string[]): string | undefine
   return undefined;
 }
 
-function inferPlanType(s: string | undefined): PlanType {
+export function inferPlanType(s: string | undefined): PlanType {
   if (!s) return PlanType.PENSION;
   const v = s.toLowerCase();
   if (v.includes('isa')) return PlanType.ISA;
