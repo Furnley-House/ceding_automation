@@ -242,7 +242,7 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
   const updateField = async (
     fieldKey: string,
     patch: Partial<ChecklistRow>,
-    _audit?: { action: string; notes?: string | null }
+    audit?: { action?: string; notes?: string | null; source?: "MANUAL" | "CALL_EDIT" | "TRANSCRIPT" }
   ) => {
     let existing = byKey.get(fieldKey);
     try {
@@ -267,7 +267,13 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
       }
       await api.patch(
         `/cases/${caseId}/checklist/${existing.id}`,
-        camelKeys({ ...patch, isManuallyEdited: patch.value !== existing.value ? true : undefined })
+        camelKeys({
+          ...patch,
+          isManuallyEdited: patch.value !== existing.value ? true : undefined,
+          // Whitelisted server-side; the backend defaults to "MANUAL"
+          // when omitted, so existing callers stay unchanged.
+          ...(audit?.source ? { source: audit.source } : {}),
+        })
       );
     } catch (err) {
       console.error("updateField error", err);
