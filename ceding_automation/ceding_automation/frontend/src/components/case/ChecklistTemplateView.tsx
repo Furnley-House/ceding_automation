@@ -185,7 +185,7 @@ function TemplateRow({ def, row, readOnly, onFieldChange, onJumpToSource }: RowP
 
   return (
     <div
-      className={`grid grid-cols-[minmax(0,3fr)_minmax(0,5fr)] border-t border-border ${
+      className={`grid grid-cols-[minmax(0,3fr)_minmax(0,5fr)_auto] border-t border-border ${
         isApproved
           ? "bg-success/5"
           : isReviewRequested
@@ -194,7 +194,7 @@ function TemplateRow({ def, row, readOnly, onFieldChange, onJumpToSource }: RowP
       }`}
     >
       {/* Column A — question label */}
-      <div className="border-r border-border px-3 py-2 flex items-start gap-2 group">
+      <div className="border-r border-border px-3 py-2 flex items-start gap-2">
         <TooltipProvider delayDuration={200}>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -215,29 +215,11 @@ function TemplateRow({ def, row, readOnly, onFieldChange, onJumpToSource }: RowP
           {def.label}
           {def.required && <span className="text-destructive ml-0.5">*</span>}
         </p>
-        {hasSourceJump && (
-          <button
-            type="button"
-            onClick={() =>
-              onJumpToSource?.(
-                row?.source_page ?? null,
-                def.label,
-                row?.evidence_source ?? null,
-                row?.source_document_id ?? null,
-                row?.source_quote ?? null,
-              )
-            }
-            className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-teal shrink-0"
-            title="Jump to source page"
-          >
-            <FileSearch className="h-3.5 w-3.5" />
-          </button>
-        )}
       </div>
 
       {/* Column B..G merged — answer cell */}
       <div
-        className={`px-3 py-2 min-h-[36px] flex items-center ${
+        className={`px-3 py-2 min-h-[36px] flex items-center border-r border-border ${
           readOnly ? "" : "cursor-text hover:bg-muted/40"
         }`}
         onClick={editing ? undefined : startEdit}
@@ -256,6 +238,36 @@ function TemplateRow({ def, row, readOnly, onFieldChange, onJumpToSource }: RowP
             {displayValue || "—"}
           </span>
         )}
+      </div>
+
+      {/* Source-jump gutter — always visible when the field has a source
+          page so the CA can jump to the PDF page without hover-hunting.
+          Renders an empty spacer cell when there's no source so all rows
+          stay the same width. */}
+      <div className="w-8 flex items-center justify-center">
+        {hasSourceJump ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onJumpToSource?.(
+                row?.source_page ?? null,
+                def.label,
+                row?.evidence_source ?? null,
+                row?.source_document_id ?? null,
+                row?.source_quote ?? null,
+              );
+            }}
+            className="text-muted-foreground hover:text-teal transition-colors"
+            title={
+              row?.source_page
+                ? `Jump to page ${row.source_page}${row.evidence_source ? ` of ${row.evidence_source}` : ""}`
+                : "Jump to source page"
+            }
+          >
+            <FileSearch className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
       </div>
     </div>
   );

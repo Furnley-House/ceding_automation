@@ -49,6 +49,7 @@ function StagePanel({
   description,
   children,
   comingSoon,
+  compact,
 }: {
   num: number;
   icon: React.ElementType;
@@ -56,19 +57,37 @@ function StagePanel({
   description: string;
   children?: React.ReactNode;
   comingSoon?: string;
+  /** When true, renders a compact single-line header — used on Stage 4 so
+   *  the PDF↔checklist comparison view gets the full viewport. */
+  compact?: boolean;
 }) {
   return (
     <div className="theme-card theme-card-accent border border-border bg-card">
-      <div className="flex items-start gap-3 mb-4 pb-4 border-b border-border">
-        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-teal/15 text-teal shrink-0">
-          <Icon className="h-5 w-5" />
+      {compact ? (
+        // Compact header: one-line icon + step chip + title. Description
+        // dropped — the stepper above and the panel itself communicate
+        // context; the description was mostly a legend the CA reads once.
+        <div className="flex items-center gap-2 mb-2 pb-2 border-b border-border">
+          <div className="flex h-6 w-6 items-center justify-center rounded bg-teal/15 text-teal shrink-0">
+            <Icon className="h-3.5 w-3.5" />
+          </div>
+          <span className="text-[10px] uppercase tracking-widest text-teal font-semibold">
+            Step {num}/{TOTAL_STAGES}
+          </span>
+          <h2 className="text-sm font-bold theme-heading text-foreground">{title}</h2>
         </div>
-        <div className="flex-1">
-          <p className="text-[10px] uppercase tracking-widest text-teal font-semibold">Step {num} of {TOTAL_STAGES}</p>
-          <h2 className="text-lg font-bold theme-heading text-foreground">{title}</h2>
-          <p className="text-sm text-muted-foreground mt-0.5">{description}</p>
+      ) : (
+        <div className="flex items-start gap-3 mb-4 pb-4 border-b border-border">
+          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-teal/15 text-teal shrink-0">
+            <Icon className="h-5 w-5" />
+          </div>
+          <div className="flex-1">
+            <p className="text-[10px] uppercase tracking-widest text-teal font-semibold">Step {num} of {TOTAL_STAGES}</p>
+            <h2 className="text-lg font-bold theme-heading text-foreground">{title}</h2>
+            <p className="text-sm text-muted-foreground mt-0.5">{description}</p>
+          </div>
         </div>
-      </div>
+      )}
       {children}
       {comingSoon && (
         <div className="mt-4 rounded-md border border-dashed border-border bg-muted/30 p-4 text-center">
@@ -175,6 +194,7 @@ export function StageAIExtraction({ caseItem }: StageProps) {
       icon={Cpu}
       title="Extract & Fill Gaps"
       description=""
+      compact
     >
       <ExtractionWorkspace caseId={caseItem.id} planType={caseItem.plan_type} />
     </StagePanel>
