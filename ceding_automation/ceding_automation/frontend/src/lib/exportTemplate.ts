@@ -247,12 +247,25 @@ export interface ExportAuditRow {
   new_value: string;
 }
 
+export interface ExportContributionRow {
+  /** 1 = current tax year, 4 = current − 3. Written into cells in
+   *  position order across columns B, C, D:E, F:G of rows 20 and 21. */
+  position: number;
+  /** Human tax-year label, e.g. "2025/26" or "06/04/2025 – 05/04/2026". */
+  taxYearLabel: string;
+  /** Free-text amount as saved on the row. Blank if unset. */
+  amount: string | null;
+}
+
 export interface ExportInput {
   planType: "PENSION" | "ISA" | "GIA";
   caseRef: string;
   clientName: string;
   fields: ExportChecklistRow[];
   fundLines: ExportFundLine[];
+  /** Pension 4-year contributions table. Absent or empty on ISA / GIA
+   *  cases; the template writer skips it there. */
+  contributions?: ExportContributionRow[];
   auditRows: ExportAuditRow[];
 }
 
@@ -334,19 +347,56 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
     keep.getCell(`B${targetRow}`).value = value;
   }
 
-  // ── Pension row 21 (Contributions – Amount): collapse tax-year merges ───
-  // Template row 21 is laid out as four per-year cells (B21, C21, D21:E21,
-  // F21:G21) each holding a "£" placeholder. The AI produces a single
-  // "YYYY/YYYY: £X; YYYY/YYYY: £Y" formatted string, so we replace the
-  // per-year merges with a single wide B21:G21 answer cell and clear the
-  // placeholders. Runs only if a value is available for this field.
-  if (input.planType === "PENSION" && byKey.get("contributions_4yr_history")) {
-    try { keep.unMergeCells("D21:E21"); } catch { /* not merged — ok */ }
-    try { keep.unMergeCells("F21:G21"); } catch { /* not merged — ok */ }
-    for (const col of ["C", "D", "E", "F", "G"] as const) {
-      keep.getCell(`${col}21`).value = "";
+  // ── Pension row 20/21 (Contributions) ───────────────────────────────
+  // The template lays out row 20 as four tax-year date-range headers
+  // (B20, C20, D20:E20, F20:G20) and row 21 as four "£" placeholders
+  // with a "BREAKDOWN OF EMPLOYER & PERSONAL -" label in col A. When the
+  // structured ContributionsTable has data, we write per-year labels
+  // into row 20 and per-year amounts into row 21 in position order.
+  //
+  // Fallback: if no structured contributions are supplied, we collapse
+  // row 21 into one wide cell (B21:G21) and write the AI's raw
+  // "YYYY/YYYY: £X; YYYY/YYYY: £Y" string into it — the pre-structured-
+  // table behaviour. Legacy cases fall here.
+  if (input.planType === "PENSION") {
+    const contribs = (input.contributions ?? [])
+      .filter((c) => c.taxYearLabel || c.amount) // ignore fully-empty auto-seeded rows
+      .sort((a, b) => a.position - b.position);
+    const hasStructured = contribs.length > 0;
+
+    if (hasStructured) {
+      // Structured path: per-year cells across rows 20 and 21. Anchors
+      // are B/C/D/F (D and F are the merge anchors for D:E and F:G).
+      const anchors = ["B", "C", "D", "F"] as const;
+      // Clear the row-20 date-range placeholders + row-21 "£" placeholders
+      // before writing so partial data doesn't leave stale defaults.
+      for (const col of ["B", "C", "D", "E", "F", "G"] as const) {
+        keep.getCell(`${col}20`).value = "";
+        keep.getCell(`${col}21`).value = "";
+      }
+      contribs.slice(0, 4).forEach((c) => {
+        const anchor = anchors[c.position - 1];
+        if (!anchor) return;
+        keep.getCell(`${anchor}20`).value = c.taxYearLabel;
+        keep.getCell(`${anchor}21`).value = c.amount ?? "";
+      });
+      // Suppress the fallback scalar mapping that would otherwise
+      // overwrite B21 with the free-text contributions_4yr_history value.
+      // Handled here rather than earlier by clearing it after the
+      // mapping loop wrote (order-of-ops).
+      keep.getCell("B21").value = anchors[0]
+        ? (contribs.find((c) => c.position === 1)?.amount ?? "")
+        : "";
+    } else if (byKey.get("contributions_4yr_history")) {
+      // Legacy fallback: collapse row 21 into one wide cell and write the
+      // AI's raw string. Undoes the per-cell merges before merging B21:G21.
+      try { keep.unMergeCells("D21:E21"); } catch { /* not merged — ok */ }
+      try { keep.unMergeCells("F21:G21"); } catch { /* not merged — ok */ }
+      for (const col of ["C", "D", "E", "F", "G"] as const) {
+        keep.getCell(`${col}21`).value = "";
+      }
+      try { keep.mergeCells("B21:G21"); } catch { /* already merged — ok */ }
     }
-    try { keep.mergeCells("B21:G21"); } catch { /* already merged — ok */ }
   }
 
   // ── Populate Fund Details ───────────────────────────────────────────────

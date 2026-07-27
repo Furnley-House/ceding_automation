@@ -11,7 +11,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { auditApi, casesApi, fundLinesApi } from "@/lib/api";
+import { auditApi, casesApi, contributionsApi, fundLinesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { useChecklistFields, isMissing, displayValue } from "@/hooks/useChecklistFields";
 import { getTemplate } from "@/lib/checklistTemplates";
@@ -164,6 +164,25 @@ export function ExportWorkspace({ caseItem }: Props) {
       /* fund lines unavailable — export continues without them */
     }
 
+    // Fetch Pension contributions table (best-effort). On non-Pension
+    // cases the API still returns 4 auto-seeded rows, but the template
+    // builder ignores them because only the Pension sheet has the target
+    // cells (row 20 / row 21).
+    let contributions: ExportInput["contributions"] = [];
+    try {
+      const res = await contributionsApi.list(caseItem.id);
+      const data = res.data as { rows?: Array<{ position: number; taxYearLabel: string; amount: string | null }> };
+      contributions = (data.rows ?? [])
+        .sort((a, b) => a.position - b.position)
+        .map((r) => ({
+          position: r.position,
+          taxYearLabel: r.taxYearLabel,
+          amount: r.amount ?? null,
+        }));
+    } catch {
+      /* contributions unavailable — export falls back to the legacy text field */
+    }
+
     // Fetch audit rows (best-effort).
     let auditRows: ExportInput["auditRows"] = [];
     try {
@@ -199,6 +218,7 @@ export function ExportWorkspace({ caseItem }: Props) {
         status: f.status ?? null,
       })),
       fundLines,
+      contributions,
       auditRows,
     };
 

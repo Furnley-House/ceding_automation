@@ -13,6 +13,17 @@ import { useDocuments } from "@/hooks/useDocuments";
 import { useFundLines } from "@/hooks/useFundLines";
 import { checklistApi } from "@/lib/api";
 import { FundDetailsTable } from "./FundDetailsTable";
+import { ContributionsTable } from "./ContributionsTable";
+
+// Legacy free-text fields that the AI extractor populates with unstructured
+// contributions text ("See contributions tables for full history"). These
+// are still saved to ChecklistField as a raw fallback, but the checklist UI
+// hides them — the new <ContributionsTable> owns the visible representation.
+// Pension-only; other plan types don't have these fields in their template.
+const CONTRIBUTIONS_LEGACY_FIELD_KEYS = new Set([
+  "contributions_4yr_history",
+  "contributions_breakdown_employer_personal",
+]);
 
 // localStorage key holding the CA's preferred Stage 4 layout. Per-user
 // (not per-case) so switching between cases keeps the CA's chosen view.
@@ -170,14 +181,25 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
   type FieldFilter = "all" | "high" | "review" | "missing";
   const [filter, setFilter] = useState<FieldFilter>("all");
 
+  // Pension-only: the structured <ContributionsTable> replaces two free-text
+  // fields on the checklist UI. On non-Pension plans, those fields aren't
+  // in the template anyway — the Set filter is a no-op there.
+  const isPension = useMemo(() => {
+    const n = (planType ?? "").toLowerCase();
+    return n === "pension" || n.startsWith("pension");
+  }, [planType]);
+
   const visibleFields = useMemo(
     () =>
       template.filter((f) => {
+        // Hide legacy contributions text fields on Pension (structured
+        // ContributionsTable owns the visible representation now).
+        if (isPension && CONTRIBUTIONS_LEGACY_FIELD_KEYS.has(f.key)) return false;
         if (!f.showIf) return true;
         const dependent = byKey.get(f.showIf.key)?.value;
         return dependent ? f.showIf.in.includes(dependent) : false;
       }),
-    [template, byKey],
+    [template, byKey, isPension],
   );
 
   const grouped = useMemo(() => groupBySection(visibleFields), [visibleFields]);
@@ -595,6 +617,18 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
             onFieldChange={handleFieldChange}
             onJumpToSource={onJumpToSource}
             caseId={caseId}
+            extraContentBySection={
+              isPension
+                ? {
+                    "Transaction History": (
+                      <ContributionsTable
+                        caseId={caseId}
+                        readOnly={!canEditChecklist}
+                      />
+                    ),
+                  }
+                : undefined
+            }
           />
         ) : (
           filteredGrouped.map(({ section, fields }) => (
@@ -604,6 +638,14 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
                 {section}
               </h4>
             </div>
+            {/* Pension Contributions table renders at the top of the
+               Transaction History section — it replaces the two legacy
+               text fields that were filtered out of visibleFields above. */}
+            {isPension && section === "Transaction History" && (
+              <div className="p-3 border-b border-border">
+                <ContributionsTable caseId={caseId} readOnly={!canEditChecklist} />
+              </div>
+            )}
             <div className="p-3 grid gap-2 md:grid-cols-2">
               {fields.map((f) => {
                 const r = byKey.get(f.key);
