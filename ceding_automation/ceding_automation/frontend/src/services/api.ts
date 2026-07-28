@@ -213,6 +213,10 @@ export interface SyncDebug {
     policyRefField: string | null;
     subject: string | null;
   };
+  /** Every non-empty top-level field API name on the Zoho Task. Ops
+   *  can eyeball this to catch field-name mismatches (e.g. Zoho uses
+   *  `Provider_Group` but our lookup was checking `Provider_group`). */
+  rawTaskFieldNames?: string[];
   extracted: {
     providerName: string | null;
     planTypeRaw: string | null;
