@@ -216,6 +216,21 @@ function isAwaitingReview(s: CaseStatus | undefined | null): boolean {
   return s === CaseStatus.IN_REVIEW || s === CaseStatus.STAGE_9_ADVISER_REVIEW;
 }
 
+/**
+ * Return the value of the first key in `record` that has a non-empty
+ * string value, or null if none match. Used by the Refresh-from-Zoho
+ * diagnostic snapshot to show which of our candidate field names was
+ * actually populated on the Task (so ops can see if their Zoho org
+ * uses a different field name from what our lookup expects).
+ */
+function firstNonEmpty(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const k of keys) {
+    const v = record[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
 // Returns the paraplanner id that should own the review. If the case
 // already has one, keep it. Otherwise pick the first active PARAPLANNER
 // user (Megan Doherty in the demo seed) and patch the update payload to
@@ -728,6 +743,64 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   // 2. Map fields
   const mapping = mapZohoTaskToCase(taskRecord);
 
+  // Diagnostic snapshot — echoed in the response so the UI can show a
+  // CA (or us during triage) exactly what Zoho returned and why the sync
+  // did or didn't change something. Non-sensitive: only echoes back the
+  // presence of the fields we already look at, not raw Zoho payloads.
+  const syncDebug: {
+    taskFieldsSeen: {
+      providerField: string | null;
+      planTypeField: string | null;
+      policyRefField: string | null;
+      subject: string | null;
+    };
+    extracted: {
+      providerName: string | null;
+      planTypeRaw: string | null;
+      policyRef: string | null;
+    };
+    plansRecord: {
+      fetched: boolean;
+      providerName: string | null;
+      planTypeRaw: string | null;
+      planName: string | null;
+      note: string | null;
+    };
+    providerDirectory: {
+      lookupName: string | null;
+      matched: boolean;
+    };
+  } = {
+    taskFieldsSeen: {
+      providerField: firstNonEmpty(taskRecord, [
+        "Provider_group", "Provider", "Provider_Name", "Ceding_Provider",
+      ]),
+      planTypeField: firstNonEmpty(taskRecord, [
+        "Plan_Type", "PlanType", "Product_Type",
+      ]),
+      policyRefField: firstNonEmpty(taskRecord, [
+        "Plan_reference", "Plan_Reference", "Policy_Ref", "Policy_Number",
+      ]),
+      subject: firstNonEmpty(taskRecord, ["Subject"]),
+    },
+    extracted: {
+      providerName: mapping.providerName ?? null,
+      planTypeRaw: (taskRecord.Plan_Type as string) ?? null,
+      policyRef: mapping.policyRef ?? null,
+    },
+    plansRecord: {
+      fetched: false,
+      providerName: null,
+      planTypeRaw: null,
+      planName: null,
+      note: null,
+    },
+    providerDirectory: {
+      lookupName: null,
+      matched: false,
+    },
+  };
+
   // 3a. Resolve provider from name → ID.
   //
   // We *used* to require `caseRecord.providerId === null` (a "sticky operator
@@ -750,11 +823,13 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
     zohoProviderName !== null &&
     zohoProviderName.toLowerCase() !== (currentProviderName ?? "").trim().toLowerCase();
   if (providerNameChanged) {
+    syncDebug.providerDirectory.lookupName = zohoProviderName;
     const provider = await prisma.provider.findFirst({
       where: { name: { equals: zohoProviderName, mode: "insensitive" } },
     });
     if (provider) {
       resolvedProviderId = provider.id;
+      syncDebug.providerDirectory.matched = true;
     }
     // If no match, leave the existing providerId alone — better than orphaning.
     // The change still shows up in the `changes[]` array below because
@@ -1044,7 +1119,28 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
     } catch (err) {
       planSyncNote = `Plans record fetch failed: ${(err as Error).message}`;
     }
+  } else if (!effectiveZohoCaseId && !effectivePolicyRef) {
+    planSyncNote =
+      "Task has no linked Plans record (What_Id) and no Policy_Ref to search by — Provider/Plan Type cannot be pulled from the Plans module.";
   }
+
+  // Populate the plansRecord debug snapshot now that we know what we
+  // fetched (or didn't). Values come from the record itself so the CA
+  // can see EXACTLY what Zoho returned vs what's in the DB.
+  if (planRecord) {
+    syncDebug.plansRecord.fetched = true;
+    syncDebug.plansRecord.planName = pickPlanName(planRecord);
+    syncDebug.plansRecord.planTypeRaw =
+      typeof planRecord.Plan_Type === "string" ? planRecord.Plan_Type.trim() : null;
+    const providerRef = planRecord[planProviderField()];
+    if (providerRef && typeof providerRef === "object") {
+      const nm = (providerRef as Record<string, unknown>).name;
+      if (typeof nm === "string" && nm.trim()) {
+        syncDebug.plansRecord.providerName = nm.trim();
+      }
+    }
+  }
+  if (planSyncNote) syncDebug.plansRecord.note = planSyncNote;
 
   // 3f. Plan_Type + Provider Name from the Plans record (authoritative).
   //     Only fires when we have a linked record; falls back to the Task
@@ -1183,6 +1279,12 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
     paraplannerSyncNote,
     providerSyncNote,
     planSyncNote,
+    // Diagnostic snapshot — shows exactly which Zoho task fields carried
+    // values, what the mapping extracted from them, whether a Plans
+    // record was fetched, and whether the Provider Directory found a
+    // match. Non-sensitive; the UI shows this on the Refresh action
+    // when `changed=false` so ops can see WHY a refresh did nothing.
+    syncDebug,
     cachedZohoIds: {
       zohoOwnerId: cachedZohoOwnerId,
       zohoClientOwnerIds: cachedZohoClientOwnerIds,
