@@ -754,6 +754,10 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
       policyRefField: string | null;
       subject: string | null;
     };
+    /** Every non-empty top-level string/object-with-name field on the Zoho
+     *  Task, keyed by API name. Lets ops eyeball a case's actual field
+     *  names to catch mismatches without opening the Zoho API. */
+    rawTaskFieldNames: string[];
     extracted: {
       providerName: string | null;
       planTypeRaw: string | null;
@@ -773,19 +777,31 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   } = {
     taskFieldsSeen: {
       providerField: firstNonEmpty(taskRecord, [
-        "Provider_group", "Provider", "Provider_Name", "Ceding_Provider",
+        "Provider_Group", "Provider_group", "Ceding_Provider", "Provider_Name", "Provider",
       ]),
       planTypeField: firstNonEmpty(taskRecord, [
-        "Plan_Type", "PlanType", "Product_Type",
+        "Ceding_Type", "Plan_Type", "PlanType", "Product_Type",
       ]),
       policyRefField: firstNonEmpty(taskRecord, [
         "Plan_reference", "Plan_Reference", "Policy_Ref", "Policy_Number",
       ]),
       subject: firstNonEmpty(taskRecord, ["Subject"]),
     },
+    rawTaskFieldNames: Object.keys(taskRecord).filter((k) => {
+      const v = taskRecord[k];
+      if (typeof v === "string") return v.trim().length > 0;
+      if (v && typeof v === "object" && "name" in (v as Record<string, unknown>)) {
+        const n = (v as Record<string, unknown>).name;
+        return typeof n === "string" && n.trim().length > 0;
+      }
+      return false;
+    }),
     extracted: {
       providerName: mapping.providerName ?? null,
-      planTypeRaw: (taskRecord.Plan_Type as string) ?? null,
+      planTypeRaw:
+        (typeof taskRecord.Ceding_Type === "string" && taskRecord.Ceding_Type) ||
+        (typeof taskRecord.Plan_Type === "string" && taskRecord.Plan_Type) ||
+        null,
       policyRef: mapping.policyRef ?? null,
     },
     plansRecord: {
