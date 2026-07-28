@@ -712,6 +712,117 @@ export function inferPlanType(s: string | undefined): PlanType {
   return PlanType.PENSION;
 }
 
+// Plan-type words that appear inside the Provider segment of a Ceding
+// Task Subject and must be stripped to get a clean Provider name.
+// e.g. "Standard Life Pension" → provider = "Standard Life"
+const PLAN_TYPE_KEYWORDS = [
+  'personal pension',
+  'stakeholder pension',
+  'with-profits pension',
+  'with profits pension',
+  'sipp',
+  'pension',
+  'stocks and shares isa',
+  's&s isa',
+  'lifetime isa',
+  'lisa',
+  'junior isa',
+  'jisa',
+  'cash isa',
+  'isa',
+  'general investment account',
+  'gia',
+  'onshore bond',
+  'offshore bond',
+  'investment bond',
+  'bond',
+  'final salary',
+  'defined benefit',
+  'db',
+  'protection',
+  'life cover',
+] as const;
+
+// Heuristic policy-ref detector — Furnley's operators use codes like
+// "D2732884000", "EMP2733...", "CT98621568A". They're always
+// alphanumeric (mixed letters + digits), at least 5 chars, no spaces.
+// Rejects free-text like "the client's account" or a client-name
+// fragment that happens to end the subject.
+function looksLikePolicyRef(s: string): boolean {
+  const t = s.trim();
+  if (t.length < 5 || t.length > 40) return false;
+  if (/\s/.test(t)) return false;
+  // Must contain at least one digit AND one letter, or be all digits
+  // ≥ 6 chars. Rejects pure words ("Catherine") and single tokens like
+  // "the".
+  const hasDigit = /\d/.test(t);
+  const hasLetter = /[A-Za-z]/.test(t);
+  if (hasDigit && hasLetter) return true;
+  if (hasDigit && !hasLetter && t.length >= 6) return true;
+  return false;
+}
+
+/**
+ * Parse Furnley's canonical Ceding Task Subject pattern:
+ *   `Ceding - <Provider> [PlanType] - <Client Name> - <PolicyRef>`
+ *
+ * Only used as a fallback when structured Task fields (Provider_group,
+ * Plan_reference) are missing — see mapZohoTaskToCase. Returns undefined
+ * for each piece we couldn't confidently extract; the caller preserves
+ * existing DB values in those cases (never blanks them out).
+ *
+ * Deliberately conservative: the Subject may not follow the pattern at
+ * all (older Tasks, hand-typed ones, non-Ceding tasks that share the
+ * endpoint). We only accept when the string starts with a "Ceding" prefix
+ * and yields ≥3 segments; otherwise return an empty object.
+ */
+export function parseCedingSubject(
+  subject: string,
+): { provider?: string; policyRef?: string } {
+  const t = subject.trim();
+  // Accept "Ceding - …" or "Ceding– …" (some operators use en/em dash).
+  // Case-insensitive so "ceding" / "CEDING" both work.
+  const withoutPrefix = t.replace(/^ceding\s*[-–—]\s*/i, '');
+  if (withoutPrefix === t) return {}; // no "Ceding" prefix — not our format
+
+  // Split on " - " (space-dash-space) with en/em dash tolerance.
+  const parts = withoutPrefix
+    .split(/\s+[-–—]\s+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return {}; // needs at least provider + one more field
+
+  const out: { provider?: string; policyRef?: string } = {};
+
+  // First segment = provider + optional plan-type keyword. Strip any
+  // trailing plan-type words to get a clean provider name.
+  const providerSeg = parts[0];
+  const lower = providerSeg.toLowerCase();
+  let providerClean = providerSeg;
+  // Strip the LONGEST matching keyword from the end. Iterating longest-
+  // first avoids stripping "isa" from "cash isa" and leaving " cash".
+  for (const kw of PLAN_TYPE_KEYWORDS) {
+    const suffix = ` ${kw}`;
+    if (lower.endsWith(suffix)) {
+      providerClean = providerSeg.slice(0, providerSeg.length - suffix.length).trim();
+      break;
+    }
+    if (lower === kw) {
+      providerClean = '';
+      break;
+    }
+  }
+  if (providerClean) out.provider = providerClean;
+
+  // Last segment = policy ref, IF it looks like an alphanumeric code.
+  // Rejects "Catherine Mundell" (client-name-shaped tail on shorter subjects)
+  // and free-text fragments.
+  const lastSeg = parts[parts.length - 1];
+  if (looksLikePolicyRef(lastSeg)) out.policyRef = lastSeg;
+
+  return out;
+}
+
 export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
   const env = process.env;
 
@@ -736,7 +847,7 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
   // `Provider_group` is the actual field used on Furnley House's Zoho Tasks;
   // the older `Provider` / `Provider_Name` / `Ceding_Provider` keys are kept
   // as fallbacks so older orgs still map cleanly.
-  const providerName =
+  let providerName: string | undefined =
     (providerField && pickString(task, [providerField])) ||
     pickString(task, ['Provider_group', 'Provider', 'Provider_Name', 'Ceding_Provider']);
 
@@ -752,9 +863,28 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
   // removed when the operator deleted that field from Zoho on 17 Jun.
   // Zoho field API names are case-sensitive, so both casings are tried for
   // Plan_Reference / Plan_reference to cover any orgs still using title case.
-  const policyRef =
+  let policyRef: string | undefined =
     (policyRefField && pickString(task, [policyRefField])) ||
     pickString(task, ['Plan_reference', 'Plan_Reference', 'Policy_Ref', 'Policy_Number']);
+
+  // ── Subject-line fallback ────────────────────────────────────────────
+  // Furnley's operators create Ceding Tasks with a canonical Subject
+  // pattern: `Ceding - <Provider> [PlanType] - <Client Name> - <PolicyRef>`
+  //   e.g. "Ceding - Standard Life Pension - Catherine Mundell - D2732884000"
+  //        "Ceding - Nest - Keith Abraham - EMP2733884000"
+  //
+  // Some Tasks are created WITHOUT the structured Provider_group /
+  // Plan_reference custom fields being filled in (usually when the CA sets
+  // up the Task by hand, or when it was imported from an older process).
+  // Rather than leaving the case with a blank Provider + Policy Ref forever,
+  // we parse the Subject as a last-resort fallback — only when the
+  // structured field is missing, so a real Zoho field always wins.
+  const subject = pickString(task, ['Subject']);
+  if (subject && (!providerName || !policyRef)) {
+    const parsed = parseCedingSubject(subject);
+    if (!providerName && parsed.provider) providerName = parsed.provider;
+    if (!policyRef && parsed.policyRef) policyRef = parsed.policyRef;
+  }
 
   const zohoDeepLink =
     (deepLinkField && pickString(task, [deepLinkField])) ||
