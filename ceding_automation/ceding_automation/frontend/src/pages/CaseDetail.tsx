@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, AlertTriangle, ExternalLink, RefreshCw, Search, Plus } from "lucide-react";
 import type { AppLayoutContext } from "@/components/layout/AppLayout";
-import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho } from "@/services/api";
+import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho, type SyncDebug } from "@/services/api";
 import { CEDING_STAGES, STATUS_LABELS, STATUS_STYLES, RAG_STYLES, calculateRag } from "@/lib/caseHelpers";
 import { isSupportedPlanType, SUPPORTED_PLAN_TYPES } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
@@ -72,14 +72,25 @@ const CaseDetail = () => {
   const syncMutation = useMutation({
     mutationFn: () => syncCaseFromZoho(id!),
     onSuccess: (result) => {
-      if (!result.changed) return;
-      qc.invalidateQueries({ queryKey: ["case", id] });
-      qc.invalidateQueries({ queryKey: ["cases"] });
-      const fields = result.changes.map((c) => c.field).join(", ");
-      toast.success(
-        `Updated from Zoho: ${result.changes.length} change${result.changes.length === 1 ? "" : "s"}`,
-        { description: fields },
-      );
+      if (result.changed) {
+        qc.invalidateQueries({ queryKey: ["case", id] });
+        qc.invalidateQueries({ queryKey: ["cases"] });
+        const fields = result.changes.map((c) => c.field).join(", ");
+        toast.success(
+          `Updated from Zoho: ${result.changes.length} change${result.changes.length === 1 ? "" : "s"}`,
+          { description: fields },
+        );
+      } else if (result.syncDebug) {
+        // No change detected — surface WHY so ops can act (update the
+        // right field in CRM, add the Provider to the Directory, etc.)
+        const reasons = summariseNoChangeReasons(result.syncDebug);
+        if (reasons.length > 0) {
+          toast.message("No changes from Zoho", {
+            description: reasons.join(" · "),
+            duration: 8000,
+          });
+        }
+      }
     },
     // Stay quiet on errors — we don't want a Zoho hiccup to spam the user.
     onError: (e: Error) => {
@@ -596,6 +607,46 @@ const CaseDetail = () => {
     </div>
   );
 };
+
+/**
+ * Turn a "no change from Zoho" sync response into user-facing bullets
+ * explaining WHY nothing updated. Ordered so the most-actionable reason
+ * shows first (missing Zoho field → CA can go fix it in CRM; unknown
+ * provider name → admin can add to Directory).
+ */
+function summariseNoChangeReasons(d: SyncDebug): string[] {
+  const reasons: string[] = [];
+  const noProviderInTask =
+    !d.taskFieldsSeen.providerField && !d.plansRecord.providerName;
+  const noPolicyRefInTask = !d.taskFieldsSeen.policyRefField;
+  const noPlanTypeInTask =
+    !d.taskFieldsSeen.planTypeField && !d.plansRecord.planTypeRaw;
+
+  if (noProviderInTask) {
+    reasons.push("Zoho task has no Provider field (Provider_group) populated");
+  } else if (
+    d.providerDirectory.lookupName &&
+    !d.providerDirectory.matched
+  ) {
+    reasons.push(
+      `Provider "${d.providerDirectory.lookupName}" in Zoho doesn't match any Provider in the Directory`,
+    );
+  }
+  if (noPolicyRefInTask) {
+    reasons.push("Zoho task has no Policy Reference (Plan_reference) populated");
+  }
+  if (noPlanTypeInTask) {
+    reasons.push("Zoho task has no Plan Type field populated");
+  }
+  if (d.plansRecord.note) {
+    reasons.push(d.plansRecord.note);
+  }
+  // If everything's populated but nothing changed, say so cleanly.
+  if (reasons.length === 0) {
+    reasons.push("All Zoho fields already match the case");
+  }
+  return reasons;
+}
 
 function HeaderField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
