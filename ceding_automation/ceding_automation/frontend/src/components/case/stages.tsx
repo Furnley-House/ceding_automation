@@ -378,6 +378,11 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
             <span className="text-[11px] uppercase tracking-wider font-bold text-muted-foreground pr-1">
               CA actions
             </span>
+            {/* Hidden per user request (2026-07-28): the "Edit fields
+                (Stage 4)" and "Call provider (Stage 5)" jump buttons are
+                redundant now that the top stepper handles stage navigation.
+                Keep the JSX around in case we want to bring them back. */}
+            {/*
             <Button
               size="sm"
               variant="outline"
@@ -394,6 +399,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
             >
               <Phone className="h-3.5 w-3.5" /> Call provider (Stage 5)
             </Button>
+            */}
             <Button
               size="sm"
               variant="outline"
