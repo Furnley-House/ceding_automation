@@ -206,6 +206,12 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
       </h4>
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">{cards}</div>
 
+      {/* Hidden per user request (2026-07-28): the raw per-stage
+          duration strip repeats internal enum names (STAGE_2_COLLECT_DETAILS,
+          IN_REVIEW, …) and duplicates cover-page KPIs, so it wasn't
+          reading as useful. The `stageDurations` compute above still
+          runs cheaply, so bringing it back is a one-liner. */}
+      {/*
       {stageDurations.length > 0 && (
         <div className="mt-3 pt-3 border-t border-border">
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
@@ -221,6 +227,7 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
           </p>
         </div>
       )}
+      */}
     </div>
   );
 }
