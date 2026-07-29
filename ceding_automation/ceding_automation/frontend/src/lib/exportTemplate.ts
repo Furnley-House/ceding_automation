@@ -329,10 +329,51 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
   // without the shift, writeFundLines would clobber those rows.
   const block = FUND_BLOCKS[input.planType];
   const extraRows = block ? Math.max(0, input.fundLines.length - block.reservedRows) : 0;
+
+  // Capture ALL full-width A:G merges that sit BELOW the duplicateRow
+  // insertion point BEFORE we insert — ExcelJS's duplicateRow does not
+  // reliably preserve merges on shifted rows (it un-merges them and
+  // leaves the anchor's value duplicated across every cell). We re-
+  // establish these merges at their shifted positions after the insert.
+  // Section-header rows ("Charges", "Guarantees", "Benefits & Options
+  // available", etc.) are the visible casualties of this bug.
+  const insertBoundary = block ? block.firstDataRow + block.reservedRows - 1 : Infinity;
+  const mergesToRestore: Array<{ row: number; anchorValue: unknown }> = [];
+  if (extraRows > 0 && block) {
+    // ws.model.merges is an object keyed by index; the values are range
+    // strings like "A36:G36". Fall back to worksheet-level merged cells
+    // iteration if the internal shape differs.
+    const mergeRanges = getFullWidthAGMergedRows(keep);
+    for (const row of mergeRanges) {
+      if (row > insertBoundary) {
+        mergesToRestore.push({
+          row,
+          anchorValue: keep.getCell(`A${row}`).value,
+        });
+      }
+    }
+  }
+
   if (block && extraRows > 0) {
     // duplicateRow(source, count, insert=true) inserts `count` styled copies
     // of `source` immediately after it, pushing all rows below down.
     keep.duplicateRow(block.firstDataRow + block.reservedRows - 1, extraRows, true);
+
+    // Restore the A:G merges on their new shifted positions. For each,
+    // clear the duplicated content in B..G, put the original anchor value
+    // back in A, then re-merge A:G.
+    for (const { row, anchorValue } of mergesToRestore) {
+      const shiftedRow = row + extraRows;
+      for (const col of ["B", "C", "D", "E", "F", "G"] as const) {
+        keep.getCell(`${col}${shiftedRow}`).value = null;
+      }
+      keep.getCell(`A${shiftedRow}`).value = anchorValue as string | number | null;
+      try {
+        keep.mergeCells(`A${shiftedRow}:G${shiftedRow}`);
+      } catch {
+        /* already merged (rare — some ExcelJS versions preserve it) */
+      }
+    }
   }
   const shiftThreshold = block ? block.firstDataRow + block.reservedRows : Infinity;
 
@@ -430,6 +471,39 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
 function capitalise(s: string): string {
   if (!s) return s;
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+/**
+ * Return the row numbers of every full-width A:G merge on the sheet.
+ * Used to identify section-header rows ("Charges", "Guarantees", etc.)
+ * whose merges we need to re-establish after ExcelJS's duplicateRow
+ * shifts them — duplicateRow does not reliably preserve merges on the
+ * displaced rows, leaving the anchor value duplicated across each cell.
+ *
+ * ExcelJS exposes merges via `worksheet.model.merges` (an object whose
+ * VALUES are range strings like "A36:G36") in current versions. Older
+ * versions used `worksheet._merges`. We parse whichever is available.
+ */
+function getFullWidthAGMergedRows(ws: ExcelJS.Worksheet): number[] {
+  const rows: number[] = [];
+  const modelMerges = (ws.model as { merges?: unknown }).merges;
+  const rangeStrings: string[] = [];
+  if (Array.isArray(modelMerges)) {
+    for (const m of modelMerges) if (typeof m === "string") rangeStrings.push(m);
+  } else if (modelMerges && typeof modelMerges === "object") {
+    for (const key of Object.keys(modelMerges as Record<string, unknown>)) {
+      const v = (modelMerges as Record<string, unknown>)[key];
+      // Some ExcelJS versions map row→rangeString, others use rangeString as key.
+      if (typeof v === "string") rangeStrings.push(v);
+      else if (/^[A-Z]+\d+:[A-Z]+\d+$/.test(key)) rangeStrings.push(key);
+    }
+  }
+  for (const range of rangeStrings) {
+    // Match "A{row}:G{row}" — same row, columns A to G specifically.
+    const m = /^A(\d+):G(\d+)$/.exec(range);
+    if (m && m[1] === m[2]) rows.push(Number(m[1]));
+  }
+  return rows;
 }
 
 /**
