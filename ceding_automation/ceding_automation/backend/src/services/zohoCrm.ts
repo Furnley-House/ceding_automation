@@ -271,7 +271,7 @@ export async function createTask(fields: Record<string, unknown>): Promise<unkno
 // (provider, policy ref, valuation, retirement age, etc.). When the CA team
 // finishes the ceding flow we PATCH that record so the CRM is the source
 // of truth. Module API name is configurable via env (defaults to "Plans").
-function planModuleName(): string {
+export function planModuleName(): string {
   return process.env.ZOHO_PLAN_MODULE ?? 'Plans';
 }
 

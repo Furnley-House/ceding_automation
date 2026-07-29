@@ -329,26 +329,78 @@ router.post(
       if (Object.keys(fields).length === 0) {
         zohoError = "No fields to update — checklist values are empty.";
       } else {
-        try {
-          const resp = await updatePlanRecord(planRecordId, fields);
-          // Log the post-write response shape so we can see whether Zoho
-          // accepted Provider (vs silently ignoring an unknown field name).
+        // Attempt the PUT. On "id given seems to be invalid" — which happens
+        // when the cached zohoCaseId points at a record that isn't in the
+        // Plans module (e.g. Furnley's prod org caches the Task's What_Id,
+        // which resolves to a Deal, not a Plans record) — auto-heal by
+        // re-resolving via Plans-search-by-Policy_Ref and retrying once.
+        // Also updates case.zohoCaseId so future exports skip this dance.
+        const tryUpdate = async (id: string) => {
+          const resp = await updatePlanRecord(id, fields);
           console.log(
             "[plan-provider] updatePlanRecord ok case=%s record=%s respKeys=%s",
             caseId,
-            planRecordId,
+            id,
             JSON.stringify(Object.keys((resp as { data?: unknown[] })?.data?.[0] ?? resp ?? {})),
           );
           zohoUpdate = {
             ok: true,
             fieldsUpdated: Object.keys(fields).length,
-            recordId: planRecordId,
+            recordId: id,
             planName: planRecordName,
             resolvedVia: resolvedVia ?? undefined,
             fields,
           };
+        };
+
+        try {
+          await tryUpdate(planRecordId);
         } catch (err) {
-          zohoError = err instanceof Error ? err.message : String(err);
+          const msg = err instanceof Error ? err.message : String(err);
+          const isInvalidId =
+            /the id given seems to be invalid/i.test(msg) ||
+            /INVALID_DATA.*resource_path_index/i.test(msg);
+          if (isInvalidId && caseRecord.policyRef) {
+            console.warn(
+              "[plan-provider] PUT rejected id=%s as invalid; auto-healing via Policy_Ref=%s",
+              planRecordId, caseRecord.policyRef,
+            );
+            try {
+              const hit = await findPlanRecordByPolicyRef(caseRecord.policyRef);
+              if (hit && hit.id !== planRecordId) {
+                const oldId = planRecordId;
+                planRecordId = hit.id;
+                resolvedVia = "policy_ref_search";
+                const recName = (hit.record as Record<string, unknown>).Name;
+                if (typeof recName === "string" && recName.trim()) {
+                  planRecordName = recName.trim();
+                }
+                // Persist the corrected id so subsequent syncs / exports
+                // start from the right record.
+                await prisma.case.update({
+                  where: { id: caseId },
+                  data: {
+                    zohoCaseId: hit.id,
+                    ...(planRecordName ? { zohoPlanName: planRecordName } : {}),
+                  },
+                });
+                console.warn(
+                  "[plan-provider] auto-healed zohoCaseId case=%s %s -> %s",
+                  caseId, oldId, hit.id,
+                );
+                await tryUpdate(hit.id);
+              } else {
+                zohoError =
+                  hit
+                    ? msg // same id, so the underlying error stands
+                    : `PUT failed and Policy_Ref="${caseRecord.policyRef}" returned no unique Plans record. Original error: ${msg}`;
+              }
+            } catch (retryErr) {
+              zohoError = `PUT failed (${msg}); auto-heal via Policy_Ref also failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
+            }
+          } else {
+            zohoError = msg;
+          }
         }
       }
     }

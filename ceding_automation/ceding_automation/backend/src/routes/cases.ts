@@ -18,6 +18,7 @@ import {
   linkTaskToPlan,
   mapPlanTypeToZoho,
   planProviderField,
+  planModuleName,
   inferPlanType,
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
@@ -1131,6 +1132,40 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
         if (planName && planName !== caseRecord.zohoPlanName) {
           updates.zohoPlanName = planName;
         }
+      } else if (effectivePolicyRef) {
+        // Auto-heal: the stored zohoCaseId doesn't resolve in the Plans
+        // module (returns HTTP 204). This happens in Furnley's prod org
+        // where Task.What_Id points at a Deal record (advice pipeline),
+        // not a Plans record — so the sync originally cached the Deal
+        // ID as zohoCaseId, and every Plans lookup with it 400s or 204s.
+        // Fall back to Policy_Ref search, which lands on the correct
+        // Plans record (verified against prod: /Plans/{stored-id} → 204,
+        // /Plans/search?criteria=Policy_Ref:equals:{ref} → 200).
+        // Persist the corrected id so the export path (and every future
+        // sync) skips this second lookup.
+        try {
+          const hit = await findPlanRecordByPolicyRef(effectivePolicyRef);
+          if (hit) {
+            updates.zohoCaseId = hit.id;
+            planRecord = hit.record;
+            const planName = pickPlanName(hit.record);
+            if (planName) updates.zohoPlanName = planName;
+            changes.push({
+              field: "linkedPlan",
+              from: effectiveZohoCaseId,
+              to: planName ?? hit.id,
+            });
+          } else {
+            planSyncNote =
+              `Stored zohoCaseId ${effectiveZohoCaseId} not found in ${planModuleName()} module, and Policy_Ref="${effectivePolicyRef}" also returned no unique match.`;
+          }
+        } catch (searchErr) {
+          planSyncNote =
+            `Stored zohoCaseId ${effectiveZohoCaseId} not in ${planModuleName()} module; Plans search by Policy_Ref also failed: ${(searchErr as Error).message}`;
+        }
+      } else {
+        planSyncNote =
+          `Stored zohoCaseId ${effectiveZohoCaseId} not found in ${planModuleName()} module, and case has no Policy_Ref to search by.`;
       }
     } catch (err) {
       planSyncNote = `Plans record fetch failed: ${(err as Error).message}`;
