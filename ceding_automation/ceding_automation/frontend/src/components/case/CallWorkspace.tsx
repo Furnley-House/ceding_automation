@@ -91,7 +91,10 @@ export function CallWorkspace({
   providerPhoneMain = "",
 }: Props) {
   const template = useMemo(() => getTemplate(planType), [planType]);
-  const { rows, refresh, updateField } = useChecklistFields({ caseId, template });
+  const { rows, refresh, updateField, loading: checklistLoading } = useChecklistFields({
+    caseId,
+    template,
+  });
 
   // ── RingCentral config state ──────────────────────────────────────────
   const [rcConfigured, setRcConfigured] = useState<boolean | null>(null);
@@ -398,14 +401,38 @@ export function CallWorkspace({
     }
   };
 
+  // Auto-generate a script when the outstanding-fields set changes.
+  //
+  // Gates:
+  //  1. Wait for the checklist to finish loading. On mount `rows` is
+  //     `[]` and `isMissing(undefined)` returns true, so EVERY template
+  //     field looks missing — a script generated in that split-second
+  //     is based on empty-shell data and gets overwritten anyway when
+  //     the real data lands. Skipping until `checklistLoading=false`
+  //     eliminates the race that produced the "correct script → 3-5s
+  //     later switches to a generic one" bug.
+  //  2. Signature dedupe so a re-render with the same field counts
+  //     doesn't refire pointlessly.
+  //  3. AbortController per invocation so the auto-effect can cancel
+  //     an older in-flight request when the field counts change again.
   useEffect(() => {
-    if (totalQuestions === 0) return;
+    if (checklistLoading) return;
+    if (totalQuestions === 0) {
+      // Nothing to ask about — clear any stale script so a case that
+      // becomes fully-answered doesn't keep showing an out-of-date one.
+      setScript(null);
+      setScriptError(null);
+      autoScriptSig.current = null;
+      return;
+    }
     const sig = `${caseId}-${missingFields.length}-${reviewFields.length}`;
     if (autoScriptSig.current === sig) return;
     autoScriptSig.current = sig;
-    void generateScript();
+    const controller = new AbortController();
+    void generateScript({ signal: controller.signal });
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [caseId, missingFields.length, reviewFields.length]);
+  }, [caseId, checklistLoading, missingFields.length, reviewFields.length, totalQuestions]);
 
   // ── Persist RC token to localStorage whenever it changes ─────────────
   useEffect(() => {
@@ -874,27 +901,51 @@ export function CallWorkspace({
   };
 
   // ── Script generation ─────────────────────────────────────────────────
-  const generateScript = async () => {
+  //
+  // AbortSignal support: the auto-generate effect passes a signal that
+  // aborts if a new invocation supersedes it (missingFields.length
+  // changes mid-flight, or the component unmounts). Without this, a
+  // slow AI response from an EARLIER call could arrive and overwrite
+  // the correct script for the LATEST state — which is exactly the
+  // "3-5 seconds later the script changes" bug users saw on Stage 5.
+  const generateScript = async (opts?: { signal?: AbortSignal }) => {
     if (totalQuestions === 0) return;
     setScriptLoading(true);
     setScriptError(null);
     try {
-      const res = await api.post(`/cases/${caseId}/calls/script`, {
-        missingFields,
-        reviewFields,
-        clientName,
-        providerName,
-        planNumber,
-        planType,
-        providerPhone: selectedPhone || undefined,
-      });
+      const res = await api.post(
+        `/cases/${caseId}/calls/script`,
+        {
+          missingFields,
+          reviewFields,
+          clientName,
+          providerName,
+          planNumber,
+          planType,
+          providerPhone: selectedPhone || undefined,
+        },
+        { signal: opts?.signal },
+      );
+      // Skip commit if this call was superseded — otherwise a stale
+      // response would overwrite the newer one.
+      if (opts?.signal?.aborted) return;
       setScript((res.data as any).script as CallScript);
     } catch (e: any) {
+      // Axios reports aborted requests as either e.name === "CanceledError"
+      // or e.code === "ERR_CANCELED". Treat cancellation as a no-op
+      // (the newer call owns the UI state now).
+      if (
+        e?.name === "CanceledError" ||
+        e?.code === "ERR_CANCELED" ||
+        opts?.signal?.aborted
+      ) {
+        return;
+      }
       const msg = e?.response?.data?.error ?? e?.message ?? "Failed to generate script";
       setScriptError(msg);
       toast.error("Script generation failed", { description: msg });
     } finally {
-      setScriptLoading(false);
+      if (!opts?.signal?.aborted) setScriptLoading(false);
     }
   };
 
@@ -1174,7 +1225,14 @@ export function CallWorkspace({
               size="sm"
               variant="outline"
               className="h-7 text-xs"
-              onClick={generateScript}
+              onClick={() => {
+                // Manual regenerate — bypass the auto-effect's signature
+                // dedupe by clearing it, so a follow-up auto-run (if any)
+                // won't skip. No abort signal here: this is the intended
+                // final call once the CA presses the button.
+                autoScriptSig.current = null;
+                void generateScript();
+              }}
               disabled={scriptLoading || totalQuestions === 0}
             >
               {scriptLoading ? (
