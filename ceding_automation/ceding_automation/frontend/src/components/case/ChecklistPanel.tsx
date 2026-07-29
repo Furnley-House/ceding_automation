@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, AlertTriangle, CircleDashed, ListChecks, ThumbsUp, Ban } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CheckCircle2, AlertTriangle, CircleDashed, ListChecks, ThumbsUp, Ban, LayoutGrid, Table2, Undo2, Redo2 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChecklistField, type ChecklistFieldState, type Confidence, type ConflictResolution } from "./ChecklistField";
+import { ChecklistTemplateView } from "./ChecklistTemplateView";
 import { getTemplate, groupBySection, type ChecklistFieldDef } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
+import { useEditHistory } from "@/hooks/useEditHistory";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useChecklistFields, isMissing, fundDetailsStatus, type ChecklistRow } from "@/hooks/useChecklistFields";
@@ -11,6 +13,35 @@ import { useDocuments } from "@/hooks/useDocuments";
 import { useFundLines } from "@/hooks/useFundLines";
 import { checklistApi } from "@/lib/api";
 import { FundDetailsTable } from "./FundDetailsTable";
+import { ContributionsTable } from "./ContributionsTable";
+
+// Legacy free-text fields that the AI extractor populates with unstructured
+// contributions text ("See contributions tables for full history"). These
+// are still saved to ChecklistField as a raw fallback, but the checklist UI
+// hides them — the new <ContributionsTable> owns the visible representation.
+// Pension-only; other plan types don't have these fields in their template.
+const CONTRIBUTIONS_LEGACY_FIELD_KEYS = new Set([
+  "contributions_4yr_history",
+  "contributions_breakdown_employer_personal",
+]);
+
+// localStorage key holding the CA's preferred Stage 4 layout. Per-user
+// (not per-case) so switching between cases keeps the CA's chosen view.
+const VIEW_MODE_STORAGE_KEY = "ceding.stage4.viewMode";
+type ViewMode = "table" | "template";
+function readInitialViewMode(): ViewMode {
+  try {
+    const v = window.localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+    return v === "template" ? "template" : "table";
+  } catch {
+    return "table";
+  }
+}
+
+// Section name (from checklist-fields-v1.json) that contains the Fund
+// Details block. The template view renders the FundDetailsTable inline
+// beneath this section's scalar rows.
+const FUND_SECTION_NAME = "Valuation & Fund Details";
 
 interface Props {
   planType: string;
@@ -52,6 +83,60 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     caseId,
     template,
   });
+
+  // Layout toggle — persisted per user, not per case. Users get the same
+  // view when switching between cases in one session.
+  const [viewMode, setViewModeState] = useState<ViewMode>(readInitialViewMode);
+  const setViewMode = useCallback((v: ViewMode) => {
+    setViewModeState(v);
+    try {
+      window.localStorage.setItem(VIEW_MODE_STORAGE_KEY, v);
+    } catch {
+      /* private-mode Safari, etc. — ignore */
+    }
+  }, []);
+
+  // Undo/redo for FIELD VALUE edits only. Status flips (Approve, Request
+  // review), the Mark-N-missing-as-N/A batch, and evidence-link edits are
+  // NOT tracked — the user asked for value-only scope. History is session-
+  // scoped (in-memory) and clears on refresh or case switch.
+  const applyValueForUndo = useCallback(
+    async (fieldKey: string, value: string | null) => {
+      // Bypasses handleFieldChange so undo/redo doesn't record itself as
+      // a new edit and create an infinite loop.
+      await updateField(fieldKey, { value }, { action: "undo_redo", notes: undefined });
+    },
+    [updateField],
+  );
+  const history = useEditHistory({ applyValue: applyValueForUndo });
+  // Reset history when the case changes — a stack from case A that names
+  // fields on case B would be nonsensical (fields may not even exist).
+  useEffect(() => {
+    history.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseId]);
+
+  // Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) — global while the panel is mounted.
+  // Skipped when focus is in an input/textarea so the browser's native
+  // in-input undo continues to work while typing.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || target?.isContentEditable) return;
+      const isMeta = e.ctrlKey || e.metaKey;
+      if (!isMeta) return;
+      if (e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        history.undo();
+      } else if ((e.key === "z" && e.shiftKey) || e.key === "y") {
+        e.preventDefault();
+        history.redo();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [history]);
   // Used to resolve conflict_values.new_document_id → human document name.
   // The case page already mounts this hook elsewhere; React-Query-style
   // dedup isn't in use here, so this triggers one extra GET /documents on
@@ -96,14 +181,25 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
   type FieldFilter = "all" | "high" | "review" | "missing";
   const [filter, setFilter] = useState<FieldFilter>("all");
 
+  // Pension-only: the structured <ContributionsTable> replaces two free-text
+  // fields on the checklist UI. On non-Pension plans, those fields aren't
+  // in the template anyway — the Set filter is a no-op there.
+  const isPension = useMemo(() => {
+    const n = (planType ?? "").toLowerCase();
+    return n === "pension" || n.startsWith("pension");
+  }, [planType]);
+
   const visibleFields = useMemo(
     () =>
       template.filter((f) => {
+        // Hide legacy contributions text fields on Pension (structured
+        // ContributionsTable owns the visible representation now).
+        if (isPension && CONTRIBUTIONS_LEGACY_FIELD_KEYS.has(f.key)) return false;
         if (!f.showIf) return true;
         const dependent = byKey.get(f.showIf.key)?.value;
         return dependent ? f.showIf.in.includes(dependent) : false;
       }),
-    [template, byKey],
+    [template, byKey, isPension],
   );
 
   const grouped = useMemo(() => groupBySection(visibleFields), [visibleFields]);
@@ -255,7 +351,23 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     if (patch.status === "approved") action = "approve";
     else if (patch.status === "review_requested") action = "request_review";
     else if (patch.comment !== undefined && patch.value === undefined) action = "comment";
+
+    // Capture prev value BEFORE the update so undo can restore it. Only
+    // value changes are tracked — status/confidence/comment flips are
+    // intentionally out of scope per the product decision.
+    const prevValue =
+      patch.value !== undefined ? byKey.get(f.key)?.value ?? null : null;
+
     await updateField(f.key, dbPatch, { action, notes: patch.comment ?? undefined });
+
+    if (patch.value !== undefined) {
+      history.record({
+        fieldKey: f.key,
+        fieldLabel: f.label,
+        prev: prevValue,
+        next: patch.value ?? null,
+      });
+    }
   };
 
   const approveAll = async () => {
@@ -310,6 +422,80 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
 
   return (
     <div className="space-y-4">
+      {/* ── Toolbar: undo / redo + layout toggle ───────────────────────────
+         Sits above the plan-type card so undo/redo are visible from any
+         scroll position on the right panel. Undo/redo cover field VALUE
+         edits only; the layout toggle swaps between the default card grid
+         and the Excel-template-styled row layout. */}
+      <div className="flex items-center justify-between rounded-md border border-border bg-card px-2 py-1.5">
+        <div className="flex items-center gap-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => history.undo()}
+            disabled={!history.canUndo}
+            className="h-8 gap-1.5"
+            title="Undo last field-value edit (Ctrl+Z)"
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+            Undo
+            {history.undoCount > 0 && (
+              <span className="text-[10px] text-muted-foreground ml-0.5">
+                {history.undoCount}
+              </span>
+            )}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => history.redo()}
+            disabled={!history.canRedo}
+            className="h-8 gap-1.5"
+            title="Redo last undone edit (Ctrl+Shift+Z)"
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+            Redo
+            {history.redoCount > 0 && (
+              <span className="text-[10px] text-muted-foreground ml-0.5">
+                {history.redoCount}
+              </span>
+            )}
+          </Button>
+        </div>
+        <div
+          role="tablist"
+          aria-label="Checklist layout"
+          className="flex items-center gap-0.5 rounded border border-border bg-muted/40 p-0.5"
+        >
+          <button
+            role="tab"
+            aria-selected={viewMode === "table"}
+            onClick={() => setViewMode("table")}
+            className={`px-2 py-1 text-xs rounded flex items-center gap-1 transition-colors ${
+              viewMode === "table"
+                ? "bg-card shadow-sm text-foreground font-medium"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+            title="Card grid (default)"
+          >
+            <LayoutGrid className="h-3.5 w-3.5" /> Table
+          </button>
+          <button
+            role="tab"
+            aria-selected={viewMode === "template"}
+            onClick={() => setViewMode("template")}
+            className={`px-2 py-1 text-xs rounded flex items-center gap-1 transition-colors ${
+              viewMode === "template"
+                ? "bg-card shadow-sm text-foreground font-medium"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+            title="Excel-template-styled rows"
+          >
+            <Table2 className="h-3.5 w-3.5" /> Template
+          </button>
+        </div>
+      </div>
+
       <div className="rounded-md border border-border bg-muted/30 p-4">
         <div className="flex items-center justify-between gap-4 mb-3">
           <h3 className="text-sm font-bold theme-heading text-foreground flex items-center gap-2">
@@ -419,6 +605,31 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
             <p className="text-sm font-medium text-foreground">No fields match this filter</p>
             <p className="text-xs text-muted-foreground mt-1">Try a different filter or clear it to see everything.</p>
           </div>
+        ) : viewMode === "template" ? (
+          // Template view renders scalar fields as Excel-template-styled
+          // rows (label in col A, wide answer cell in cols B..G) and
+          // inlines the FundDetailsTable inside the Valuation section.
+          <ChecklistTemplateView
+            grouped={filteredGrouped}
+            byKey={byKey}
+            fundSectionName={FUND_SECTION_NAME}
+            readOnly={!canEditChecklist}
+            onFieldChange={handleFieldChange}
+            onJumpToSource={onJumpToSource}
+            caseId={caseId}
+            extraContentBySection={
+              isPension
+                ? {
+                    "Transaction History": (
+                      <ContributionsTable
+                        caseId={caseId}
+                        readOnly={!canEditChecklist}
+                      />
+                    ),
+                  }
+                : undefined
+            }
+          />
         ) : (
           filteredGrouped.map(({ section, fields }) => (
           <div key={section} className="rounded-md border border-border bg-card">
@@ -427,6 +638,14 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
                 {section}
               </h4>
             </div>
+            {/* Pension Contributions table renders at the top of the
+               Transaction History section — it replaces the two legacy
+               text fields that were filtered out of visibleFields above. */}
+            {isPension && section === "Transaction History" && (
+              <div className="p-3 border-b border-border">
+                <ContributionsTable caseId={caseId} readOnly={!canEditChecklist} />
+              </div>
+            )}
             <div className="p-3 grid gap-2 md:grid-cols-2">
               {fields.map((f) => {
                 const r = byKey.get(f.key);
@@ -476,9 +695,13 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
         )}
       </div>
 
-      {/* Fund Details — sub-table. Filter ignores scalar-field filters above
-          since this section doesn't share their state (High/Missing/etc.). */}
-      <FundDetailsTable caseId={caseId} readOnly={!canEditChecklist} />
+      {/* Fund Details — sub-table. In table view it renders as a separate
+          section beneath the field grid. In template view it's inlined
+          inside the Valuation & Fund Details section by ChecklistTemplateView,
+          so we skip the standalone render to avoid duplication. */}
+      {viewMode !== "template" && (
+        <FundDetailsTable caseId={caseId} readOnly={!canEditChecklist} />
+      )}
 
       {loading && (
         <p className="text-[10px] text-muted-foreground text-center pt-2">Loading checklist…</p>

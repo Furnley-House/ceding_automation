@@ -7,6 +7,7 @@ import { getTemplate } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { CallEditableField } from "./CallEditableField";
 import {
   Phone,
   PhoneOff,
@@ -80,33 +81,6 @@ interface ProviderOption {
   phone_ceding_dept?: string;
 }
 
-const SAMPLE_TRANSCRIPT = `[CA — Priya] Good morning, this is Priya Ramesh calling from Furnley House on behalf of our client Eleanor Whitmore regarding plan AV-PP-55021. We have an LOA on file dated 2 April. Can you confirm a few outstanding items please?
-
-[Aviva — Mark] Yes, I can see the LOA. Go ahead.
-
-[CA] Could you confirm the current value of the plan?
-[Aviva] As of close of business yesterday, the current value is £127,450.32.
-
-[CA] Thank you. And the transfer value?
-[Aviva] Transfer value is the same — £127,450.32. No MVR or penalty applies.
-
-[CA] What's the annual management charge?
-[Aviva] AMC is 0.45%. There's no separate platform charge on this plan.
-
-[CA] And the funds held?
-[Aviva] It's invested 100% in the Aviva Pension MyM My Future Focus Growth fund.
-
-[CA] What's the selected retirement age on file?
-[Aviva] Selected retirement age is 65.
-
-[CA] Are there any safeguarded or guaranteed benefits?
-[Aviva] No safeguarded benefits. No GMP, no GAR.
-
-[CA] And expression of wishes?
-[Aviva] Yes — completed 12 March 2024, sole beneficiary is the spouse.
-
-[CA] Perfect. I'll get that emailed across. Thank you Mark.`;
-
 export function CallWorkspace({
   caseId,
   planType,
@@ -117,7 +91,10 @@ export function CallWorkspace({
   providerPhoneMain = "",
 }: Props) {
   const template = useMemo(() => getTemplate(planType), [planType]);
-  const { rows, refresh } = useChecklistFields({ caseId, template });
+  const { rows, refresh, updateField, loading: checklistLoading } = useChecklistFields({
+    caseId,
+    template,
+  });
 
   // ── RingCentral config state ──────────────────────────────────────────
   const [rcConfigured, setRcConfigured] = useState<boolean | null>(null);
@@ -275,6 +252,8 @@ export function CallWorkspace({
         key: t.key,
         label: t.label,
         section: t.section,
+        type: t.type,
+        options: t.options,
         hint: t.hint ?? null,
       }));
     // Synthetic Fund Details entry — appears once when the sub-table is
@@ -285,7 +264,9 @@ export function CallWorkspace({
         key: "__fund_details__",
         label: "Fund Details",
         section: "Fund Details",
-        hint: "Ask the agent for the per-fund breakdown (fund name, ISIN/Sedol, units, price, value, charge).",
+        type: "text",
+        options: undefined,
+        hint: "Edit fund rows on Stage 4 (Fund Details table) — this section can't be captured inline.",
       });
     }
     return list;
@@ -305,6 +286,8 @@ export function CallWorkspace({
         key: t.key,
         label: t.label,
         section: t.section,
+        type: t.type,
+        options: t.options,
         value: r!.value ?? "",
         confidence: ((r!.confidence as string) ?? "LOW").toUpperCase(),
       }));
@@ -313,6 +296,8 @@ export function CallWorkspace({
         key: "__fund_details__",
         label: "Fund Details",
         section: "Fund Details",
+        type: "text",
+        options: undefined,
         value: "(some rows incomplete or low-confidence)",
         confidence: "LOW",
       });
@@ -416,14 +401,38 @@ export function CallWorkspace({
     }
   };
 
+  // Auto-generate a script when the outstanding-fields set changes.
+  //
+  // Gates:
+  //  1. Wait for the checklist to finish loading. On mount `rows` is
+  //     `[]` and `isMissing(undefined)` returns true, so EVERY template
+  //     field looks missing — a script generated in that split-second
+  //     is based on empty-shell data and gets overwritten anyway when
+  //     the real data lands. Skipping until `checklistLoading=false`
+  //     eliminates the race that produced the "correct script → 3-5s
+  //     later switches to a generic one" bug.
+  //  2. Signature dedupe so a re-render with the same field counts
+  //     doesn't refire pointlessly.
+  //  3. AbortController per invocation so the auto-effect can cancel
+  //     an older in-flight request when the field counts change again.
   useEffect(() => {
-    if (totalQuestions === 0) return;
+    if (checklistLoading) return;
+    if (totalQuestions === 0) {
+      // Nothing to ask about — clear any stale script so a case that
+      // becomes fully-answered doesn't keep showing an out-of-date one.
+      setScript(null);
+      setScriptError(null);
+      autoScriptSig.current = null;
+      return;
+    }
     const sig = `${caseId}-${missingFields.length}-${reviewFields.length}`;
     if (autoScriptSig.current === sig) return;
     autoScriptSig.current = sig;
-    void generateScript();
+    const controller = new AbortController();
+    void generateScript({ signal: controller.signal });
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [caseId, missingFields.length, reviewFields.length]);
+  }, [caseId, checklistLoading, missingFields.length, reviewFields.length, totalQuestions]);
 
   // ── Persist RC token to localStorage whenever it changes ─────────────
   useEffect(() => {
@@ -892,27 +901,51 @@ export function CallWorkspace({
   };
 
   // ── Script generation ─────────────────────────────────────────────────
-  const generateScript = async () => {
+  //
+  // AbortSignal support: the auto-generate effect passes a signal that
+  // aborts if a new invocation supersedes it (missingFields.length
+  // changes mid-flight, or the component unmounts). Without this, a
+  // slow AI response from an EARLIER call could arrive and overwrite
+  // the correct script for the LATEST state — which is exactly the
+  // "3-5 seconds later the script changes" bug users saw on Stage 5.
+  const generateScript = async (opts?: { signal?: AbortSignal }) => {
     if (totalQuestions === 0) return;
     setScriptLoading(true);
     setScriptError(null);
     try {
-      const res = await api.post(`/cases/${caseId}/calls/script`, {
-        missingFields,
-        reviewFields,
-        clientName,
-        providerName,
-        planNumber,
-        planType,
-        providerPhone: selectedPhone || undefined,
-      });
+      const res = await api.post(
+        `/cases/${caseId}/calls/script`,
+        {
+          missingFields,
+          reviewFields,
+          clientName,
+          providerName,
+          planNumber,
+          planType,
+          providerPhone: selectedPhone || undefined,
+        },
+        { signal: opts?.signal },
+      );
+      // Skip commit if this call was superseded — otherwise a stale
+      // response would overwrite the newer one.
+      if (opts?.signal?.aborted) return;
       setScript((res.data as any).script as CallScript);
     } catch (e: any) {
+      // Axios reports aborted requests as either e.name === "CanceledError"
+      // or e.code === "ERR_CANCELED". Treat cancellation as a no-op
+      // (the newer call owns the UI state now).
+      if (
+        e?.name === "CanceledError" ||
+        e?.code === "ERR_CANCELED" ||
+        opts?.signal?.aborted
+      ) {
+        return;
+      }
       const msg = e?.response?.data?.error ?? e?.message ?? "Failed to generate script";
       setScriptError(msg);
       toast.error("Script generation failed", { description: msg });
     } finally {
-      setScriptLoading(false);
+      if (!opts?.signal?.aborted) setScriptLoading(false);
     }
   };
 
@@ -954,12 +987,6 @@ export function CallWorkspace({
     // Demo / non-widget fallback
     setPhase("ended");
     toast.info("Call ended", { description: "Paste or review the transcript below, then click Analyse." });
-  };
-
-  // ── Insert sample transcript ──────────────────────────────────────────
-  const insertSampleTranscript = () => {
-    setTranscript(SAMPLE_TRANSCRIPT);
-    toast.info("Sample transcript inserted");
   };
 
   // ── AI transcript analysis ────────────────────────────────────────────
@@ -1102,43 +1129,82 @@ export function CallWorkspace({
           )}
         </div>
 
-        <div className="p-3 space-y-3 max-h-[480px] overflow-y-auto">
+        <div className="p-3 space-y-3 max-h-[720px] overflow-y-auto">
           {totalQuestions === 0 ? (
             <p className="text-xs text-muted-foreground italic text-center py-6">
               No outstanding fields — checklist is complete, no call needed.
             </p>
           ) : (
             <>
+              {/* Editable outstanding fields — type answers straight in as
+                 the provider dictates them during the call. Saves route
+                 through the same PATCH used elsewhere, tagged
+                 source: "CALL_EDIT" so the audit trail marks them as
+                 call-time edits (visible on Stage 7 audit view). */}
               {missingFields.length > 0 && (
                 <div>
                   <p className="text-[10px] uppercase tracking-wider text-destructive font-semibold mb-1.5">
                     Missing ({missingFields.length})
                   </p>
-                  <ul className="space-y-1">
+                  <div className="divide-y divide-border/60">
                     {missingFields.map((f) => (
-                      <li key={f.key} className="text-xs flex items-center gap-1.5">
-                        <AlertCircle className="h-3 w-3 text-destructive shrink-0" />
-                        <span className="text-foreground">{f.label}</span>
-                        <span className="text-muted-foreground">· {f.section}</span>
-                      </li>
+                      <CallEditableField
+                        key={f.key}
+                        fieldKey={f.key}
+                        label={f.label}
+                        section={f.section}
+                        type={f.type}
+                        options={f.options}
+                        currentValue=""
+                        leading={<AlertCircle className="h-3 w-3 text-destructive" />}
+                        disabled={f.key === "__fund_details__"}
+                        onSave={async (v) =>
+                          updateField(
+                            f.key,
+                            { value: v || null },
+                            { source: "CALL_EDIT" },
+                          )
+                        }
+                      />
                     ))}
-                  </ul>
+                  </div>
                 </div>
               )}
               {reviewFields.length > 0 && (
                 <div>
-                  <p className="text-[10px] uppercase tracking-wider text-yellow-600 font-semibold mb-1.5">
+                  <p className="text-[10px] uppercase tracking-wider text-yellow-600 font-semibold mb-1.5 mt-2">
                     To verify ({reviewFields.length})
                   </p>
-                  <ul className="space-y-1">
+                  <div className="divide-y divide-border/60">
                     {reviewFields.map((f) => (
-                      <li key={f.key} className="text-xs flex items-center gap-1.5">
-                        <AlertCircle className="h-3 w-3 text-yellow-600 shrink-0" />
-                        <span className="text-foreground">{f.label}</span>
-                        <span className="text-muted-foreground">— "{f.value}"</span>
-                      </li>
+                      <CallEditableField
+                        key={f.key}
+                        fieldKey={f.key}
+                        label={f.label}
+                        section={f.section}
+                        type={f.type}
+                        options={f.options}
+                        currentValue={f.value}
+                        leading={<AlertCircle className="h-3 w-3 text-yellow-600" />}
+                        trailing={
+                          <Badge
+                            variant="outline"
+                            className="text-[9px] px-1 h-4 font-normal"
+                          >
+                            {f.confidence}
+                          </Badge>
+                        }
+                        disabled={f.key === "__fund_details__"}
+                        onSave={async (v) =>
+                          updateField(
+                            f.key,
+                            { value: v || null },
+                            { source: "CALL_EDIT" },
+                          )
+                        }
+                      />
                     ))}
-                  </ul>
+                  </div>
                 </div>
               )}
             </>
@@ -1159,7 +1225,14 @@ export function CallWorkspace({
               size="sm"
               variant="outline"
               className="h-7 text-xs"
-              onClick={generateScript}
+              onClick={() => {
+                // Manual regenerate — bypass the auto-effect's signature
+                // dedupe by clearing it, so a follow-up auto-run (if any)
+                // won't skip. No abort signal here: this is the intended
+                // final call once the CA presses the button.
+                autoScriptSig.current = null;
+                void generateScript();
+              }}
               disabled={scriptLoading || totalQuestions === 0}
             >
               {scriptLoading ? (
@@ -1382,16 +1455,6 @@ export function CallWorkspace({
               >
                 <Phone className="h-3.5 w-3.5 mr-1.5" />
                 Open dialpad
-              </Button>
-
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={insertSampleTranscript}
-                disabled={isCallActive}
-              >
-                <FileText className="h-3.5 w-3.5 mr-1.5" />
-                Sample transcript
               </Button>
 
               <Button

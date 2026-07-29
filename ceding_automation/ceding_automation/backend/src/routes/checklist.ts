@@ -138,7 +138,18 @@ router.patch(
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
   async (req: Request, res: Response) => {
-    const { value, resolvedConflict } = req.body;
+    const { value, resolvedConflict, source } = req.body;
+
+    // Tag the audit log with where the edit came from. Whitelisted so a
+    // rogue payload can't inject arbitrary strings into audit rows.
+    // "CALL_EDIT" = typed into the Stage 5 outstanding-fields panel while
+    // the CA is on a call; "MANUAL" is the default (Stage 4 / Stage 6
+    // paraplanner edits / any other typed-in change).
+    const AUDIT_SOURCES = ["MANUAL", "CALL_EDIT", "TRANSCRIPT"] as const;
+    type AuditSource = (typeof AUDIT_SOURCES)[number];
+    const auditSource: AuditSource = AUDIT_SOURCES.includes(source as AuditSource)
+      ? (source as AuditSource)
+      : "MANUAL";
 
     const field = await prisma.checklistField.findUnique({
       where: { id: req.params.fieldId },
@@ -187,7 +198,7 @@ router.patch(
         fieldKey: field.template.fieldKey,
         oldValue,
         newValue: value,
-        source: "MANUAL",
+        source: auditSource,
       },
     });
 

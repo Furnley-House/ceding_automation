@@ -676,10 +676,28 @@ export interface MappedCase {
 }
 
 function pickString(obj: Record<string, unknown>, keys: string[]): string | undefined {
+  // Exact-match pass first — cheap, hits the common case.
   for (const k of keys) {
     const v = obj[k];
     if (typeof v === 'string' && v.trim()) return v.trim();
     // Lookup-style fields come back as { id, name, module }
+    if (v && typeof v === 'object' && 'name' in (v as Record<string, unknown>)) {
+      const name = (v as Record<string, unknown>).name;
+      if (typeof name === 'string' && name.trim()) return name.trim();
+    }
+  }
+  // Case-insensitive fallback — Zoho custom fields follow the org's own
+  // naming convention (some orgs use `Provider_Group` with a capital G,
+  // others `Provider_group`, others `PROVIDER_GROUP`). Matching by exact
+  // API name would need every casing enumerated in every caller. This
+  // pass finds the right key regardless of case.
+  const lowerKeys = keys.map((k) => k.toLowerCase());
+  const objKeys = Object.keys(obj);
+  for (const objKey of objKeys) {
+    const idx = lowerKeys.indexOf(objKey.toLowerCase());
+    if (idx === -1) continue;
+    const v = obj[objKey];
+    if (typeof v === 'string' && v.trim()) return v.trim();
     if (v && typeof v === 'object' && 'name' in (v as Record<string, unknown>)) {
       const name = (v as Record<string, unknown>).name;
       if (typeof name === 'string' && name.trim()) return name.trim();
@@ -699,7 +717,7 @@ function pickId(obj: Record<string, unknown>, keys: string[]): string | undefine
   return undefined;
 }
 
-function inferPlanType(s: string | undefined): PlanType {
+export function inferPlanType(s: string | undefined): PlanType {
   if (!s) return PlanType.PENSION;
   const v = s.toLowerCase();
   if (v.includes('isa')) return PlanType.ISA;
@@ -733,16 +751,26 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
     pickId(task, ['Who_Id']) ||
     pickId(task, ['What_Id']);
 
-  // `Provider_group` is the actual field used on Furnley House's Zoho Tasks;
-  // the older `Provider` / `Provider_Name` / `Ceding_Provider` keys are kept
-  // as fallbacks so older orgs still map cleanly.
+  // Furnley's Zoho Tasks label this field "Provider Group" — the Zoho
+  // API name derives from the label with an underscore, so the actual
+  // key on the payload is `Provider_Group` (capital G). Earlier we only
+  // checked `Provider_group` (lowercase g); pickString is now case-
+  // insensitive so both resolve. `Ceding_Provider` / `Provider_Name` /
+  // `Provider` remain as fallbacks for other orgs.
   const providerName =
     (providerField && pickString(task, [providerField])) ||
-    pickString(task, ['Provider_group', 'Provider', 'Provider_Name', 'Ceding_Provider']);
+    pickString(task, ['Provider_Group', 'Ceding_Provider', 'Provider_Name', 'Provider']);
 
+  // Furnley uses the custom field "Ceding Type" (API name `Ceding_Type`)
+  // as the plan-type picklist. Adding it FIRST in the fallback list
+  // ensures we pull the authoritative CRM value before falling back to
+  // Subject-based inference. Without this, Plan Type sync appeared to
+  // silently work because inferPlanType() found "Pension" in the Subject
+  // even when the CA had changed Ceding_Type to something else — the
+  // Subject value would silently override the real change.
   const planTypeRaw =
     (planTypeField && pickString(task, [planTypeField])) ||
-    pickString(task, ['Plan_Type', 'PlanType', 'Product_Type']) ||
+    pickString(task, ['Ceding_Type', 'Plan_Type', 'PlanType', 'Product_Type']) ||
     pickString(task, ['Subject']);
   const planType = inferPlanType(planTypeRaw);
 

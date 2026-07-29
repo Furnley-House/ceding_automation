@@ -200,12 +200,50 @@ export async function updateCase(id: string, updates: Record<string, unknown>) {
  * Re-pulls the linked Zoho task and updates any case fields that have changed
  * (provider, policy ref, plan type, client name, etc.). Returns a `changed`
  * flag and the list of diffs so the UI can show a confirmation toast.
+ *
+ * `syncDebug` is a snapshot of what Zoho returned + how our mapping resolved
+ * the key fields. Surfaced in the UI when `changed=false` so a CA can see
+ * *why* a refresh did nothing (e.g. Zoho task had no Provider_group, or the
+ * name didn't match anything in the Provider Directory).
  */
+export interface SyncDebug {
+  taskFieldsSeen: {
+    providerField: string | null;
+    planTypeField: string | null;
+    policyRefField: string | null;
+    subject: string | null;
+  };
+  /** Every non-empty top-level field API name on the Zoho Task. Ops
+   *  can eyeball this to catch field-name mismatches (e.g. Zoho uses
+   *  `Provider_Group` but our lookup was checking `Provider_group`). */
+  rawTaskFieldNames?: string[];
+  extracted: {
+    providerName: string | null;
+    planTypeRaw: string | null;
+    policyRef: string | null;
+  };
+  plansRecord: {
+    fetched: boolean;
+    providerName: string | null;
+    planTypeRaw: string | null;
+    planName: string | null;
+    note: string | null;
+  };
+  providerDirectory: {
+    lookupName: string | null;
+    matched: boolean;
+  };
+}
+
 export interface SyncResult {
   synced: boolean;
   changed: boolean;
   changes: Array<{ field: string; from: unknown; to: unknown }>;
   case?: Record<string, unknown>;
+  syncDebug?: SyncDebug;
+  paraplannerSyncNote?: string | null;
+  providerSyncNote?: string | null;
+  planSyncNote?: string | null;
 }
 
 export async function syncCaseFromZoho(id: string): Promise<SyncResult> {
