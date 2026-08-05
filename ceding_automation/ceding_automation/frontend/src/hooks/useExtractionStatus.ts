@@ -8,6 +8,14 @@ import { api } from "@/lib/api";
 export interface ExtractionStatus {
   jobId: string | null;
   status: "queued" | "processing" | "completed" | "failed" | null;
+  /**
+   * The BACKEND document row's status (doc.status) — distinct from `status`
+   * above which mirrors doc.aiJobStatus (the BFF pipeline's job state).
+   * Wire key `documentStatus` from GET /ai-status (documents.ts:680). This
+   * is the load-bearing signal for "scalars are committed" — see the
+   * H17 comment at the terminal-guard below.
+   */
+  documentStatus: "UPLOADED" | "PROCESSING" | "EXTRACTED" | "ERROR" | null;
   stage: string | null;
   progressPct: number | null;
   error: string | null;
@@ -18,6 +26,7 @@ export interface ExtractionStatus {
 const EMPTY_STATUS: ExtractionStatus = {
   jobId: null,
   status: null,
+  documentStatus: null,
   stage: null,
   progressPct: null,
   error: null,
@@ -99,6 +108,13 @@ export function useExtractionStatus(
             data.status === "failed"
               ? data.status
               : null,
+          documentStatus:
+            data.documentStatus === "UPLOADED" ||
+            data.documentStatus === "PROCESSING" ||
+            data.documentStatus === "EXTRACTED" ||
+            data.documentStatus === "ERROR"
+              ? data.documentStatus
+              : null,
           stage: typeof data.stage === "string" ? data.stage : null,
           progressPct:
             typeof data.progressPct === "number" ? data.progressPct : null,
@@ -127,8 +143,45 @@ export function useExtractionStatus(
           reachedFinalising
         ) {
           stopped = true;
+          // H17: fire onComplete ONLY when the BACKEND DOCUMENT ROW's
+          // status flips to EXTRACTED or ERROR — NOT on aiJobStatus
+          // ("status" here) reaching "completed"/"failed", and NOT on
+          // reachedFinalising.
+          //
+          // Why documentStatus (doc.status) and not aiJobStatus:
+          //   - On the POLL path (prodai today; also any push-recovery
+          //     path), aiBffPoller.ts:181-189 commits
+          //     aiJobStatus="completed" as its FIRST write when the BFF
+          //     reports the job done. It THEN calls getJobResult and
+          //     applyExtractionResult, which writes ~65 scalar field
+          //     rows serially (aiBffApply.ts:299-308) + fund lines
+          //     (:313-318) + the final document.update at :323-336
+          //     that flips doc.status="EXTRACTED". That gap is
+          //     ~1-3s. During it, /ai-status returns status="completed"
+          //     but no scalar rows exist. A refetch fired in that
+          //     window returns zero fields and — because completeFiredRef
+          //     latches and the poller is stopped — the panel stays
+          //     empty. So aiJobStatus="completed" does NOT imply
+          //     scalars committed on the poll path.
+          //   - doc.status="EXTRACTED" IS written last on both paths:
+          //     PUSH via documents.ts:815 inside the doc-status PATCH
+          //     handler that runs AFTER write_back_service.py:38-58's
+          //     per-field PATCH loop; PULL via aiBffApply.ts:326 inside
+          //     the same update as aiJobCompletedAt, always after the
+          //     field loop.
+          // Why documentStatus === "ERROR" (not next.status === "failed"):
+          //   both PUSH (documents.ts:766-775 → :815) and PULL failure
+          //   paths (aiBffPoller.ts:246-253, and timeOutStaleJobs at
+          //   :96-100) set doc.status="ERROR". Symmetric with the
+          //   success gate.
+          // Why reachedFinalising still triggers stopped=true above:
+          //   preserved for the "Finalising · 100%" stall case the
+          //   guard was originally added for — spinner still clears
+          //   on a genuine BFF stall; we just don't fire a refetch,
+          //   which is correct because no fields exist to refetch to.
           if (
-            (next.status === "completed" || reachedFinalising) &&
+            (next.documentStatus === "EXTRACTED" ||
+              next.documentStatus === "ERROR") &&
             !completeFiredRef.current
           ) {
             completeFiredRef.current = true;
