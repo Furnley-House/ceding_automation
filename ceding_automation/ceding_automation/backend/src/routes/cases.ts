@@ -4,6 +4,7 @@ import { PrismaClient, CaseStatus, LOAStatus, PlanType, Prisma } from "@prisma/c
 import { requireAuth, requireRole } from "../middleware/auth";
 import { z } from "zod";
 import * as zoho from "../services/zohoCrm";
+import { SYSTEM_USER_ID } from "../services/aiBffApply";
 import {
   mapZohoTaskToCase,
   getContactRecord,
@@ -26,6 +27,272 @@ import { generateNextCaseRef } from "../services/caseRef";
 const router = Router();
 const prisma = new PrismaClient();
 
+// ─────────────────────────────────────────────────────────
+// Ship #1 (H18) — Locked-field guard
+//
+// Once a case has any AI extraction on record (i.e. at least one
+// checklist_field row with aiExtractedAt IS NOT NULL), three fields
+// on the case become LOCKED against ALL non-admin-explicit writes:
+//   • planType — reshapes the entire checklist template set
+//   • providerId — reshapes provider-alias merge behaviour
+//   • policyRef — used by Zoho linkage + WorkDrive path resolution
+//
+// The guard is UNCONDITIONAL: it does not read req.user.role.
+// The manual PATCH /cases/:id path and the auto-`/refresh-from-zoho`
+// sync path both funnel through guardLockedFields; admins do NOT
+// bypass by loading the page. The only paths that can mutate a
+// locked field are:
+//   • PATCH /cases/:id/locked-field/:field (admin-only, explicit)
+//   • POST /admin/cases/:id/reset-plan-type (admin-only, plus
+//     orphan-row cleanup, needed for FH-010 remediation)
+// Dismissal (admin acknowledgement without changing the local value)
+// goes through POST /cases/:id/locked-field/:field/dismiss.
+//
+// Rationale: FH-098 lost the AI-extracted values when Zoho flipped
+// planType silently between extraction runs. Freezing these three
+// fields after any extraction blocks the failure mode without
+// requiring the user to know planType is load-bearing.
+// ─────────────────────────────────────────────────────────
+
+const LOCKED_FIELDS = ["planType", "providerId", "policyRef"] as const;
+type LockedField = (typeof LOCKED_FIELDS)[number];
+
+function isLockedField(name: string): name is LockedField {
+  return (LOCKED_FIELDS as readonly string[]).includes(name);
+}
+
+async function caseHasExtractionRun(caseId: string): Promise<boolean> {
+  const row = await prisma.checklistField.findFirst({
+    where: { caseId, aiExtractedAt: { not: null } },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
+interface BlockedChange {
+  field: LockedField;
+  currentValue: string | null;
+  attemptedValue: string | null;
+}
+
+/**
+ * Filter a set of requested case updates against the locked-field
+ * policy. Returns the updates that are safe to write plus the list
+ * of updates that were blocked. Caller MUST persist an audit row
+ * per blocked entry via emitBlockedAudit().
+ *
+ * `source` is what will land in the audit row's `source` column
+ * (existing convention: "ZOHO_SYNC" | "MANUAL"). `triggerUserId`
+ * is the human who triggered the mutation; the audit row itself
+ * uses SYSTEM_USER_ID for sync-path attribution so downstream
+ * queries can distinguish "someone loaded the page" from "an
+ * admin made a deliberate change".
+ */
+async function guardLockedFields(args: {
+  caseId: string;
+  requested: Record<string, unknown>;
+  current: { planType?: string | null; providerId?: string | null; policyRef?: string | null };
+  source: "ZOHO_SYNC" | "MANUAL";
+  triggerUserId: string;
+}): Promise<{ safe: Record<string, unknown>; blocked: BlockedChange[] }> {
+  const requested = { ...args.requested };
+  const blocked: BlockedChange[] = [];
+
+  // Cheap escape: if no locked field is being touched, skip the
+  // extraction lookup entirely.
+  const touchedLockedFields = LOCKED_FIELDS.filter((f) => f in requested);
+  if (touchedLockedFields.length === 0) {
+    return { safe: requested, blocked: [] };
+  }
+
+  const shouldGuard = await caseHasExtractionRun(args.caseId);
+  if (!shouldGuard) {
+    return { safe: requested, blocked: [] };
+  }
+
+  for (const field of touchedLockedFields) {
+    const attempted = requested[field];
+    const attemptedStr =
+      attempted === null || attempted === undefined ? null : String(attempted);
+    const currentStr = (args.current as Record<string, unknown>)[field];
+    const currentStrNorm =
+      currentStr === null || currentStr === undefined ? null : String(currentStr);
+
+    if (attemptedStr === currentStrNorm) {
+      // Not actually a change — silently drop from requested, no audit.
+      delete requested[field];
+      continue;
+    }
+
+    // Check if this exact attempt was already dismissed by an admin
+    // (derived from audit log — see plan item 3).
+    const dismissed = await isDismissed({
+      caseId: args.caseId,
+      field,
+      attemptedValue: attemptedStr,
+    });
+    if (dismissed) {
+      // Silent no-op — admin has chosen to ignore this Zoho drift.
+      delete requested[field];
+      continue;
+    }
+
+    blocked.push({ field, currentValue: currentStrNorm, attemptedValue: attemptedStr });
+    delete requested[field];
+  }
+
+  return { safe: requested, blocked };
+}
+
+/**
+ * Derive whether a particular (field, attemptedValue) has been
+ * dismissed by an admin. Compares the latest DISMISSED metadata
+ * against the current attempt. Cheap given the @@index([caseId])
+ * on audit_logs.
+ */
+async function isDismissed(args: {
+  caseId: string;
+  field: LockedField;
+  attemptedValue: string | null;
+}): Promise<boolean> {
+  const latestDismiss = await prisma.auditLog.findFirst({
+    where: {
+      caseId: args.caseId,
+      action: "LOCKED_FIELD_CHANGE_DISMISSED",
+    },
+    orderBy: { createdAt: "desc" },
+    select: { metadata: true },
+  });
+  if (!latestDismiss?.metadata) return false;
+  const md = latestDismiss.metadata as Record<string, unknown>;
+  return md.field === args.field && md.attemptedValue === args.attemptedValue;
+}
+
+/**
+ * Persist a LOCKED_FIELD_CHANGE_BLOCKED audit row. Called once per
+ * blocked change. userId is SYSTEM_USER_ID because the mutation was
+ * not a deliberate act by req.user; metadata.trigger carries the
+ * loader who caused the sync so an ops query can still surface who
+ * was on the page when the sync fired.
+ */
+async function emitBlockedAudit(args: {
+  caseId: string;
+  blocked: BlockedChange;
+  source: "ZOHO_SYNC" | "MANUAL";
+  triggerUserId: string;
+}): Promise<void> {
+  await prisma.auditLog.create({
+    data: {
+      caseId: args.caseId,
+      userId: SYSTEM_USER_ID,
+      action: "LOCKED_FIELD_CHANGE_BLOCKED",
+      source: args.source,
+      newValue: `Blocked change to ${args.blocked.field}: "${args.blocked.currentValue ?? "<null>"}" → "${args.blocked.attemptedValue ?? "<null>"}"`,
+      metadata: {
+        field: args.blocked.field,
+        currentValue: args.blocked.currentValue,
+        attemptedValue: args.blocked.attemptedValue,
+        trigger: { userId: args.triggerUserId, at: new Date().toISOString() },
+      } as Prisma.InputJsonValue,
+    },
+  });
+}
+
+/**
+ * Summarise locked-field activity for a case, exposed on GET
+ * /cases/:id as `lockedFieldAttempts`. Each element is the latest
+ * BLOCKED per (field, attemptedValue) with any subsequent DISMISSED
+ * merged in. Ship #3's banner reads this directly.
+ */
+interface LockedFieldAttempt {
+  field: LockedField;
+  currentValue: string | null;
+  attemptedValue: string | null;
+  source: string | null;
+  triggerUserId: string | null;
+  at: Date;
+  dismissed: boolean;
+  dismissedBy: string | null;
+  dismissedAt: Date | null;
+  dismissReason: string | null;
+}
+
+async function getLockedFieldAttempts(caseId: string): Promise<LockedFieldAttempt[]> {
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      caseId,
+      action: {
+        in: ["LOCKED_FIELD_CHANGE_BLOCKED", "LOCKED_FIELD_CHANGE_DISMISSED"],
+      },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+  });
+
+  const latestBlocked = new Map<string, typeof rows[number]>();
+  const latestDismissed = new Map<string, typeof rows[number]>();
+  for (const row of rows) {
+    const md = (row.metadata ?? {}) as Record<string, unknown>;
+    const field = typeof md.field === "string" ? md.field : null;
+    if (!field || !isLockedField(field)) continue;
+    const key = `${field}|${JSON.stringify(md.attemptedValue ?? null)}`;
+    if (row.action === "LOCKED_FIELD_CHANGE_BLOCKED" && !latestBlocked.has(key)) {
+      latestBlocked.set(key, row);
+    } else if (
+      row.action === "LOCKED_FIELD_CHANGE_DISMISSED" &&
+      !latestDismissed.has(key)
+    ) {
+      latestDismissed.set(key, row);
+    }
+  }
+
+  const attempts: LockedFieldAttempt[] = [];
+  for (const [key, blockedRow] of latestBlocked) {
+    const md = (blockedRow.metadata ?? {}) as Record<string, unknown>;
+    const dismissedRow = latestDismissed.get(key);
+    // A dismissal supersedes a block only if it happened AFTER the block.
+    const isDismissedNow =
+      dismissedRow !== undefined && dismissedRow.createdAt > blockedRow.createdAt;
+    const dismissMd = isDismissedNow
+      ? ((dismissedRow!.metadata ?? {}) as Record<string, unknown>)
+      : null;
+    const trigger =
+      md.trigger && typeof md.trigger === "object"
+        ? (md.trigger as Record<string, unknown>)
+        : null;
+    attempts.push({
+      field: (md.field as LockedField),
+      currentValue: (md.currentValue as string | null) ?? null,
+      attemptedValue: (md.attemptedValue as string | null) ?? null,
+      source: blockedRow.source,
+      triggerUserId: (trigger?.userId as string | null) ?? null,
+      at: blockedRow.createdAt,
+      dismissed: isDismissedNow,
+      dismissedBy: isDismissedNow ? dismissedRow!.userId : null,
+      dismissedAt: isDismissedNow ? dismissedRow!.createdAt : null,
+      dismissReason:
+        isDismissedNow && typeof dismissMd?.reason === "string"
+          ? (dismissMd!.reason as string)
+          : null,
+    });
+  }
+  attempts.sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0));
+  return attempts;
+}
+
+/**
+ * Reject case creation / planType change if the target plan type
+ * has no active checklist templates (Decision 2). PROTECTION,
+ * BOND, FINAL_SALARY etc. are in the enum but Phase 2 — no
+ * templates yet.
+ */
+async function planTypeHasTemplates(planType: PlanType): Promise<boolean> {
+  const cnt = await prisma.checklistTemplate.count({
+    where: { planType, isActive: true },
+  });
+  return cnt > 0;
+}
+
 // ── Create Case ─────────────────────────────────────────
 const CreateCaseSchema = z.object({
   clientName: z.string().min(1),
@@ -45,6 +312,21 @@ router.post("/", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Req
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   const { planType, planNumber, providerName, zohoTaskId, caseNotes: _caseNotes, ...data } = parsed.data;
+
+  // Ship #1 (H18 Decision 2): reject plan types with no active
+  // checklist templates. PROTECTION / BOND / FINAL_SALARY / GIA
+  // are in the enum but only PENSION and ISA have templates in
+  // prod today. Without this check, an operator can create an
+  // FH-010-shape case that has no extractable fields — extraction
+  // then submits with an empty checklistFields array (matches the
+  // H18 empty-`fields` array hypothesis on the 5 orphan docs).
+  if (!(await planTypeHasTemplates(planType))) {
+    return res.status(422).json({
+      error: `Plan type "${planType}" is not implemented yet. Contact an admin to request template rollout.`,
+      code: "PLAN_TYPE_NOT_IMPLEMENTED",
+      planType,
+    });
+  }
 
   // planNumber is an alias for policyRef
   if (planNumber && !data.policyRef) data.policyRef = planNumber;
@@ -177,7 +459,14 @@ router.get("/:id", requireAuth, async (req: Request, res: Response) => {
   });
 
   if (!caseRecord) return res.status(404).json({ error: "Case not found" });
-  res.json(caseRecord);
+
+  // Ship #1 (H18): surface the locked-field guard's activity on
+  // this case so any consumer of GET /cases/:id (Ship #3 banner,
+  // exports, ops tools) can render / react to blocked-sync attempts
+  // without a second endpoint. Derived from audit_logs — see the
+  // getLockedFieldAttempts helper for the derivation contract.
+  const lockedFieldAttempts = await getLockedFieldAttempts(req.params.id);
+  res.json({ ...caseRecord, lockedFieldAttempts });
 });
 
 // ── General Case Update (frontend "Mark complete & continue", etc.) ────
@@ -440,6 +729,63 @@ router.patch(
       });
       if (!current) return res.status(404).json({ error: "Case not found" });
       return res.json(current);
+    }
+
+    // Ship #1 (H18): guard locked fields on manual PATCH just like
+    // on the sync path. The guard is UNCONDITIONAL — role is NOT
+    // checked here even for ADMINs. Admins mutate locked fields
+    // via PATCH /cases/:id/locked-field/:field, which is explicit,
+    // logged as LOCKED_FIELD_CHANGED, and requires a reason.
+    const touchedLocked = LOCKED_FIELDS.filter((f) => f in data);
+    let manualBlocked: BlockedChange[] = [];
+    if (touchedLocked.length > 0) {
+      const currentForGuard = await prisma.case.findUnique({
+        where: { id: req.params.id },
+        select: { planType: true, providerId: true, policyRef: true },
+      });
+      if (!currentForGuard) {
+        return res.status(404).json({ error: "Case not found" });
+      }
+      const result = await guardLockedFields({
+        caseId: req.params.id,
+        requested: data,
+        current: currentForGuard,
+        source: "MANUAL",
+        triggerUserId: req.user!.id,
+      });
+      Object.assign(data, result.safe);
+      // Also strip any locked-field keys that guardLockedFields
+      // removed but weren't in `result.safe` (guardLockedFields
+      // mutates by returning a filtered `safe` map; drop those
+      // keys from `data` explicitly to be safe).
+      for (const lf of LOCKED_FIELDS) {
+        if (!(lf in result.safe)) delete (data as Record<string, unknown>)[lf];
+      }
+      manualBlocked = result.blocked;
+      for (const b of manualBlocked) {
+        await emitBlockedAudit({
+          caseId: req.params.id,
+          blocked: b,
+          source: "MANUAL",
+          triggerUserId: req.user!.id,
+        });
+      }
+      // If ALL the caller sent was locked-field writes and they
+      // were all blocked, `data` may now be empty. Short-circuit
+      // with a 409 that names the blocked fields so the UI can
+      // render a "contact admin" message.
+      if (Object.keys(data).length === 0 && manualBlocked.length > 0) {
+        const current = await prisma.case.findUnique({
+          where: { id: req.params.id },
+          include: { provider: true, assignedTo: true, createdBy: true },
+        });
+        return res.status(409).json({
+          error: "Locked fields cannot be changed after extraction has run. Contact an admin.",
+          code: "LOCKED_FIELD",
+          blocked: manualBlocked,
+          case: current,
+        });
+      }
     }
 
     // Same handoff side-effects as PATCH /:id/status, so navigating via the
@@ -1278,6 +1624,43 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
     });
   }
 
+  // Ship #1 (H18): filter Zoho-driven writes through the locked-field
+  // guard BEFORE applying updates. Any block emits an audit row and
+  // strips the field from `updates`; the corresponding entry is also
+  // removed from `changes[]` so the response's `changes` accurately
+  // reflects what actually happened, and the CASE_UPDATED audit at
+  // the bottom of this handler doesn't double-log a blocked field.
+  // The guard is UNCONDITIONAL — req.user.role is not consulted here
+  // (an admin loading the case must not silently accept Zoho drift).
+  const guardResult = await guardLockedFields({
+    caseId: id,
+    requested: updates,
+    current: {
+      planType: caseRecord.planType,
+      providerId: caseRecord.providerId,
+      policyRef: caseRecord.policyRef,
+    },
+    source: "ZOHO_SYNC",
+    triggerUserId: req.user!.id,
+  });
+  for (const b of guardResult.blocked) {
+    await emitBlockedAudit({
+      caseId: id,
+      blocked: b,
+      source: "ZOHO_SYNC",
+      triggerUserId: req.user!.id,
+    });
+    const idx = changes.findIndex((c) => c.field === b.field || (b.field === "providerId" && c.field === "provider"));
+    if (idx >= 0) changes.splice(idx, 1);
+  }
+  // Rebuild `updates` from the guard's `safe` map — anything the
+  // guard stripped is gone from here too.
+  for (const lf of LOCKED_FIELDS) {
+    if (lf in updates && !(lf in guardResult.safe)) {
+      delete (updates as Record<string, unknown>)[lf];
+    }
+  }
+
   // We always have at least the cached Zoho IDs in `updates`, so always
   // apply. `changed` for the response reflects real CRM-data changes only
   // (the cache refresh is internal bookkeeping).
@@ -1584,6 +1967,430 @@ router.post(
       plansXClientsCreated: plansXClientsResult.created,
       plansXClientsErrors: plansXClientsResult.errors,
       case: updated,
+    });
+  },
+);
+
+// ─────────────────────────────────────────────────────────
+// Ship #1 (H18) — Admin locked-field endpoints
+//
+// The guard above blocks writes to planType / providerId /
+// policyRef once extraction has run. These three endpoints are
+// the ONLY paths that can (a) explicitly override a locked field,
+// (b) dismiss a Zoho drift without changing the local value, or
+// (c) reset a case's planType to a target that has templates
+// (needed for FH-010 remediation). All three are ADMIN-only.
+// ─────────────────────────────────────────────────────────
+
+// ── Explicit admin override of a single locked field ────
+//
+// Body: { value: string, reason: string }
+// Emits: LOCKED_FIELD_CHANGED (source: MANUAL, userId: admin)
+router.patch(
+  "/:id/locked-field/:field",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req: Request, res: Response) => {
+    const field = req.params.field;
+    if (!isLockedField(field)) {
+      return res.status(400).json({
+        error: `Not a locked field: ${field}. Locked fields are: ${LOCKED_FIELDS.join(", ")}`,
+      });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const value = body.value;
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (!reason) {
+      return res.status(400).json({ error: "`reason` is required (min 1 char)" });
+    }
+
+    const current = await prisma.case.findUnique({
+      where: { id: req.params.id },
+      select: { planType: true, providerId: true, policyRef: true },
+    });
+    if (!current) return res.status(404).json({ error: "Case not found" });
+
+    // Sanity-check the value against the field type.
+    if (field === "planType") {
+      const requestedPlanType = typeof value === "string" ? value : "";
+      if (!(Object.values(PlanType) as string[]).includes(requestedPlanType)) {
+        return res.status(400).json({
+          error: `Invalid planType: ${requestedPlanType}. Valid: ${Object.values(PlanType).join(", ")}`,
+        });
+      }
+      if (!(await planTypeHasTemplates(requestedPlanType as PlanType))) {
+        return res.status(422).json({
+          error: `Plan type "${requestedPlanType}" has no active checklist templates. Use POST /admin/cases/:id/reset-plan-type to change with orphan cleanup, or roll templates first.`,
+          code: "PLAN_TYPE_NOT_IMPLEMENTED",
+        });
+      }
+    }
+    if ((field === "providerId" || field === "policyRef") && value !== null && typeof value !== "string") {
+      return res.status(400).json({ error: `${field} must be a string or null` });
+    }
+
+    const previousValue = (current as Record<string, unknown>)[field];
+    const previousValueNorm =
+      previousValue === null || previousValue === undefined ? null : String(previousValue);
+    const newValueNorm = value === null || value === undefined ? null : String(value);
+    if (previousValueNorm === newValueNorm) {
+      return res.status(400).json({ error: "New value equals current value; nothing to change." });
+    }
+
+    const updated = await prisma.case.update({
+      where: { id: req.params.id },
+      data: { [field]: value } as Prisma.CaseUpdateInput,
+      include: { provider: true, assignedTo: true, createdBy: true },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.id,
+        userId: req.user!.id,
+        action: field === "planType" ? "PLAN_TYPE_CHANGED" : "LOCKED_FIELD_CHANGED",
+        source: "MANUAL",
+        newValue: `${field}: "${previousValueNorm ?? "<null>"}" → "${newValueNorm ?? "<null>"}"`,
+        metadata: {
+          field,
+          from: previousValueNorm,
+          to: newValueNorm,
+          reason,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    res.json(updated);
+  },
+);
+
+// ── Admin acknowledgement / dismissal (no local value change) ──
+//
+// Body: { attemptedValue: string | null, reason: string }
+// Emits: LOCKED_FIELD_CHANGE_DISMISSED (source: MANUAL, userId: admin)
+// Effect: guardLockedFields silently skips future sync attempts
+// whose attempted value matches (until Zoho's value changes again).
+router.post(
+  "/:id/locked-field/:field/dismiss",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req: Request, res: Response) => {
+    const field = req.params.field;
+    if (!isLockedField(field)) {
+      return res.status(400).json({ error: `Not a locked field: ${field}` });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const attemptedValueRaw = body.attemptedValue;
+    const attemptedValue =
+      attemptedValueRaw === null || attemptedValueRaw === undefined
+        ? null
+        : String(attemptedValueRaw);
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (!reason) {
+      return res.status(400).json({ error: "`reason` is required" });
+    }
+
+    const caseExists = await prisma.case.findUnique({
+      where: { id: req.params.id },
+      select: { id: true },
+    });
+    if (!caseExists) return res.status(404).json({ error: "Case not found" });
+
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.id,
+        userId: req.user!.id,
+        action: "LOCKED_FIELD_CHANGE_DISMISSED",
+        source: "MANUAL",
+        newValue: `Dismissed ${field} sync attempt: "${attemptedValue ?? "<null>"}"`,
+        metadata: {
+          field,
+          attemptedValue,
+          reason,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    res.json({ ok: true, dismissed: { field, attemptedValue, reason } });
+  },
+);
+
+// ── Reset case planType with orphan-row cleanup ─────────
+//
+// Body: { target: PlanType, reason: string }
+// Effect:
+//   1. Validate target has active templates.
+//   2. Delete checklist_fields whose template.planType != target.
+//      (This is why we can't just use PATCH /locked-field for the
+//      FH-098 / FH-010 shape — those cases have real orphan rows.)
+//   3. Delete checklist_fund_lines whose planType != target.
+//   4. Update case.planType = target.
+//   5. Audit as PLAN_TYPE_CHANGED with orphansDeleted in metadata.
+//
+// This is the ONLY code path that touches locked planType AND
+// mutates checklist_fields — deliberately separate from the plain
+// locked-field endpoint to force the admin to acknowledge the
+// data-deletion side-effect.
+router.post(
+  "/admin/cases/:id/reset-plan-type",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const target = typeof body.target === "string" ? body.target : "";
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (!reason) {
+      return res.status(400).json({ error: "`reason` is required" });
+    }
+    if (!(Object.values(PlanType) as string[]).includes(target)) {
+      return res.status(400).json({
+        error: `Invalid target planType: ${target}. Valid: ${Object.values(PlanType).join(", ")}`,
+      });
+    }
+    const targetTyped = target as PlanType;
+    if (!(await planTypeHasTemplates(targetTyped))) {
+      return res.status(422).json({
+        error: `Target plan type "${target}" has no active checklist templates. Roll templates before resetting a case to this type.`,
+        code: "PLAN_TYPE_NOT_IMPLEMENTED",
+      });
+    }
+
+    const current = await prisma.case.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, planType: true },
+    });
+    if (!current) return res.status(404).json({ error: "Case not found" });
+
+    // Discover orphan rows BEFORE deletion. We fetch the FULL row
+    // content (not just counts) for two reasons:
+    //   1. FH-098's 70 orphan PENSION rows hold 25 AI-extracted
+    //      values (e.g. transfer_value £28,990.52) plus 17
+    //      manually-edited/approved cells. Counts alone would make
+    //      the delete irreversible from Postgres.
+    //   2. When force=true (see below), we snapshot the whole set
+    //      into audit_logs.metadata so the data survives in the
+    //      audit trail forever — deleting it from checklist_fields
+    //      is a lossy operation on the live table, not on history.
+    const orphanFields = await prisma.checklistField.findMany({
+      where: {
+        caseId: req.params.id,
+        template: { planType: { not: targetTyped } },
+      },
+      include: {
+        template: {
+          select: {
+            fieldKey: true,
+            fieldName: true,
+            planType: true,
+            sectionName: true,
+            displayOrder: true,
+          },
+        },
+        manualEditedBy: { select: { id: true, name: true, email: true } },
+      },
+    });
+    const orphanFundLines = await prisma.checklistFundLine.findMany({
+      where: { caseId: req.params.id, planType: { not: targetTyped } },
+    });
+
+    // Safety guard: refuse the delete when any orphan row carries
+    // real content — a non-null value, a manual override, or an
+    // adviser approval. The caller must pass { force: true } to
+    // proceed; with force, we snapshot every row into audit_logs
+    // BEFORE the tx that deletes them.
+    //
+    // Rationale: FH-098 must be un-deletable by accident. Ordinary
+    // FH-010-shape resets (all orphan rows are empty AI_EXTRACTED
+    // placeholders from POST /cases seeding) go through without a
+    // force flag; anything with real work in it needs an explicit
+    // acknowledgement.
+    const protectedOrphanFields = orphanFields.filter(
+      (f) => f.value !== null || f.isManuallyOverridden || f.isApproved,
+    );
+    const hasProtectedContent =
+      protectedOrphanFields.length > 0 || orphanFundLines.length > 0;
+    const force = body.force === true;
+
+    if (hasProtectedContent && !force) {
+      return res.status(409).json({
+        error:
+          "Refusing to delete orphan rows that carry values, manual edits, approvals, or fund lines. Pass { \"force\": true } to override — the full row content will be recorded in audit_logs.metadata before deletion so the data remains recoverable from history.",
+        code: "PROTECTED_ORPHAN_ROWS",
+        counts: {
+          orphanFieldsTotal: orphanFields.length,
+          orphanFieldsWithContent: protectedOrphanFields.length,
+          orphanFundLines: orphanFundLines.length,
+        },
+        // Sample the protected content so the caller can decide
+        // knowingly. Full snapshot is written on force=true.
+        protectedFields: protectedOrphanFields.map((f) => ({
+          id: f.id,
+          fieldKey: f.template.fieldKey,
+          fieldName: f.template.fieldName,
+          templatePlanType: f.template.planType,
+          value: f.value,
+          aiRawValue: f.aiRawValue,
+          confidence: f.confidence,
+          status: f.status,
+          isManuallyOverridden: f.isManuallyOverridden,
+          manualEditedBy: f.manualEditedBy?.name ?? null,
+          manualEditedAt: f.manualEditedAt,
+          isApproved: f.isApproved,
+          approvedAt: f.approvedAt,
+          reviewComment: f.reviewComment,
+          sourceDocumentName: f.sourceDocumentName,
+          aiJobId: f.aiJobId,
+          aiExtractedAt: f.aiExtractedAt,
+        })),
+        protectedFundLines: orphanFundLines.map((fl) => ({
+          id: fl.id,
+          fundName: fl.fundName,
+          value: fl.value,
+          status: fl.status,
+          planType: fl.planType,
+          sourceDocumentId: fl.sourceDocumentId,
+        })),
+      });
+    }
+
+    // Build the pre-delete snapshot (only written when force=true
+    // AND there is content to preserve). Kept out of the tx so a
+    // giant metadata blob is prepared once and passed by reference.
+    const preDeleteSnapshot = hasProtectedContent
+      ? {
+          orphanFields: orphanFields.map((f) => ({
+            id: f.id,
+            templateId: f.templateId,
+            fieldKey: f.template.fieldKey,
+            fieldName: f.template.fieldName,
+            templatePlanType: f.template.planType,
+            sectionName: f.template.sectionName,
+            displayOrder: f.template.displayOrder,
+            value: f.value,
+            aiRawValue: f.aiRawValue,
+            confidence: f.confidence,
+            status: f.status,
+            sourceDocumentId: f.sourceDocumentId,
+            sourceDocumentName: f.sourceDocumentName,
+            sourcePageNumber: f.sourcePageNumber,
+            sourceSection: f.sourceSection,
+            sourceQuote: f.sourceQuote,
+            isManuallyOverridden: f.isManuallyOverridden,
+            manualEditedById: f.manualEditedById,
+            manualEditedByName: f.manualEditedBy?.name ?? null,
+            manualEditedByEmail: f.manualEditedBy?.email ?? null,
+            manualEditedAt: f.manualEditedAt,
+            isApproved: f.isApproved,
+            approvedAt: f.approvedAt,
+            reviewComment: f.reviewComment,
+            reviewRequestedAt: f.reviewRequestedAt,
+            hasConflict: f.hasConflict,
+            conflictValues: f.conflictValues,
+            fromTranscript: f.fromTranscript,
+            transcriptId: f.transcriptId,
+            aiJobId: f.aiJobId,
+            aiExtractedAt: f.aiExtractedAt,
+            createdAt: f.createdAt,
+            updatedAt: f.updatedAt,
+          })),
+          orphanFundLines: orphanFundLines.map((fl) => ({
+            id: fl.id,
+            fundName: fl.fundName,
+            isinSedolCiti: fl.isinSedolCiti,
+            numberOfUnits: fl.numberOfUnits,
+            pricePerUnit: fl.pricePerUnit,
+            value: fl.value,
+            isWithProfits: fl.isWithProfits,
+            confidence: fl.confidence,
+            status: fl.status,
+            planType: fl.planType,
+            sourceDocumentId: fl.sourceDocumentId,
+            displayOrder: fl.displayOrder,
+            createdAt: fl.createdAt,
+            updatedAt: fl.updatedAt,
+          })),
+        }
+      : null;
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Snapshot BEFORE deletion so the audit row commits in the
+      // same tx as the delete — either both land or neither does.
+      if (preDeleteSnapshot) {
+        // Distinct action from the PLAN_TYPE_CHANGED outcome row
+        // written after the tx: recovery queries can search by
+        // action='CHECKLIST_ROWS_SNAPSHOTTED' without inspecting
+        // metadata.snapshot on every PLAN_TYPE_CHANGED row.
+        await tx.auditLog.create({
+          data: {
+            caseId: req.params.id,
+            userId: req.user!.id,
+            action: "CHECKLIST_ROWS_SNAPSHOTTED",
+            source: "MANUAL",
+            newValue: `Pre-delete snapshot of ${preDeleteSnapshot.orphanFields.length} orphan field(s) + ${preDeleteSnapshot.orphanFundLines.length} orphan fund line(s) — force=true reset-plan-type ${current.planType} → ${targetTyped}`,
+            metadata: {
+              force: true,
+              reason,
+              from: current.planType,
+              to: targetTyped,
+              ...preDeleteSnapshot,
+              trigger: "reset-plan-type-snapshot",
+            } as Prisma.InputJsonValue,
+          },
+        });
+      }
+      const deletedFields = await tx.checklistField.deleteMany({
+        where: {
+          caseId: req.params.id,
+          template: { planType: { not: targetTyped } },
+        },
+      });
+      const deletedFundLines = await tx.checklistFundLine.deleteMany({
+        where: {
+          caseId: req.params.id,
+          planType: { not: targetTyped },
+        },
+      });
+      const updated = await tx.case.update({
+        where: { id: req.params.id },
+        data: { planType: targetTyped },
+        include: { provider: true, assignedTo: true, createdBy: true },
+      });
+      return {
+        deletedFieldCount: deletedFields.count,
+        deletedFundLineCount: deletedFundLines.count,
+        updated,
+      };
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.id,
+        userId: req.user!.id,
+        action: "PLAN_TYPE_CHANGED",
+        source: "MANUAL",
+        newValue: `Reset planType: "${current.planType}" → "${targetTyped}" (deleted ${result.deletedFieldCount} orphan field row(s), ${result.deletedFundLineCount} orphan fund line(s))`,
+        metadata: {
+          from: current.planType,
+          to: targetTyped,
+          reason,
+          force,
+          orphansDeleted: {
+            checklistFields: result.deletedFieldCount,
+            checklistFundLines: result.deletedFundLineCount,
+            protectedFieldsSnapshotted: protectedOrphanFields.length,
+          },
+          trigger: "reset-plan-type",
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    res.json({
+      ok: true,
+      case: result.updated,
+      deleted: {
+        checklistFields: result.deletedFieldCount,
+        checklistFundLines: result.deletedFundLineCount,
+      },
+      snapshotted: preDeleteSnapshot !== null,
     });
   },
 );

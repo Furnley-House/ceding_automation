@@ -45,8 +45,23 @@ export async function applyFieldExtraction(args: {
 }): Promise<ApplyFieldResult> {
   const userId = args.userId ?? SYSTEM_USER_ID;
 
+  // Ship #1 (H18): scope the (caseId, fieldKey) lookup by the case's
+  // current planType. Same rationale as checklist.ts:636-649 — without
+  // scope, arbitrary matches when a case's planType flipped after an
+  // earlier extraction seeded a different template set. Orphan rows
+  // are treated as "field-not-found" here; the extract-submit route
+  // logs one CHECKLIST_TEMPLATE_MISMATCH_DETECTED audit per run to
+  // surface the case for admin repair.
+  const caseRow = await prisma.case.findUnique({
+    where: { id: args.caseId },
+    select: { planType: true },
+  });
+  if (!caseRow) return { outcome: "field-not-found" };
   const field = await prisma.checklistField.findFirst({
-    where: { caseId: args.caseId, template: { fieldKey: args.fieldKey } },
+    where: {
+      caseId: args.caseId,
+      template: { fieldKey: args.fieldKey, planType: caseRow.planType },
+    },
     include: { template: true },
   });
   if (!field) return { outcome: "field-not-found" };
