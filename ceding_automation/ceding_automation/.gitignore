@@ -43,5 +43,7 @@ backend/uploads/
 # Local debug noise (added during reconcile prep)
 logs-*.txt
 *.bak
+*-bak
+dist.*/
 frontend/vite-dev.err
 frontend/-w
