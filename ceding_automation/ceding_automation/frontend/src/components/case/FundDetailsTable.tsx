@@ -154,14 +154,19 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
     if (readOnly) {
       return <span className="text-foreground">{formatted}</span>;
     }
+    // Always render at least a "—" so an unset cell has visible ink AND a
+    // usable click target. min-h keeps the button >= 24px tall even when
+    // the content is a single em-dash — without this, empty ISIN cells
+    // collapsed to a ~2px hairline that was near-impossible to click.
+    const display = formatted && formatted.trim() ? formatted : "—";
     return (
       <button
         type="button"
         onClick={() => startEdit(row, field)}
-        className="w-full text-left cursor-text hover:bg-muted/40 rounded px-1 -mx-1 py-0.5 -my-0.5 transition-colors"
+        className="w-full min-h-[24px] flex items-center text-left cursor-text hover:bg-muted/40 rounded px-1 -mx-1 py-0.5 -my-0.5 transition-colors"
         title="Click to edit"
       >
-        {formatted}
+        {display}
       </button>
     );
   };
