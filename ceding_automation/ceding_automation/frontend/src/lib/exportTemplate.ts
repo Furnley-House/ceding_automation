@@ -106,6 +106,11 @@ const PENSION_ROWS: FieldRowMapping[] = [
   { fieldKey: "external_transfer_in_allowed", row: 80 },
   { fieldKey: "named_beneficiaries", row: 81 },
   { fieldKey: "in_specie_transfer_out", row: 82 },
+  // Notes — matches the ISA/GIA `other_notes` key so downstream systems
+  // (AI extractor, audit trail, review UI) treat it the same across
+  // plan types. Label is "Additional Notes" on Pension per user's ask
+  // (ISA/GIA still read "Other Notes" — deliberately kept as-is).
+  { fieldKey: "other_notes", row: 83 },
 ];
 
 const ISA_ROWS: FieldRowMapping[] = [
