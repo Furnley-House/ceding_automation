@@ -1805,6 +1805,15 @@
         "display_order": 70,
         "type": "boolean",
         "required": true
+      },
+      {
+        "key": "other_notes",
+        "label": "Additional Notes",
+        "section": "Notes",
+        "section_order": 9,
+        "display_order": 71,
+        "type": "text_long",
+        "required": true
       }
     ]
   }
