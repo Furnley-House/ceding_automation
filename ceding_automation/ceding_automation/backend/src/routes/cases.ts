@@ -177,10 +177,26 @@ async function isDismissed(args: {
  */
 async function emitBlockedAudit(args: {
   caseId: string;
+  caseRef: string;
   blocked: BlockedChange;
   source: "ZOHO_SYNC" | "MANUAL";
   triggerUserId: string;
 }): Promise<void> {
+  // Structured stdout line so Container Apps → Log Analytics can alert on
+  // blocked syncs before the Ship #3 UI banner exists. Values are the same
+  // ones already persisted in audit_logs.newValue below; policyRef /
+  // providerId / planType are not standalone PII.
+  console.warn(
+    JSON.stringify({
+      evt: "LOCKED_FIELD_BLOCKED",
+      caseRef: args.caseRef,
+      field: args.blocked.field,
+      currentValue: args.blocked.currentValue,
+      attemptedValue: args.blocked.attemptedValue,
+      source: args.source,
+      triggerUserId: args.triggerUserId,
+    }),
+  );
   await prisma.auditLog.create({
     data: {
       caseId: args.caseId,
@@ -741,7 +757,7 @@ router.patch(
     if (touchedLocked.length > 0) {
       const currentForGuard = await prisma.case.findUnique({
         where: { id: req.params.id },
-        select: { planType: true, providerId: true, policyRef: true },
+        select: { caseRef: true, planType: true, providerId: true, policyRef: true },
       });
       if (!currentForGuard) {
         return res.status(404).json({ error: "Case not found" });
@@ -765,6 +781,7 @@ router.patch(
       for (const b of manualBlocked) {
         await emitBlockedAudit({
           caseId: req.params.id,
+          caseRef: currentForGuard.caseRef,
           blocked: b,
           source: "MANUAL",
           triggerUserId: req.user!.id,
@@ -1646,6 +1663,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   for (const b of guardResult.blocked) {
     await emitBlockedAudit({
       caseId: id,
+      caseRef: caseRecord.caseRef,
       blocked: b,
       source: "ZOHO_SYNC",
       triggerUserId: req.user!.id,
