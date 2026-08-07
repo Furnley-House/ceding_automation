@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Check,
   CircleAlert,
@@ -102,7 +102,21 @@ export function ChecklistField({
   const [commentText, setCommentText] = useState(state.comment ?? "");
   const [resolving, setResolving] = useState(false);
 
-  useEffect(() => setLocalValue(state.value ?? ""), [state.value]);
+  // Preserve mid-typing input on background refetch. The prior naive
+  // `setLocalValue(state.value ?? "")` unconditionally overwrote localValue
+  // whenever the server value changed — so a refetch fired while the user
+  // was mid-edit (existing refreshSignal path, or the H17 refetch after
+  // extraction completes) would discard uncommitted keystrokes. Track the
+  // last-seen server value in a ref and only sync when localValue still
+  // equals it (i.e. the user has not started editing since the last sync).
+  const lastServerValueRef = useRef(state.value ?? "");
+  useEffect(() => {
+    const nextServer = state.value ?? "";
+    setLocalValue((current) =>
+      current === lastServerValueRef.current ? nextServer : current
+    );
+    lastServerValueRef.current = nextServer;
+  }, [state.value]);
 
   // Fall back to MISSING if the backend returns an unmapped enum value.
   // Without this guard, the whole Extract & Fill Gaps stage white-screens

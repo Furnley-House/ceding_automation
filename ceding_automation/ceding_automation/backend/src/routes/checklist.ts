@@ -633,19 +633,32 @@ router.patch(
     // of the BFF pipeline outputs each field keyed by field_key,
     // so the BFF passes that as the URL param. Other routes in
     // this file still use UUID-based lookup.
+    //
+    // Ship #1 (H18): fetch case.planType and scope the field lookup
+    // by (fieldKey, planType). Without this scope, a case whose
+    // planType flipped after an earlier extraction has BOTH the old
+    // planType's field rows AND fieldKeys that collide with the new
+    // planType's templates — findFirst returns arbitrary matches.
+    // FH-098 wrote to PENSION rows while planType was ISA because
+    // of this. Orphan rows are simply ignored (findFirst returns
+    // null → the 404 branch below); a companion warning audit is
+    // emitted from the extract-submit route, not here.
+    const caseRow = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      select: { planType: true, provider: { select: { name: true } } },
+    });
+    if (!caseRow) {
+      return res.status(404).json({ error: "Case not found" });
+    }
     const field = await prisma.checklistField.findFirst({
       where: {
         caseId: req.params.caseId,
-        template: { fieldKey: req.params.fieldId },
+        template: {
+          fieldKey: req.params.fieldId,
+          planType: caseRow.planType,
+        },
       },
-      include: {
-        template: true,
-        // Pull the case's canonical provider so we can plumb it into
-        // compareFieldValues via applyFieldExtraction. Only used for
-        // provider_name alias collapsing. No extra round-trip vs the
-        // existing query — same join.
-        case: { select: { provider: { select: { name: true } } } },
-      },
+      include: { template: true },
     });
     if (!field) {
       return res
@@ -689,8 +702,10 @@ router.patch(
         documentId: body.document_id,
         // PATCH body doesn't carry detected_provider; fall back to the case's
         // registry-known provider name (canonical by construction since the
-        // Provider table is the source of truth).
-        providerCanonical: field.case?.provider?.name ?? undefined,
+        // Provider table is the source of truth). caseRow was fetched above
+        // for the planType-scoped field lookup — reuse its provider join
+        // rather than re-including on `field`.
+        providerCanonical: caseRow.provider?.name ?? undefined,
       });
     } catch (err) {
       const code = (err as { code?: string })?.code;

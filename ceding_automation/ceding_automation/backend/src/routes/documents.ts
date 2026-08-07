@@ -428,6 +428,56 @@ async function submitOrTrigger(docId: string, caseId: string, userId: string): P
     });
     if (!caseRecord) throw new Error(`Case ${caseId} not found`);
 
+    // Ship #1 (H18): warn when the case's persisted checklist_fields
+    // include rows keyed to a template.planType that no longer matches
+    // case.planType — orphan rows from a pre-lock planType flip (FH-098
+    // shape). We do NOT refuse the extraction: the planType-scoped
+    // per-field lookup in checklist.ts / aiBffApply.ts already routes
+    // writes to the CORRECT rows, and orphaned rows are simply ignored.
+    // Emit one audit row per submit so mismatched cases are visible via
+    // GET /cases/:id lockedFieldAttempts and via
+    //   SELECT ... FROM audit_logs WHERE action='CHECKLIST_TEMPLATE_MISMATCH_DETECTED'
+    // Repair path is the admin reset-plan-type endpoint. Dedup is the
+    // reader's job; every submit that hits a mismatched case emits.
+    const orphanRows = caseRecord.checklistFields.filter(
+      (f) => f.template.planType !== caseRecord.planType,
+    );
+    if (orphanRows.length > 0) {
+      const orphanCounts = orphanRows.reduce<Record<string, number>>(
+        (acc, f) => {
+          const key = f.template.planType;
+          acc[key] = (acc[key] ?? 0) + 1;
+          return acc;
+        },
+        {},
+      );
+      await prisma.auditLog.create({
+        data: {
+          caseId,
+          userId,
+          action: "CHECKLIST_TEMPLATE_MISMATCH_DETECTED",
+          source: "SYSTEM",
+          newValue: `Extraction submitted on case whose planType=${caseRecord.planType} but checklist_fields include ${orphanRows.length} row(s) keyed to other plan type(s)`,
+          metadata: {
+            currentPlanType: caseRecord.planType,
+            orphanCountsByPlanType: orphanCounts,
+            documentId: docId,
+            trigger: "extract-submit",
+          } as Prisma.InputJsonValue,
+        },
+      });
+    }
+
+    // Ship #1 (H18): filter checklistFields to the case's CURRENT
+    // planType before submitting to BFF. Without this filter, the BFF
+    // receives orphan-planType templates (from a pre-lock planType
+    // flip) and Stage 4 emits field_keys for the wrong plan type;
+    // downstream per-field PATCHes then either 404 (planType-scoped
+    // lookup can't find them) or, worse pre-fix, wrote to arbitrary
+    // rows. Pair this with the mismatch-warning audit above.
+    const currentPlanChecklistFields = caseRecord.checklistFields.filter(
+      (f) => f.template.planType === caseRecord.planType,
+    );
     const submission = await aiBff.submitExtractionJob({
       storagePath: doc.storagePath, // relative path; BFF uses managed identity
       caseId,
@@ -437,7 +487,7 @@ async function submitOrTrigger(docId: string, caseId: string, userId: string): P
       policyRef: caseRecord.policyRef ?? undefined,
       clientName: caseRecord.clientName,
       zohoTaskId: caseRecord.zohoTaskId ?? undefined,
-      checklistFields: caseRecord.checklistFields.map((f) => ({
+      checklistFields: currentPlanChecklistFields.map((f) => ({
         fieldKey: f.template.fieldKey,
         fieldName: f.template.fieldName,
         fieldType: f.template.fieldType,

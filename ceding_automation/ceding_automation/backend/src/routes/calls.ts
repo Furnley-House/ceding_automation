@@ -202,12 +202,23 @@ router.post(
     });
 
     // 2. Update checklist fields (never overwrite manually-edited or approved)
+    // Ship #1 (H18): scope the (caseId, fieldKey) lookup by the case's
+    // current planType. See checklist.ts:636-649 and aiBffApply.ts:48-51
+    // for the same fix in the BFF push/pull paths. Fetch case.planType
+    // ONCE before the loop rather than per iteration.
+    const transcriptCaseRow = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      select: { planType: true },
+    });
+    if (!transcriptCaseRow) {
+      return res.status(404).json({ error: "Case not found" });
+    }
     let updated = 0;
     for (const f of acceptedFields ?? []) {
       const field = await prisma.checklistField.findFirst({
         where: {
           caseId: req.params.caseId,
-          template: { fieldKey: f.fieldKey },
+          template: { fieldKey: f.fieldKey, planType: transcriptCaseRow.planType },
         },
       });
       if (!field) continue;

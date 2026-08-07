@@ -113,6 +113,27 @@ enum AuditAction {
   FUND_LINE_UPDATED
   FUND_LINE_REMOVED
   FIELDS_REVERTED_ON_DOC_DELETE
+  // Ship #1: locked-field guard on planType / providerId / policyRef
+  // once a case has any checklistField.aiExtractedAt IS NOT NULL. See
+  // docs/DECISION_1_2_3_H18.md (added alongside this migration).
+  PLAN_TYPE_CHANGED
+  LOCKED_FIELD_CHANGE_BLOCKED
+  LOCKED_FIELD_CHANGE_DISMISSED
+  LOCKED_FIELD_CHANGED
+  // Ship #1: extraction ran on a case whose checklist_fields include
+  // rows keyed to a template.planType that no longer matches
+  // case.planType (orphaned rows from a pre-lock planType flip).
+  // Emitted as a WARNING once per extract-submit / poll-apply run.
+  CHECKLIST_TEMPLATE_MISMATCH_DETECTED
+  // Ship #1: pre-delete snapshot of checklist_fields (+ fund lines)
+  // that reset-plan-type is about to remove. Only emitted when the
+  // admin passes force=true AND the orphan rows carry values / manual
+  // edits / approvals. metadata contains the full field-level content
+  // (fieldKey, value, aiRawValue, confidence, editedBy, etc.) so the
+  // data is recoverable from history even after the row is deleted.
+  // Distinct action so recovery queries can find snapshots without
+  // relying on a metadata.snapshot boolean flag.
+  CHECKLIST_ROWS_SNAPSHOTTED
 }
 
 enum ContactMethod {
