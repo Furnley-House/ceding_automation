@@ -262,6 +262,12 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
     extractionStatus,
     retrying,
     handleRetry,
+    // Refresh action for the timedOut banner: bumps the checklist
+    // refetch signal and refreshes the document list, in case the
+    // backend actually settled after the poll hook stopped. Reusing
+    // handleExtractionComplete so we don't drift from what happens
+    // on the real-completion path.
+    handleExtractionComplete,
     display.displayedPct,
     display.displayedLabel,
     display.displayedStageNum,
@@ -362,6 +368,7 @@ function renderExtractionBanner(
   extraction: ExtractionStatus,
   retrying: boolean,
   onRetry: () => void,
+  onRefresh: () => void,
   displayedPct: number | null,
   displayedLabel: string | null,
   displayedStageNum: string | null,
@@ -371,6 +378,40 @@ function renderExtractionBanner(
 ) {
   // No selection → nothing.
   if (!documentStatus) return null;
+
+  // H17 backstop hit: the /ai-status poll stopped without doc.status
+  // flipping to EXTRACTED/ERROR (either the 90s FINALISING_BACKSTOP_MS
+  // stall guard or the 15min MAX_TOTAL_MS hard cap fired in the hook).
+  // Kill the spinner and surface a plain message with a manual refresh
+  // — a timeout is not a completion, so we did NOT fire onComplete and
+  // the checklist may still be empty. Clicking Refresh re-runs the
+  // completion path (refreshDocuments + bump checklist refetch signal)
+  // in case the backend actually settled after the poller stopped.
+  //
+  // documentStatus !== "ERROR" guard: if the row is already ERROR by the
+  // time the backstop fires, this is a genuine failure — fall through
+  // to the red retry banner below, which is the correct UI.
+  if (extraction.timedOut && documentStatus !== "ERROR") {
+    return (
+      <div className="flex items-start gap-3 rounded-md border border-border bg-card p-3">
+        <CircleAlert className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-semibold text-foreground">
+            Extraction is taking longer than expected. Refresh to check.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onRefresh}
+          className="h-7 gap-1"
+        >
+          <RotateCcw className="h-3 w-3" />
+          Refresh
+        </Button>
+      </div>
+    );
+  }
 
   // Failed → red banner with retry. Trust the live status if available,
   // otherwise fall back to the row-level ERROR state.
