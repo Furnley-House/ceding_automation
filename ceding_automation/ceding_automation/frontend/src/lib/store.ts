@@ -7,6 +7,11 @@ interface User {
   email: string;
   name: string;
   role: "CA_TEAM" | "ADVISER" | "PARAPLANNER" | "ADMIN";
+  // Per-user permission for /ai-training. Optional in the type only so
+  // persisted sessions from before the flag existed keep parsing; the
+  // /me refetch on next mount rehydrates it. PermissionGuard treats
+  // undefined as "no access" (identical to false).
+  canAccessAiTraining?: boolean;
 }
 
 interface AuthState {

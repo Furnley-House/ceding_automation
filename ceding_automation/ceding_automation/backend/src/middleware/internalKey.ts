@@ -34,11 +34,14 @@ export function requireInternalKey(
 
   // Synthetic user so downstream audit-log writes have a valid userId FK.
   // Seeded by prisma/seed.ts with role=ADMIN so any requireRole check passes.
+  // canAccessAiTraining is intentionally false — the AI Training Hub is a
+  // human-only surface; BFF write-backs must never satisfy that permission.
   req.user = {
     id: SYSTEM_USER_ID,
     email: "ai-system@furnleyhouse.internal",
     name: "AI Extraction (system)",
     role: UserRole.ADMIN,
+    canAccessAiTraining: false,
   };
   next();
 }

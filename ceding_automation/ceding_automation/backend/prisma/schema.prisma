@@ -167,6 +167,12 @@ model User {
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
+  // Per-user access flag for /ai-training. Deliberately not a role because
+  // the grantees span CA_TEAM and ADMIN (see project note 2026-08-11).
+  // Toggled from UserManagementPanel by any ADMIN; every flip writes a
+  // UserAuditLog row so the grant history is reconstructable.
+  canAccessAiTraining Boolean @default(false)
+
   // RingCentral per-user OAuth — each user connects their own RC account
   rcRefreshToken         String?
   rcAccessToken          String?
@@ -185,6 +191,10 @@ model User {
   fundLineEdits    ChecklistFundLine[] @relation("FundLineEditedBy")
   comments         Comment[]
   notifications    Notification[]
+  // User-admin audit trail — same User appears on both sides. `Actor` is the
+  // ADMIN who made the change; `Target` is the user whose row was changed.
+  userAuditLogsAsActor  UserAuditLog[] @relation("UserAuditLogActor")
+  userAuditLogsAsTarget UserAuditLog[] @relation("UserAuditLogTarget")
 
   @@map("users")
 }
@@ -559,6 +569,39 @@ model AuditLog {
   @@index([userId])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────
+// USER-ADMIN AUDIT LOG
+// Separate from AuditLog because AuditLog.caseId is NOT NULL (every row
+// is case-scoped by design). This table records changes an ADMIN makes
+// to another user's role / status / canAccessAiTraining permission.
+// Write-only for now — no viewer UI in this pass; the two indexes below
+// anticipate a future admin viewer scoped by target or actor.
+// ─────────────────────────────────────────────
+
+enum UserAuditAction {
+  USER_PERMISSION_CHANGED
+  USER_ROLE_CHANGED
+  USER_STATUS_CHANGED
+}
+
+model UserAuditLog {
+  id           String          @id @default(cuid())
+  actorUserId  String
+  actor        User            @relation("UserAuditLogActor", fields: [actorUserId], references: [id])
+  targetUserId String
+  target       User            @relation("UserAuditLogTarget", fields: [targetUserId], references: [id])
+  action       UserAuditAction
+  field        String // "canAccessAiTraining" | "role" | "status" — kept as a string so future fields don't force an enum extension every time
+  oldValue     String? // stringified prior value; null when the record has no prior value (not expected for the current three fields, but the shape is future-proof)
+  newValue     String // stringified new value
+  metadata     Json?
+  createdAt    DateTime        @default(now())
+
+  @@index([targetUserId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@map("user_audit_logs")
 }
 
 // ─────────────────────────────────────────────
