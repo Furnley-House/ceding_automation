@@ -134,6 +134,19 @@ enum AuditAction {
   // Distinct action so recovery queries can find snapshots without
   // relying on a metadata.snapshot boolean flag.
   CHECKLIST_ROWS_SNAPSHOTTED
+  // H23: Checklist-seeding observability. SEEDING_ZERO_TEMPLATES fires
+  // when a case is created (Zoho import) or synced (/sync-from-zoho
+  // heal attempt) and the effective planType has no active
+  // checklist_templates today (FINAL_SALARY, BOND). Case is still
+  // created; the /sync-from-zoho path heals when planType is corrected.
+  // SEEDING_HEAL_ON_SYNC fires when /sync-from-zoho finds a zero-row
+  // case with active templates for the effective planType and seeds
+  // them. Together these close the silent-fail Messina landed in
+  // (FH-2026-000173, 2026-08-21: FINAL_SALARY at import → PENSION at
+  // 08:47 sync → seeding never re-ran → 3 extractions had no rows to
+  // land on). See docs/phase2/PHASE2_TASKS.md §H23.
+  SEEDING_ZERO_TEMPLATES
+  SEEDING_HEAL_ON_SYNC
 }
 
 enum ContactMethod {

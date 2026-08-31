@@ -259,7 +259,13 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
       include: { provider: true, createdBy: true, assignedTo: true, paraplanner: true },
     });
 
-    // 7. Initialise checklist fields from active templates
+    // 7. Initialise checklist fields from active templates.
+    //
+    // H23: seeded rows have aiExtractedAt=NULL, so the Ship #1 guard at
+    // caseHasExtractionRun (backend/src/routes/cases.ts, near the top)
+    // stays OFF until first extraction — the pre-extraction window is
+    // intentionally open to planType corrections. See the guard comment
+    // block for full rationale.
     const templates = await prisma.checklistTemplate.findMany({
       where: { planType: mapping.planType, isActive: true },
     });
@@ -267,6 +273,39 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
       await prisma.checklistField.createMany({
         data: templates.map((t) => ({ caseId: newCase.id, templateId: t.id })),
       });
+    } else {
+      // H23: Zoho task landed with a planType that has NO active
+      // checklist templates today (FINAL_SALARY, BOND). The case is
+      // still created — /sync-from-zoho carries a seed-if-empty heal
+      // that will run on the next successful sync if Zoho later
+      // corrects planType to a serviceable value (this is exactly
+      // Messina's FH-2026-000173 shape: FINAL_SALARY at 07:09 →
+      // PENSION at 08:47). Emit an audit + structured stdout warn so
+      // ops sees the work-we-can't-yet-do rather than a silent zero-
+      // row zombie (the failure mode that hid 5 BOND stage-1 cases
+      // for weeks in prod before H23 audit surfaced them).
+      await prisma.auditLog.create({
+        data: {
+          caseId: newCase.id,
+          userId: req.user!.id,
+          action: 'SEEDING_ZERO_TEMPLATES',
+          source: 'SYSTEM',
+          newValue: `Zoho import: planType "${mapping.planType}" has no active checklist templates; case created unseeded, will heal on next /sync-from-zoho if planType is corrected`,
+          metadata: {
+            planType: mapping.planType,
+            source: 'ZOHO_IMPORT',
+            zohoTaskId: taskId,
+          } as Prisma.InputJsonValue,
+        },
+      });
+      console.warn(
+        JSON.stringify({
+          evt: 'SEEDING_ZERO_TEMPLATES',
+          caseRef: newCase.caseRef,
+          planType: mapping.planType,
+          source: 'ZOHO_IMPORT',
+        }),
+      );
     }
 
     // 8. Audit log

@@ -1,0 +1,37 @@
+-- H23: Seeding audit actions for the crm.ts import + /sync-from-zoho
+-- heal paths.
+--
+-- Additive-only: extends the "AuditAction" enum with two new values
+-- used by the checklist-seeding observability layer.
+--
+--   SEEDING_ZERO_TEMPLATES — emitted at case creation (Zoho import via
+--     crm.ts, and — belt-and-braces — the /sync-from-zoho heal attempt)
+--     when the case's planType has zero active checklist_templates today
+--     (FINAL_SALARY, BOND). Case is still created; the case will heal
+--     on the next /sync-from-zoho if Zoho corrects planType to a
+--     serviceable value.
+--
+--   SEEDING_HEAL_ON_SYNC — emitted by /sync-from-zoho when it finds a
+--     zero-row case with active templates for the effective planType
+--     and seeds them. Idempotent by row-count check.
+--
+-- Safe under an unattended prisma migrate deploy: enum ADD VALUE is
+-- non-destructive, cannot fail on existing rows, and preserves ordinal
+-- stability of the pre-existing values. Rollback of the deployed
+-- backend image WITHOUT rolling this migration back is safe because no
+-- existing row can carry a value that was added by this migration
+-- (the writers are gated behind new code that only ships in the same
+-- image). Rolling this migration back is unnecessary in prod — it is
+-- accepted practice to leave additive enum values in place across a
+-- rollback (see docs/DEPLOYMENT.md §9).
+--
+-- Same shape and sequencing discipline as
+-- 20260805200000_add_locked_field_audit_actions (Ship #1): deploy the
+-- migration first, verify enum values appear (\dT+ "AuditAction"),
+-- then deploy the backend image containing the writers. Rolling both
+-- out in the same image would 500 on the first row insert because the
+-- Prisma client shipped with the image expects the new enum values to
+-- already exist in the DB.
+
+ALTER TYPE "AuditAction" ADD VALUE IF NOT EXISTS 'SEEDING_ZERO_TEMPLATES';
+ALTER TYPE "AuditAction" ADD VALUE IF NOT EXISTS 'SEEDING_HEAL_ON_SYNC';
