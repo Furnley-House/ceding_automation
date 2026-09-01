@@ -8,7 +8,7 @@
 //
 // Currently mirrored:
 //   provider_name → Case.providerId  (creates a Provider record if needed)
-//   plan_number   → Case.policyRef
+//   plan_number   → Case.policyRef      (first-fill only — see below)
 //   start_date    → Case.planStartDate
 //
 // Called from:
@@ -107,7 +107,25 @@ export async function mirrorChecklistToCase(
 
       case "plan_number": {
         const trimmed = value.trim();
-        if (caseRow.policyRef === trimmed) return { changed: false };
+        // Sticky, same rule as provider_name above: the Zoho TASK's
+        // Plan_reference is the source of truth for the case's policy ref
+        // (the CRM process is one ceding task per plan). We only populate
+        // when the case has nothing yet — i.e. the task carried no
+        // reference — and never overwrite a task-derived value with a
+        // document-derived one.
+        //
+        // Why this guard exists: this service updates the Case row
+        // directly, so it bypasses guardLockedFields(). That made it the
+        // only writer able to corrupt a LOCKED policyRef, after which the
+        // Zoho sync could no longer heal it back from the task. Observed
+        // on FH-2026-000074 — the task carried "106568" but the case was
+        // left permanently holding "5596422 & Scheme number: 106568", so
+        // every Policy_Ref:equals lookup against the Plans module missed,
+        // and Stage 9 export (which pushes Policy_Ref back to CRM) would
+        // have written that combined string onto the Plans record.
+        if (caseRow.policyRef !== null && caseRow.policyRef.trim() !== "") {
+          return { changed: false };
+        }
         await prisma.case.update({
           where: { id: caseId },
           data: { policyRef: trimmed },

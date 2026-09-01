@@ -486,8 +486,29 @@ model Transcript {
   case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
   source        String // "PALINDROME" | "MANUAL_PASTE" | "FILE_UPLOAD"
-  rawText       String  @db.Text
+  // Defaults to "" so the Palindrome submit path can create the row up front
+  // and fill the text in later, when the job completes. Manual-paste and
+  // file-upload callers still write it on create as before.
+  rawText       String  @default("") @db.Text
   ringCentralId String? // Recording ID from RingCentral
+
+  // ── Palindrome job tracking ────────────────────────────────
+  // Palindrome is a Creator-queue worker, not a request/response API: we
+  // enqueue a row, poke a trigger, and discover completion by re-reading
+  // that row. These columns are the handle on that job.
+  // See services/palindrome.ts for the full flow.
+  palindromeRecordId  String? // Zoho Creator row ID — the polling handle
+  palindromeStatus    String? // "Ready For Processing" | "Completed" | ...
+  palindromeCode      String? // Palindrome's own job reference
+  palindromeError     String? @db.Text // Palindrome_Error_Response / Error_Message
+  requestedAt         DateTime? // When we enqueued + triggered
+  completedAt         DateTime? // When we observed a terminal status
+  lastPolledAt        DateTime? // Backs off the poller after transient failures
+
+  // WorkDrive coordinates for this job.
+  workdriveRecordingFileId   String? // the MP3 we submitted
+  workdriveTranscriptsFolder String? // where Palindrome writes its output
+  workdriveTranscriptFileId  String? // the document we ingested back
 
   analysedAt    DateTime?
   fieldsUpdated Int? // Count of fields filled from this transcript
@@ -495,6 +516,8 @@ model Transcript {
   createdAt DateTime @default(now())
 
   @@index([caseId])
+  @@index([palindromeRecordId])
+  @@index([palindromeStatus])
   @@map("transcripts")
 }
 

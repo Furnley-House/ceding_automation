@@ -1,6 +1,7 @@
 // backend/src/routes/calls.ts
 import { Router, Request, Response } from "express";
 import axios from "axios";
+import multer from "multer";
 import { PrismaClient } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
 import {
@@ -11,6 +12,7 @@ import {
   getAccessToken,
   AGENT_PHONE,
   fetchCallTranscript,
+  findRecordingForSession,
   listCallRecordingsWithToken,
   transcribeRecordingWithToken,
   transcribeAudioBuffer,
@@ -24,9 +26,52 @@ import {
 } from "../services/workdrive";
 import { getUserRcExtensionId } from "../services/rcUserAuth";
 import { generateCallScript, analyseTranscript } from "../services/aiCallAssist";
+import {
+  ensureCaseCallFolders,
+  submitCallForTranscription,
+  getPalindromeJobStatus,
+  isPalindromeConfigured,
+  isPalindromeEnabled,
+  PalindromeNotConfiguredError,
+} from "../services/palindrome";
 
 const router = Router();
 const prisma = new PrismaClient();
+
+// Call recordings arrive as multipart from the browser and are streamed
+// straight to WorkDrive — same memory-storage pattern export.ts uses for the
+// Stage 9 workbook. 250MB because provider calls run long and RingCentral
+// exports are not aggressively compressed; a 15-minute call is ~6MB, so this
+// leaves generous headroom without letting an arbitrary file through.
+const AUDIO_MIME = [
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/wave",
+  "audio/mp4",
+  "audio/m4a",
+  "audio/x-m4a",
+  "video/mp4", // some recorders emit .mp4 containers for audio-only calls
+];
+const AUDIO_EXT_RE = /\.(mp3|wav|m4a|mp4)$/i;
+
+const recordingUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 250 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    // Accept on EITHER mime or extension: browsers are inconsistent about
+    // audio mime types, and a correct file with an odd mime shouldn't be
+    // rejected. Flag rejections on the request so the route can answer 415
+    // with a useful message rather than a generic "no file".
+    const ok =
+      AUDIO_MIME.includes(file.mimetype) || AUDIO_EXT_RE.test(file.originalname ?? "");
+    if (ok) return cb(null, true);
+    (req as Request & { audioRejected?: string }).audioRejected =
+      `${file.mimetype} (${file.originalname})`;
+    cb(null, false);
+  },
+});
 
 // ── RingCentral config probe ──────────────────────────────────────────────
 router.get("/:caseId/calls/rc-status", requireAuth, (_req: Request, res: Response) => {
@@ -306,14 +351,21 @@ router.get(
     try {
       const caseRecord = await prisma.case.findUnique({
         where: { id: req.params.caseId },
-        select: { clientZohoId: true },
+        select: { caseRef: true, clientZohoId: true },
       });
       if (!caseRecord) return res.status(404).json({ error: "Case not found" });
 
+      // List the case's "Ceding Call Recordings" subfolder, not the client
+      // folder root — that is where both the Transcribe and Save-to-WorkDrive
+      // paths file audio. Reading the root here would show an empty panel
+      // while recordings sat one level down.
       let folderId: string;
       try {
-        const resolved = await resolveCaseFolderId(caseRecord.clientZohoId);
-        folderId = resolved.folderId;
+        const folders = await ensureCaseCallFolders(
+          caseRecord.clientZohoId,
+          caseRecord.caseRef,
+        );
+        folderId = folders.recordingsFolderId;
       } catch (err) {
         if (err instanceof WorkDriveFolderResolutionError) {
           return res.status(422).json({
@@ -440,8 +492,40 @@ router.post(
       });
       const buffer = Buffer.from(audioResp.data as ArrayBuffer);
 
-      // 2. Upload to Zoho WorkDrive
-      const result = await uploadToWorkDrive(buffer, fileName, folderId, "audio/mpeg");
+      // 2. Upload to Zoho WorkDrive — into the client's "Ceding Call
+      //    Recordings" subfolder, the same place the Transcribe button files
+      //    recordings. Without this the two buttons put the same audio in
+      //    different places: this one used to fall through to the bare
+      //    ZOHO_WORKDRIVE_FOLDER_ID root.
+      //    An explicit folderId in the body still wins, so callers that know
+      //    exactly where they want the file keep control.
+      let targetFolderId = folderId;
+      let storedName = fileName;
+      const caseRecord = await prisma.case.findUnique({
+        where: { id: req.params.caseId },
+        select: { caseRef: true, clientZohoId: true },
+      });
+
+      if (caseRecord) {
+        if (!targetFolderId) {
+          const folders = await ensureCaseCallFolders(
+            caseRecord.clientZohoId,
+            caseRecord.caseRef,
+          );
+          targetFolderId = folders.recordingsFolderId;
+        }
+
+        // Prefix with the case ref. The recordings folder hangs off the
+        // CLIENT record folder, so one folder can serve several cases — and
+        // recordingWatcher.ts uses this prefix to decide which case a file
+        // belongs to. Without it, a client with more than one open case gets
+        // its recordings skipped as unattributable.
+        if (!storedName.toLowerCase().startsWith(caseRecord.caseRef.toLowerCase())) {
+          storedName = `${caseRecord.caseRef}_${storedName}`;
+        }
+      }
+
+      const result = await uploadToWorkDrive(buffer, storedName, targetFolderId, "audio/mpeg");
 
       // 3. Audit log
       await prisma.auditLog.create({
@@ -635,6 +719,764 @@ router.get(
       res.status(503).json({ error: msg });
     }
   }
+);
+
+// ══════════════════════════════════════════════════════════════════════════
+// PALINDROME TRANSCRIPTION
+// ══════════════════════════════════════════════════════════════════════════
+// Alternative to the Azure AI Speech path above (workdrive-transcribe /
+// rc-transcribe), gated by TRANSCRIPT_VIA_PALINDROME so both engines can
+// coexist and the switch is a single env change — same pattern as AI_VIA_BFF.
+//
+// Unlike Azure Speech this is asynchronous: submit returns a transcript row
+// in a pending state, and the caller polls /palindrome-status until the
+// Creator row reports a terminal Processing Status. See services/palindrome.ts
+// for why (Palindrome is a queue worker, not a request/response API).
+
+// ── Config probe (mirrors rc-status) ─────────────────────────────────────
+router.get(
+  "/:caseId/calls/palindrome-status",
+  requireAuth,
+  (_req: Request, res: Response) => {
+    res.json({
+      enabled: isPalindromeEnabled(),
+      configured: isPalindromeConfigured(),
+    });
+  }
+);
+
+// Shared tail for every route that hands a recording to Palindrome:
+// enqueue on Creator, park a pending Transcript row so the UI has something
+// to poll and the job survives a restart, and audit it. The poller
+// (services/palindromePoller.ts) takes over from here.
+async function submitAndTrack(args: {
+  caseId: string;
+  userId: string;
+  /** Signed-in user's email — labels their turns in the transcript. */
+  adviserEmail?: string;
+  recordingFileId: string;
+  recordingFileName: string;
+  recordingsFolderId: string;
+  transcriptsFolderId: string;
+}) {
+  const submitted = await submitCallForTranscription({
+    caseId: args.caseId,
+    recordingFileId: args.recordingFileId,
+    recordingFileName: args.recordingFileName,
+    recordingsFolderId: args.recordingsFolderId,
+    transcriptsFolderId: args.transcriptsFolderId,
+    adviserEmail: args.adviserEmail,
+  });
+
+  const transcript = await prisma.transcript.create({
+    data: {
+      caseId: args.caseId,
+      source: "PALINDROME",
+      rawText: "",
+      palindromeRecordId: submitted.creatorRecordId,
+      palindromeStatus: "Ready For Processing",
+      requestedAt: new Date(),
+      workdriveRecordingFileId: args.recordingFileId || null,
+      workdriveTranscriptsFolder: args.transcriptsFolderId,
+    },
+  });
+
+  await prisma.auditLog.create({
+    data: {
+      caseId: args.caseId,
+      userId: args.userId,
+      action: "TRANSCRIPT_UPLOADED",
+      source: "MANUAL",
+      newValue: `Submitted ${args.recordingFileName} to Palindrome`,
+      metadata: {
+        transcriptId: transcript.id,
+        creatorRecordId: submitted.creatorRecordId,
+        recordingsFolderId: args.recordingsFolderId,
+        transcriptsFolderId: args.transcriptsFolderId,
+        sharedWith: submitted.sharedWith,
+        shareExpiresOnUtc: submitted.shareExpiresOnUtc,
+      },
+    },
+  });
+
+  return { submitted, transcript };
+}
+
+// ── Upload a call recording from the browser ──────────────────────────────
+// The whole Stage 5 flow in one call: the CA picks the MP3 on the case, and
+//
+//   1. the client's WorkDrive folder is resolved from the linked Zoho Contact
+//   2. "Ceding Call Recordings" / "Ceding Call Transcripts" are created inside
+//      it if they aren't there yet (ensureCaseCallFolders is find-or-create)
+//   3. the audio is uploaded into the recordings folder
+//   4. Palindrome is triggered automatically — no second click
+//
+// The transcript comes back into "Ceding Call Transcripts" and the poller
+// stores it on the Transcript row, which the case screen reads through
+// GET /calls/transcripts.
+router.post(
+  "/:caseId/calls/upload-recording",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  recordingUpload.single("file"),
+  async (req: Request, res: Response) => {
+    if (!req.file) {
+      const rejected = (req as Request & { audioRejected?: string }).audioRejected;
+      if (rejected) {
+        return res.status(415).json({
+          error: `Unsupported file type: ${rejected}. Upload an audio recording (mp3, wav, m4a, mp4).`,
+        });
+      }
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const caseRecord = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      select: { id: true, caseRef: true, clientZohoId: true },
+    });
+    if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+    try {
+      // Folders are created here if absent — both of them, every time.
+      const folders = await ensureCaseCallFolders(
+        caseRecord.clientZohoId,
+        caseRecord.caseRef,
+      );
+
+      // Prefix with the case ref so a client folder holding calls from
+      // several cases stays readable, and collisions can't silently
+      // overwrite (override-name-exist is true on the WorkDrive upload).
+      const safeName = req.file.originalname.replace(/[\\/:*?"<>|]/g, "_");
+      const fileName = safeName.startsWith(caseRecord.caseRef)
+        ? safeName
+        : `${caseRecord.caseRef}_${safeName}`;
+
+      const uploaded = await uploadToWorkDrive(
+        req.file.buffer,
+        fileName,
+        folders.recordingsFolderId,
+        req.file.mimetype || "audio/mpeg",
+      );
+
+      const { submitted, transcript } = await submitAndTrack({
+        caseId: caseRecord.id,
+        userId: req.user!.id,
+        adviserEmail: req.user!.email,
+        recordingFileId: uploaded.id,
+        recordingFileName: uploaded.name,
+        recordingsFolderId: folders.recordingsFolderId,
+        transcriptsFolderId: folders.transcriptsFolderId,
+      });
+
+      res.status(202).json({
+        transcriptId: transcript.id,
+        creatorRecordId: submitted.creatorRecordId,
+        status: "Ready For Processing",
+        recordingFileId: uploaded.id,
+        recordingFileName: uploaded.name,
+        recordingPermalink: uploaded.permalink ?? null,
+        folders,
+      });
+    } catch (err: unknown) {
+      if (err instanceof PalindromeNotConfiguredError) {
+        return res.status(503).json({ error: err.message });
+      }
+      if (err instanceof WorkDriveFolderResolutionError) {
+        return res.status(422).json({
+          error: "WorkDrive folder not resolvable",
+          code: err.code,
+          contactZohoId: err.contactZohoId,
+          message: err.message,
+        });
+      }
+      const msg = err instanceof Error ? err.message : "Upload failed";
+      console.error("[calls] upload-recording error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  },
+);
+
+// ── Auto-submit after a RingCentral call ends ─────────────────────────────
+// Called by the call workspace when rc-call-end-notify fires, so the CA never
+// has to upload anything for a call placed through the app.
+//
+// The one wrinkle is timing: RingCentral finalises recordings asynchronously,
+// so for the first several seconds after hang-up the call log has the call but
+// no recording. Rather than block the request or spin server-side, we answer
+// 202 { status: "pending" } and let the caller ask again. That keeps the state
+// visible to the CA ("waiting for the recording…") instead of hiding it in a
+// retry loop that dies with the process.
+//
+// Idempotent per session: if a transcript row already exists for this
+// telephonySessionId we return it rather than submitting the call twice —
+// polling would otherwise create a job on every attempt.
+router.post(
+  "/:caseId/calls/rc-auto-submit",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const { telephonySessionId } = req.body as { telephonySessionId?: string };
+    if (!telephonySessionId) {
+      return res.status(400).json({ error: "telephonySessionId is required" });
+    }
+    if (!isRingCentralConfigured()) {
+      return res.status(503).json({ error: "RingCentral not configured" });
+    }
+
+    const caseRecord = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      select: { id: true, caseRef: true, clientZohoId: true },
+    });
+    if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+    // Already submitted for this call?
+    const existing = await prisma.transcript.findFirst({
+      where: { caseId: caseRecord.id, ringCentralId: telephonySessionId },
+      orderBy: { createdAt: "desc" },
+    });
+    if (existing) {
+      return res.json({
+        status: "already-submitted",
+        transcriptId: existing.id,
+        palindromeStatus: existing.palindromeStatus,
+        hasText: (existing.rawText ?? "").length > 0,
+      });
+    }
+
+    try {
+      const recording = await findRecordingForSession(telephonySessionId);
+      if (!recording) {
+        // Normal for the first ~10-60s after hang-up.
+        return res.status(202).json({
+          status: "pending",
+          message: "RingCentral has not published the recording yet — retry shortly",
+        });
+      }
+
+      const folders = await ensureCaseCallFolders(
+        caseRecord.clientZohoId,
+        caseRecord.caseRef,
+      );
+
+      // Pull the audio from RC with the admin JWT (works for any extension's
+      // recordings) and push it into the client's recordings folder.
+      const token = await getAccessToken();
+      const audio = await axios.get(recording.contentUri, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: "arraybuffer",
+      });
+
+      const stamp = (recording.startTime ?? new Date().toISOString())
+        .replace(/[:.]/g, "-")
+        .slice(0, 19);
+      const fileName = `${caseRecord.caseRef}_call_${stamp}.mp3`;
+
+      const uploaded = await uploadToWorkDrive(
+        Buffer.from(audio.data as ArrayBuffer),
+        fileName,
+        folders.recordingsFolderId,
+        "audio/mpeg",
+      );
+
+      const { submitted, transcript } = await submitAndTrack({
+        caseId: caseRecord.id,
+        userId: req.user!.id,
+        adviserEmail: req.user!.email,
+        recordingFileId: uploaded.id,
+        recordingFileName: uploaded.name,
+        recordingsFolderId: folders.recordingsFolderId,
+        transcriptsFolderId: folders.transcriptsFolderId,
+      });
+
+      // Bind the row to the call so a repeat poll is recognised as a
+      // duplicate rather than submitting again.
+      await prisma.transcript.update({
+        where: { id: transcript.id },
+        data: { ringCentralId: telephonySessionId },
+      });
+
+      res.status(202).json({
+        status: "submitted",
+        transcriptId: transcript.id,
+        creatorRecordId: submitted.creatorRecordId,
+        recordingFileId: uploaded.id,
+        recordingFileName: uploaded.name,
+        durationSeconds: recording.durationSeconds,
+        folders,
+      });
+    } catch (err: unknown) {
+      if (err instanceof PalindromeNotConfiguredError) {
+        return res.status(503).json({ error: err.message });
+      }
+      if (err instanceof WorkDriveFolderResolutionError) {
+        return res.status(422).json({
+          error: "WorkDrive folder not resolvable",
+          code: err.code,
+          contactZohoId: err.contactZohoId,
+          message: err.message,
+        });
+      }
+      const msg = err instanceof Error ? err.message : "Auto-submit failed";
+      console.error("[calls] rc-auto-submit error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  },
+);
+
+// ── Submit a recording already in WorkDrive or RingCentral ────────────────
+// Two ways in:
+//   { workdriveFileId, fileName }  → an MP3 already sitting in WorkDrive
+//   { contentUri, fileName }       → pull it from RingCentral first
+//
+// Either way the file ends up in the case's own recordings subfolder, which
+// is the only folder shared with Palindrome's service account.
+router.post(
+  "/:caseId/calls/palindrome-submit",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const { workdriveFileId, contentUri, fileName, rcToken: userToken } = req.body as {
+      workdriveFileId?: string;
+      contentUri?: string;
+      fileName?: string;
+      rcToken?: string;
+    };
+
+    if (!workdriveFileId && !contentUri) {
+      return res
+        .status(400)
+        .json({ error: "Provide either workdriveFileId or contentUri" });
+    }
+
+    const caseRecord = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      select: { id: true, caseRef: true, clientZohoId: true },
+    });
+    if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+    try {
+      // 1. Per-case Recordings + Transcripts subfolders. Idempotent, so
+      //    re-submitting for a case reuses the folders it already has.
+      const folders = await ensureCaseCallFolders(
+        caseRecord.clientZohoId,
+        caseRecord.caseRef,
+      );
+
+      // 2. Make sure the audio is in the recordings subfolder.
+      let recordingFileId = workdriveFileId ?? "";
+      let recordingFileName =
+        fileName ?? `${caseRecord.caseRef}_call_${Date.now()}.mp3`;
+
+      if (!recordingFileId && contentUri) {
+        // Pull the MP3 from RingCentral, then push it to WorkDrive. Admin JWT
+        // works for any extension's recordings; fall back to a user token.
+        let bearerToken: string;
+        if (isRingCentralConfigured()) {
+          bearerToken = await getAccessToken();
+        } else if (userToken) {
+          bearerToken = userToken;
+        } else {
+          return res.status(503).json({ error: "RingCentral not configured" });
+        }
+        const audioResp = await axios.get(contentUri, {
+          headers: { Authorization: `Bearer ${bearerToken}` },
+          responseType: "arraybuffer",
+        });
+        const uploaded = await uploadToWorkDrive(
+          Buffer.from(audioResp.data as ArrayBuffer),
+          recordingFileName,
+          folders.recordingsFolderId,
+          "audio/mpeg",
+        );
+        recordingFileId = uploaded.id;
+        recordingFileName = uploaded.name;
+      }
+
+      // 3. Share → enqueue on the Creator form → poke Palindrome.
+      const submitted = await submitCallForTranscription({
+        caseId: caseRecord.id,
+        recordingFileId,
+        recordingFileName,
+        recordingsFolderId: folders.recordingsFolderId,
+        transcriptsFolderId: folders.transcriptsFolderId,
+        adviserEmail: req.user!.email,
+      });
+
+      // 4. Park a pending transcript row so the UI has something to poll and
+      //    the job survives a server restart.
+      const transcript = await prisma.transcript.create({
+        data: {
+          caseId: caseRecord.id,
+          source: "PALINDROME",
+          rawText: "",
+          palindromeRecordId: submitted.creatorRecordId,
+          palindromeStatus: "Ready For Processing",
+          requestedAt: new Date(),
+          workdriveRecordingFileId: recordingFileId || null,
+          workdriveTranscriptsFolder: folders.transcriptsFolderId,
+        },
+      });
+
+      await prisma.auditLog.create({
+        data: {
+          caseId: caseRecord.id,
+          userId: req.user!.id,
+          action: "TRANSCRIPT_UPLOADED",
+          source: "MANUAL",
+          newValue: `Submitted ${recordingFileName} to Palindrome`,
+          metadata: {
+            transcriptId: transcript.id,
+            creatorRecordId: submitted.creatorRecordId,
+            recordingsFolderId: folders.recordingsFolderId,
+            transcriptsFolderId: folders.transcriptsFolderId,
+            sharedWith: submitted.sharedWith,
+            shareExpiresOnUtc: submitted.shareExpiresOnUtc,
+          },
+        },
+      });
+
+      res.status(202).json({
+        transcriptId: transcript.id,
+        creatorRecordId: submitted.creatorRecordId,
+        status: "Ready For Processing",
+        recordingFileId,
+        recordingFileName,
+        folders,
+        sharedWith: submitted.sharedWith,
+        shareExpiresOnUtc: submitted.shareExpiresOnUtc,
+        triggerResponse: submitted.triggerResponse,
+      });
+    } catch (err: unknown) {
+      if (err instanceof PalindromeNotConfiguredError) {
+        return res.status(503).json({ error: err.message });
+      }
+      if (err instanceof WorkDriveFolderResolutionError) {
+        return res.status(422).json({
+          error: "WorkDrive folder not resolvable",
+          code: err.code,
+          contactZohoId: err.contactZohoId,
+          message: err.message,
+        });
+      }
+      const msg = err instanceof Error ? err.message : "Palindrome submit failed";
+      console.error("[calls] palindrome-submit error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  }
+);
+
+// ── Poll one submitted job ───────────────────────────────────────────────
+// Re-reads the Creator row and mirrors what it says onto our transcript row.
+// Terminal states settle completedAt so the UI can stop polling.
+router.get(
+  "/:caseId/calls/palindrome-job/:transcriptId",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    res.set("Cache-Control", "no-store");
+
+    const transcript = await prisma.transcript.findUnique({
+      where: { id: req.params.transcriptId },
+    });
+    if (!transcript || transcript.caseId !== req.params.caseId) {
+      return res.status(404).json({ error: "Transcript not found" });
+    }
+    if (!transcript.palindromeRecordId) {
+      return res
+        .status(409)
+        .json({ error: "This transcript was not submitted to Palindrome" });
+    }
+
+    try {
+      const status = await getPalindromeJobStatus(transcript.palindromeRecordId);
+
+      // "Completed" is what the meeting pipeline's report shows on success.
+      // Anything starting with "Error" is Palindrome's failure vocabulary.
+      const raw = status.processingStatus ?? "";
+      const isDone = /^completed$/i.test(raw.trim());
+      const isFailed = /^error/i.test(raw.trim()) || Boolean(status.palindromeError);
+
+      const updated = await prisma.transcript.update({
+        where: { id: transcript.id },
+        data: {
+          palindromeStatus: status.processingStatus ?? transcript.palindromeStatus,
+          palindromeCode: status.palindromeCode ?? transcript.palindromeCode,
+          palindromeError:
+            status.palindromeError ?? status.errorMessage ?? transcript.palindromeError,
+          lastPolledAt: new Date(),
+          ...(isDone || isFailed ? { completedAt: new Date() } : {}),
+        },
+      });
+
+      res.json({
+        transcriptId: updated.id,
+        processingStatus: updated.palindromeStatus,
+        palindromeCode: updated.palindromeCode,
+        palindromeError: updated.palindromeError,
+        done: isDone,
+        failed: isFailed,
+        hasText: (updated.rawText ?? "").length > 0,
+        completedAt: updated.completedAt,
+        // Echoed so the spike can see exactly which fields Creator returned
+        // and under which spellings — drives the ingestion work that follows.
+        creatorRow: status.raw,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Status check failed";
+      console.error("[calls] palindrome-job error:", msg);
+      res.status(502).json({ error: msg });
+    }
+  }
+);
+
+// ── List whatever Palindrome has written back ────────────────────────────
+// Deliberately unfiltered by extension: the whole point of the first live run
+// is to discover what format the artefact arrives in (.txt / .docx / .pdf),
+// which decides which parser the ingestion step needs.
+router.get(
+  "/:caseId/calls/palindrome-output",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    res.set("Cache-Control", "no-store");
+
+    const caseRecord = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      select: { caseRef: true, clientZohoId: true },
+    });
+    if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+    try {
+      const folders = await ensureCaseCallFolders(
+        caseRecord.clientZohoId,
+        caseRecord.caseRef,
+      );
+      const files = await listWorkDriveFiles(folders.transcriptsFolderId, {
+        extensions: [],
+      });
+      res.json({ folderId: folders.transcriptsFolderId, files });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to list output";
+      console.error("[calls] palindrome-output error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  }
+);
+
+// ── Stored transcripts ────────────────────────────────────────────────────
+// The Palindrome path stores its transcript on the Transcript row rather than
+// handing it straight to the UI, so these endpoints let the case screen list
+// what exists, read one, run extraction against it, and commit the results.
+//
+// Deliberately split analyse (read-only, returns candidates) from apply
+// (writes to the checklist). Extraction is probabilistic and the CA must see
+// what it proposes before any field changes — same stance as the AI document
+// pipeline.
+
+router.get(
+  "/:caseId/calls/transcripts",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    res.set("Cache-Control", "no-store");
+    const rows = await prisma.transcript.findMany({
+      where: { caseId: req.params.caseId },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        source: true,
+        createdAt: true,
+        requestedAt: true,
+        completedAt: true,
+        analysedAt: true,
+        fieldsUpdated: true,
+        palindromeStatus: true,
+        palindromeError: true,
+        workdriveTranscriptFileId: true,
+        rawText: true,
+      },
+    });
+
+    // rawText can be 20k+ chars; the list only needs to know whether it
+    // landed and how big it is.
+    res.json(
+      rows.map(({ rawText, ...r }) => ({
+        ...r,
+        hasText: rawText.length > 0,
+        chars: rawText.length,
+      })),
+    );
+  },
+);
+
+router.get(
+  "/:caseId/calls/transcripts/:transcriptId",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    res.set("Cache-Control", "no-store");
+    const row = await prisma.transcript.findUnique({
+      where: { id: req.params.transcriptId },
+    });
+    if (!row || row.caseId !== req.params.caseId) {
+      return res.status(404).json({ error: "Transcript not found" });
+    }
+    res.json(row);
+  },
+);
+
+// Build the extraction targets from the case's own checklist: the fields a
+// call is actually meant to fill. Approved and manually-overridden rows are
+// excluded — the CA rang the provider about the gaps, not the settled values.
+async function buildTargetsForCase(caseId: string) {
+  const fields = await prisma.checklistField.findMany({
+    where: {
+      caseId,
+      isApproved: false,
+      isManuallyOverridden: false,
+      OR: [
+        { confidence: { in: ["MISSING", "LOW"] } },
+        { value: null },
+        { value: "" },
+      ],
+    },
+    include: { template: true },
+    orderBy: { template: { displayOrder: "asc" } },
+  });
+
+  return fields.map((f) => ({
+    key: f.template.fieldKey,
+    label: f.template.fieldName,
+    type: f.template.fieldType,
+    hint: f.template.sectionName,
+  }));
+}
+
+router.post(
+  "/:caseId/calls/transcripts/:transcriptId/analyse",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const row = await prisma.transcript.findUnique({
+      where: { id: req.params.transcriptId },
+    });
+    if (!row || row.caseId !== req.params.caseId) {
+      return res.status(404).json({ error: "Transcript not found" });
+    }
+    if (!row.rawText || row.rawText.length < 20) {
+      return res.status(409).json({
+        error: "Transcript has no text yet",
+        palindromeStatus: row.palindromeStatus,
+      });
+    }
+
+    const caseRecord = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      include: { provider: { select: { name: true } } },
+    });
+    if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+    try {
+      const targets = await buildTargetsForCase(req.params.caseId);
+      const result = await analyseTranscript({
+        transcript: row.rawText,
+        targets,
+        clientName: caseRecord.clientName,
+        providerName: caseRecord.provider?.name ?? "Provider",
+        planNumber: caseRecord.policyRef ?? "",
+      });
+
+      res.json({
+        transcriptId: row.id,
+        targetsConsidered: targets.length,
+        ...result,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Analysis failed";
+      console.error("[calls] transcript analyse error:", msg);
+      res.status(500).json({ error: msg });
+    }
+  },
+);
+
+router.post(
+  "/:caseId/calls/transcripts/:transcriptId/apply",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  async (req: Request, res: Response) => {
+    const { acceptedFields, summary } = req.body as {
+      acceptedFields?: Array<{
+        fieldKey: string;
+        value: string;
+        confidence: "HIGH" | "MEDIUM" | "LOW";
+        evidenceQuote?: string;
+      }>;
+      summary?: string;
+    };
+
+    const row = await prisma.transcript.findUnique({
+      where: { id: req.params.transcriptId },
+    });
+    if (!row || row.caseId !== req.params.caseId) {
+      return res.status(404).json({ error: "Transcript not found" });
+    }
+
+    // Scope the (caseId, fieldKey) lookup by the case's current planType —
+    // same fix as checklist.ts and aiBffApply.ts. A case whose planType was
+    // changed can carry orphaned rows keyed to the old type.
+    const caseRow = await prisma.case.findUnique({
+      where: { id: req.params.caseId },
+      select: { planType: true },
+    });
+    if (!caseRow) return res.status(404).json({ error: "Case not found" });
+
+    let updated = 0;
+    for (const f of acceptedFields ?? []) {
+      const field = await prisma.checklistField.findFirst({
+        where: {
+          caseId: req.params.caseId,
+          template: { fieldKey: f.fieldKey, planType: caseRow.planType },
+        },
+      });
+      if (!field) continue;
+      // Never overwrite a human decision.
+      if (field.isManuallyOverridden || field.isApproved) continue;
+
+      await prisma.checklistField.update({
+        where: { id: field.id },
+        data: {
+          value: f.value,
+          confidence: f.confidence,
+          status: "AI_EXTRACTED",
+          fromTranscript: true,
+          transcriptId: row.id,
+          sourceSection: "Call transcript",
+          sourceQuote: f.evidenceQuote?.slice(0, 500) ?? null,
+        },
+      });
+      updated++;
+    }
+
+    await prisma.transcript.update({
+      where: { id: row.id },
+      data: { analysedAt: new Date(), fieldsUpdated: updated },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.caseId,
+        userId: req.user!.id,
+        action: "TRANSCRIPT_ANALYSED",
+        source: "AI",
+        newValue: `${updated} field(s) updated from call transcript`,
+        metadata: {
+          transcriptId: row.id,
+          transcriptSource: row.source,
+          summary: summary ?? null,
+          proposed: (acceptedFields ?? []).length,
+          applied: updated,
+        },
+      },
+    });
+
+    res.json({ transcriptId: row.id, fieldsUpdated: updated });
+  },
 );
 
 export { router as callRoutes };

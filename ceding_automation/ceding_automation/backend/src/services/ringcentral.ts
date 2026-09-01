@@ -476,6 +476,59 @@ export async function transcribeRecording(contentUri: string): Promise<{ transcr
 // ── Fetch transcript for a completed call via RC AI Speech-to-Text ────────────
 // Steps: call-log lookup → recording contentUri → RC AI STT job → poll for result.
 // Returns transcript text, or null if the recording isn't ready / plan lacks AI features.
+/**
+ * Resolve the recording attached to a finished call.
+ *
+ * Returns null when RingCentral has no recording for the session *yet* —
+ * which is the normal case for the first several seconds after a call ends,
+ * because RC finalises the audio asynchronously. Callers should treat null as
+ * "not ready, ask again" rather than "no recording exists", and give up only
+ * after a bounded number of attempts.
+ *
+ * Split out of fetchCallTranscript so the Palindrome path can reuse the
+ * lookup without also submitting to RingCentral's own speech-to-text.
+ */
+export async function findRecordingForSession(telephonySessionId: string): Promise<{
+  contentUri: string;
+  recordingId: string | null;
+  durationSeconds: number | null;
+  startTime: string | null;
+} | null> {
+  if (!isRingCentralConfigured()) throw new Error('RingCentral not configured');
+  const token = await getAccessToken();
+
+  try {
+    const { data } = await axios.get(
+      `${RC_SERVER}/restapi/v1.0/account/~/extension/~/call-log`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { telephonySessionId, showRecording: true, type: 'Voice' },
+      },
+    );
+    const record = ((data as Record<string, unknown>)?.records as
+      | Record<string, unknown>[]
+      | undefined)?.[0];
+    const recording = record?.recording as Record<string, unknown> | undefined;
+    if (!recording?.contentUri) return null;
+
+    return {
+      contentUri: String(recording.contentUri),
+      recordingId: recording.id ? String(recording.id) : null,
+      durationSeconds:
+        typeof record?.duration === 'number' ? (record.duration as number) : null,
+      startTime: record?.startTime ? String(record.startTime) : null,
+    };
+  } catch (err) {
+    // A call-log miss is indistinguishable from "not indexed yet" at this
+    // level, so surface it the same way and let the caller retry.
+    console.warn(
+      `[ringcentral] call-log lookup failed for session ${telephonySessionId}:`,
+      (err as Error).message,
+    );
+    return null;
+  }
+}
+
 export async function fetchCallTranscript(telephonySessionId: string): Promise<{
   transcript: string | null;
   hasRecording: boolean;
