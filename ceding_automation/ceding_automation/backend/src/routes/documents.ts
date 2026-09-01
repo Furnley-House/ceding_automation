@@ -306,6 +306,30 @@ router.post(
       where: { caseId: req.params.caseId, status: "UPLOADED" },
       select: { id: true },
     });
+    if (pending.length === 0) {
+      return res.json({ count: 0, documentIds: [] });
+    }
+    // H23: seed the checklist once, synchronously, BEFORE flipping any
+    // document to PROCESSING. If planType has no active templates today
+    // (FINAL_SALARY, BOND), refuse the whole batch with 422 — otherwise
+    // the docs would flip to PROCESSING against a zero-row checklist
+    // (Messina shape).
+    try {
+      await ensureCaseSeededForExtraction(
+        req.params.caseId,
+        req.user!.id,
+        pending[0].id,
+      );
+    } catch (err) {
+      if (err instanceof PlanTypeNotImplementedError) {
+        return res.status(err.status).json({
+          error: err.message,
+          code: err.code,
+          planType: err.planType,
+        });
+      }
+      throw err;
+    }
     for (const doc of pending) {
       await prisma.document.update({
         where: { id: doc.id },
@@ -325,6 +349,27 @@ router.post(
   async (req: Request, res: Response) => {
     const doc = await prisma.document.findUnique({ where: { id: req.params.docId } });
     if (!doc) return res.status(404).json({ error: "Document not found" });
+
+    // H23: same shape as extract-pending — refuse with 422 BEFORE
+    // flipping the doc to PROCESSING if planType has no active
+    // templates. The sparkle-icon re-extract path (FH-2026-000115)
+    // hits this route.
+    try {
+      await ensureCaseSeededForExtraction(
+        req.params.caseId,
+        req.user!.id,
+        doc.id,
+      );
+    } catch (err) {
+      if (err instanceof PlanTypeNotImplementedError) {
+        return res.status(err.status).json({
+          error: err.message,
+          code: err.code,
+          planType: err.planType,
+        });
+      }
+      throw err;
+    }
 
     await prisma.document.update({
       where: { id: doc.id },
@@ -404,10 +449,121 @@ router.post(
   }
 );
 
+// ── H23 (Nishant's design): seed at extraction-submit ───────────────────
+//
+// Called by both extract routes BEFORE they call submitOrTrigger, and
+// defensively from the top of submitOrTrigger itself (idempotent, so
+// a double-invocation is a no-op).
+//
+// Three outcomes:
+//   (a) Case already seeded (extractionSubmittedAt IS NOT NULL) → no-op.
+//   (b) planType has no active templates today (FINAL_SALARY, BOND) →
+//       throw PlanTypeNotImplementedError. Routes translate to 422; the
+//       CA sees "planType X is not implemented yet" and knows to
+//       contact admin. This is the earliest surface at which we can
+//       refuse a case whose planType cannot be extracted — silently
+//       processing against zero rows was exactly Messina's failure
+//       mode (FH-2026-000173).
+//   (c) planType has active templates and case is not yet seeded → seed
+//       + stamp extractionSubmittedAt = now(), atomically.
+//
+// The atomic seed + stamp arms Ship #1's guard at submit time (the
+// guard predicate at cases.ts:64-70 now checks extractionSubmittedAt
+// as well as aiExtractedAt). After this function returns, any
+// concurrent Zoho sync that tries to change planType hits the guard.
+// This closes the seed-vs-guard race the previous seed-at-creation
+// design was subject to (see the guard's comment for full context).
+class PlanTypeNotImplementedError extends Error {
+  code = "PLAN_TYPE_NOT_IMPLEMENTED" as const;
+  status = 422;
+  constructor(public planType: string) {
+    super(
+      `Plan type "${planType}" is not implemented yet. Contact an admin to request template rollout.`,
+    );
+    this.name = "PlanTypeNotImplementedError";
+  }
+}
+
+async function ensureCaseSeededForExtraction(
+  caseId: string,
+  userId: string,
+  triggerDocId: string | null,
+): Promise<void> {
+  const caseRecord = await prisma.case.findUnique({
+    where: { id: caseId },
+    select: {
+      id: true,
+      caseRef: true,
+      planType: true,
+      extractionSubmittedAt: true,
+    },
+  });
+  if (!caseRecord) throw new Error(`Case ${caseId} not found`);
+
+  // Already seeded — nothing to do. Every callback into this function
+  // (defensive re-check inside submitOrTrigger, bulk extract-pending
+  // looping per doc) short-circuits here after the first pass.
+  if (caseRecord.extractionSubmittedAt !== null) return;
+
+  const templates = await prisma.checklistTemplate.findMany({
+    where: { planType: caseRecord.planType, isActive: true },
+    select: { id: true },
+  });
+
+  if (templates.length === 0) {
+    await prisma.auditLog.create({
+      data: {
+        caseId,
+        userId,
+        action: "SEEDING_ZERO_TEMPLATES",
+        source: "SYSTEM",
+        newValue: `Extract-submit blocked: planType "${caseRecord.planType}" has no active checklist templates`,
+        metadata: {
+          planType: caseRecord.planType,
+          source: "EXTRACT_SUBMIT_BLOCKED",
+          documentId: triggerDocId,
+        } as Prisma.InputJsonValue,
+      },
+    });
+    console.warn(
+      JSON.stringify({
+        evt: "SEEDING_ZERO_TEMPLATES",
+        caseRef: caseRecord.caseRef,
+        planType: caseRecord.planType,
+        source: "EXTRACT_SUBMIT_BLOCKED",
+      }),
+    );
+    throw new PlanTypeNotImplementedError(caseRecord.planType);
+  }
+
+  // Atomic seed + arm. skipDuplicates handles the extract-pending bulk
+  // path (idempotent across the loop) and the improbable concurrent-
+  // submit race. The extractionSubmittedAt write inside the same
+  // transaction arms Ship #1's guard against concurrent planType
+  // changes for the rest of the case's lifetime.
+  await prisma.$transaction([
+    prisma.checklistField.createMany({
+      data: templates.map((t) => ({ caseId, templateId: t.id })),
+      skipDuplicates: true,
+    }),
+    prisma.case.update({
+      where: { id: caseId },
+      data: { extractionSubmittedAt: new Date() },
+    }),
+  ]);
+}
+
 // ── Internal: route to BFF or legacy extractor based on feature flag ────
 // Single dispatch point so both upload and manual-re-trigger paths agree on
 // which AI backend is in use. Flag-flip in env is the only knob.
 async function submitOrTrigger(docId: string, caseId: string, userId: string): Promise<void> {
+  // H23 defensive re-check. Routes are expected to have called
+  // ensureCaseSeededForExtraction synchronously already (so 422s reach
+  // the user), but this defensive call means any future internal caller
+  // (retry path, admin re-run) can't accidentally skip the seed. When
+  // the routes have already seeded, this is a single findUnique.
+  await ensureCaseSeededForExtraction(caseId, userId, docId);
+
   if (process.env.AI_VIA_BFF !== "true") {
     await triggerExtraction(docId, caseId, userId);
     return;

@@ -61,32 +61,41 @@ function isLockedField(name: string): name is LockedField {
   return (LOCKED_FIELDS as readonly string[]).includes(name);
 }
 
-// H23: predicate is `aiExtractedAt IS NOT NULL` and NOT `id IS NOT NULL`.
-// The pre-extraction window is intentionally open to planType corrections
-// (Messina FH-2026-000173, 2026-08-21: Zoho corrected FINAL_SALARY →
-// PENSION 98 min after import; that correction MUST NOT be blocked).
-// Seeding creates rows with aiExtractedAt=NULL, so a case that just got
-// seed-if-empty'd at /sync-from-zoho (see the H23 block near the end of
-// that handler) is still eligible for further planType corrections until
-// the first extraction lands a value. If a future change wants "seeded =
-// protected" semantics, switching this predicate to a plain
-// findFirst({caseId}) reverses the current design intent: crm.ts seeds
-// every Zoho-imported case at creation (except the FINAL_SALARY / BOND
-// zero-template branch), so under `id IS NOT NULL` the guard would fire
-// immediately after case creation and Zoho's later planType correction
-// — the mechanism that would have healed Messina — would be blocked at
-// guardLockedFields (which runs BEFORE the /sync-from-zoho transaction,
-// so it sees the freshly-seeded rows from the import that happened
-// minutes to hours earlier). Don't do that. If pre-extraction planType
-// stability becomes a product requirement, use a separate mechanism
-// (e.g. a `planTypeConfirmedAt` column) rather than repurposing this
-// predicate.
+// H23 (Nishant's design): guard fires once EITHER of two signals is set —
+//   (a) any checklist_field has aiExtractedAt IS NOT NULL (a value has
+//       been landed by extraction), OR
+//   (b) case.extractionSubmittedAt IS NOT NULL (the CA has submitted
+//       for extraction; the seed happens at the same site, so rows now
+//       exist and their planType is committed to whatever it was at
+//       submit time).
+// The (b) signal is what closes the race window that used to exist
+// between "seed" and "first extracted value". Under the old design
+// (seed-at-creation), guard fired only on (a); a Zoho sync between
+// submit and first-extracted-value could still flip planType and
+// re-key extraction values against wrong-type rows (FH-098 shape,
+// smaller-window version). Under Nishant's design, seed and
+// extractionSubmittedAt are set together in a transaction at the top
+// of documents.ts ensureCaseSeededForExtraction, so (b) arms the
+// guard at the earliest moment consistent with the design intent
+// (planType stays mutable through stages 1-3, locks at Stage 4 submit).
+//
+// The pre-extraction window (stages 1-3) remains intentionally open to
+// planType corrections — Messina FH-2026-000173 (2026-08-21: FINAL_SALARY
+// → PENSION at +98 min) is the reference case. During that window BOTH
+// signals are NULL, guard returns false, sync/manual PATCH pass through.
 async function caseHasExtractionRun(caseId: string): Promise<boolean> {
-  const row = await prisma.checklistField.findFirst({
+  const caseRow = await prisma.case.findUnique({
+    where: { id: caseId },
+    select: { extractionSubmittedAt: true },
+  });
+  if (caseRow?.extractionSubmittedAt !== null && caseRow?.extractionSubmittedAt !== undefined) {
+    return true;
+  }
+  const fieldRow = await prisma.checklistField.findFirst({
     where: { caseId, aiExtractedAt: { not: null } },
     select: { id: true },
   });
-  return row !== null;
+  return fieldRow !== null;
 }
 
 interface BlockedChange {
@@ -394,29 +403,17 @@ router.post("/", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Req
     include: { provider: true, createdBy: true, assignedTo: true },
   });
 
-  // Initialise checklist fields from template.
-  //
-  // H23: seeded rows have aiExtractedAt=NULL, so the Ship #1 guard at
-  // caseHasExtractionRun (this file, near the top) stays OFF until first
-  // extraction — pre-extraction planType corrections remain unblocked.
-  // No `else` branch on templates.length===0 here: manual create is
-  // already gated by planTypeHasTemplates at ~line 339 (returns 422
-  // before this block is reached), so a zero-template result is
-  // unreachable on this path. Contrast crm.ts's Zoho-import seed which
-  // does emit an audit + warn on the zero-template branch — Zoho
-  // intake is intentionally not gated (see H23 tracker entry).
-  const templates = await prisma.checklistTemplate.findMany({
-    where: { planType, isActive: true },
-  });
-
-  if (templates.length > 0) {
-    await prisma.checklistField.createMany({
-      data: templates.map((t) => ({
-        caseId: newCase.id,
-        templateId: t.id,
-      })),
-    });
-  }
+  // H23 (Nishant's design): NO seed at case creation. Seeding is
+  // deferred to the moment the CA clicks Extract in Stage 4, at
+  // documents.ts ensureCaseSeededForExtraction. Between creation and
+  // that click, planType is mutable (paraplanner correction or Zoho
+  // sync), and the case's checklist is legitimately empty — the UI
+  // renders "No checklist fields for this case yet. Upload a document
+  // and run AI extraction..." at CedingChecklist.tsx:214, which is now
+  // the correct copy for this state. The planTypeHasTemplates gate at
+  // ~line 339 still refuses case creation with 422 for planTypes that
+  // have no templates today, so intake is uniform with crm.ts's
+  // audit-only path.
 
   // Log audit
   await prisma.auditLog.create({
@@ -1709,147 +1706,22 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
     }
   }
 
-  // H23: seed-if-empty heal.
-  //
-  // A case with zero checklist_fields rows can arrive here for several
-  // reasons: (a) Zoho import landed with an unserviceable planType
-  // (FINAL_SALARY / BOND — Messina shape), (b) an earlier silent-drop
-  // somewhere in the pipeline, (c) a case that was created before
-  // seeding existed. Any /sync-from-zoho invocation that finds a
-  // zero-row case must heal it against the planType this sync is about
-  // to leave the case with — otherwise subsequent AI_EXTRACTION_RUN
-  // events report "N fields processed" against a checklist with no
-  // rows, and the extracted values land in Cosmos with nowhere to
-  // apply to (the merge/apply path silently no-ops on field-not-found).
-  //
-  // Wrapped in a $transaction with the case.update below so a partial
-  // failure rolls back cleanly. The seed uses the FINAL planType
-  // (post-guardLockedFields), so a sync that corrects planType from
-  // FINAL_SALARY to PENSION seeds against PENSION templates directly.
-  // Idempotent by row-count check for the common (non-concurrent) path:
-  // an already-seeded case is a no-op.
-  //
-  // Concurrency. preExistingRowCount is read OUTSIDE the transaction
-  // (Prisma's `count` runs its own statement). Under concurrent
-  // /sync-from-zoho on the same case, both loaders can see rowCount=0
-  // and both enter the transaction with templatesToSeed populated. The
-  // @@unique([caseId, templateId]) constraint at checklist_fields
-  // (schema.prisma:479) makes the second createMany a conflict; the
-  // `skipDuplicates: true` option converts each conflicting row to a
-  // per-row skip (Postgres ON CONFLICT DO NOTHING). The losing race
-  // commits with zero net inserts and its case.update still applies —
-  // no double-seed, no lost planType correction. Cost: the losing
-  // race's SEEDING_HEAL_ON_SYNC audit records seededCount from
-  // templatesToSeed.length rather than actual inserts (a small,
-  // documented inaccuracy in exchange for avoiding an extra round-
-  // trip). Alternative would be SELECT ... FOR UPDATE on the case
-  // row inside the transaction; not worth the lock across every sync
-  // for a race that fires only in a millisecond-scale window during
-  // heal.
-  //
-  // Array order inside $transaction is execution order (case.update,
-  // then createMany). Correctness does not depend on the order —
-  // neither operation reads the other's result, and the seed uses
-  // the pre-computed `effectivePlanType` rather than reading case.planType.
-  //
-  // Guard interaction. guardLockedFields ran at :~1652 (above), BEFORE
-  // this transaction opens. Rows created inside the transaction cannot
-  // be observed by the guard on the same sync. Seeded rows carry
-  // aiExtractedAt=NULL, so caseHasExtractionRun (the guard predicate)
-  // stays false against them on subsequent syncs too — the pre-
-  // extraction window remains open, as intended. See the comment block
-  // above caseHasExtractionRun (top of this file) for the rationale,
-  // including why the predicate MUST NOT change to "any row exists".
-  const effectivePlanType =
-    (updates.planType as PlanType | undefined) ??
-    (caseRecord.planType as PlanType);
-  const preExistingRowCount = await prisma.checklistField.count({
-    where: { caseId: id },
-  });
-  const shouldSeed = preExistingRowCount === 0;
-  const templatesToSeed = shouldSeed
-    ? await prisma.checklistTemplate.findMany({
-        where: { planType: effectivePlanType, isActive: true },
-      })
-    : [];
-
   // We always have at least the cached Zoho IDs in `updates`, so always
   // apply. `changed` for the response reflects real CRM-data changes only
   // (the cache refresh is internal bookkeeping).
-  const [updated] = await prisma.$transaction([
-    prisma.case.update({
-      where: { id },
-      data: updates,
-      include: { provider: true, assignedTo: true, createdBy: true },
-    }),
-    ...(templatesToSeed.length > 0
-      ? [
-          prisma.checklistField.createMany({
-            data: templatesToSeed.map((t) => ({
-              caseId: id,
-              templateId: t.id,
-            })),
-            skipDuplicates: true,
-          }),
-        ]
-      : []),
-  ]);
-
-  // H23: observability for the heal path. Audits are written OUTSIDE
-  // the transaction — they are not required for state consistency, and
-  // an audit-write failure must not roll back a successful seed.
-  if (shouldSeed && templatesToSeed.length > 0) {
-    await prisma.auditLog.create({
-      data: {
-        caseId: id,
-        userId: req.user!.id,
-        action: "SEEDING_HEAL_ON_SYNC",
-        source: "SYSTEM",
-        newValue: `/sync-from-zoho: seeded ${templatesToSeed.length} checklist row(s) for planType "${effectivePlanType}" on a previously-unseeded case`,
-        metadata: {
-          planType: effectivePlanType,
-          seededCount: templatesToSeed.length,
-          zohoTaskId: caseRecord.zohoTaskId,
-        } as Prisma.InputJsonValue,
-      },
-    });
-    console.warn(
-      JSON.stringify({
-        evt: "SEEDING_HEAL_ON_SYNC",
-        caseRef: caseRecord.caseRef,
-        planType: effectivePlanType,
-        seededCount: templatesToSeed.length,
-      }),
-    );
-  } else if (shouldSeed && templatesToSeed.length === 0) {
-    // Heal was attempted but the effective planType has no active
-    // templates today (still FINAL_SALARY / BOND). Case stays zero-row;
-    // next /sync-from-zoho will retry (this block is idempotent, and
-    // ops now has a signal on both intake and every subsequent sync).
-    await prisma.auditLog.create({
-      data: {
-        caseId: id,
-        userId: req.user!.id,
-        action: "SEEDING_ZERO_TEMPLATES",
-        source: "SYSTEM",
-        newValue: `/sync-from-zoho: attempted to heal a zero-row case but planType "${effectivePlanType}" has no active templates`,
-        metadata: {
-          planType: effectivePlanType,
-          source: "ZOHO_SYNC_HEAL_ATTEMPT",
-          zohoTaskId: caseRecord.zohoTaskId,
-        } as Prisma.InputJsonValue,
-      },
-    });
-    console.warn(
-      JSON.stringify({
-        evt: "SEEDING_ZERO_TEMPLATES",
-        caseRef: caseRecord.caseRef,
-        planType: effectivePlanType,
-        source: "ZOHO_SYNC_HEAL_ATTEMPT",
-      }),
-    );
-  }
-
+  //
+  // H23 note (Nishant's design): the seed-if-empty heal block that
+  // 1aff6e7 added here is REMOVED. Under seed-at-submit, a case with
+  // zero checklist_fields is the expected state during stages 1-3 and
+  // never a defect to heal. Planned corrections to planType flow
+  // through the update below unchanged; seeding happens at
+  // documents.ts ensureCaseSeededForExtraction when the CA reaches
+  // Stage 4. See the H23 tracker entry for the design shift.
+  const updated = await prisma.case.update({
+    where: { id },
+    data: updates,
+    include: { provider: true, assignedTo: true, createdBy: true },
+  });
   const changedRealData = changes.length > 0;
 
   // 6. Audit — only when Zoho actually changed something on the case.

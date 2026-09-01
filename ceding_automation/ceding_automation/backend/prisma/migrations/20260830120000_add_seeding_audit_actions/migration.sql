@@ -1,37 +1,64 @@
--- H23: Seeding audit actions for the crm.ts import + /sync-from-zoho
--- heal paths.
+-- H23: Seed-at-submit design (Nishant's model) + supporting audit
+-- actions for the crm.ts intake + submitOrTrigger extraction paths.
 --
--- Additive-only: extends the "AuditAction" enum with two new values
--- used by the checklist-seeding observability layer.
+-- Two-part deploy: apply this migration first, verify the enum and
+-- column are present, then deploy the backend image. Rolling both out
+-- in the same image would 500 on the first writer hit because the
+-- Prisma client shipped with the image expects the new enum values +
+-- column to already exist in the DB.
 --
---   SEEDING_ZERO_TEMPLATES — emitted at case creation (Zoho import via
---     crm.ts, and — belt-and-braces — the /sync-from-zoho heal attempt)
---     when the case's planType has zero active checklist_templates today
---     (FINAL_SALARY, BOND). Case is still created; the case will heal
---     on the next /sync-from-zoho if Zoho corrects planType to a
---     serviceable value.
+-- Additive-only. Rollback of the deployed backend image WITHOUT
+-- rolling this migration back is safe:
+--   - The two enum values (SEEDING_ZERO_TEMPLATES, SEEDING_HEAL_ON_SYNC)
+--     cannot appear on any existing row; their writers are new code
+--     that only exists in the same image. Leaving the values in place
+--     across a rollback is accepted practice (docs/DEPLOYMENT.md §9).
+--   - The extraction_submitted_at column is nullable with no default;
+--     pre-existing rows all remain NULL. Old code that doesn't know
+--     about the column simply doesn't read or write it — Prisma is
+--     nullable-tolerant, and every SELECT is column-explicit.
 --
---   SEEDING_HEAL_ON_SYNC — emitted by /sync-from-zoho when it finds a
---     zero-row case with active templates for the effective planType
---     and seeds them. Idempotent by row-count check.
+-- ── Part 1: AuditAction enum extensions ──────────────────────────────
 --
--- Safe under an unattended prisma migrate deploy: enum ADD VALUE is
--- non-destructive, cannot fail on existing rows, and preserves ordinal
--- stability of the pre-existing values. Rollback of the deployed
--- backend image WITHOUT rolling this migration back is safe because no
--- existing row can carry a value that was added by this migration
--- (the writers are gated behind new code that only ships in the same
--- image). Rolling this migration back is unnecessary in prod — it is
--- accepted practice to leave additive enum values in place across a
--- rollback (see docs/DEPLOYMENT.md §9).
+-- SEEDING_ZERO_TEMPLATES fires at three moments now, in decreasing
+-- order of typical usefulness:
+--   1. Zoho import (crm.ts) when the incoming task's planType has no
+--      active checklist_templates today (FINAL_SALARY, BOND). Case is
+--      still created — under Nishant's design, seeding is deferred to
+--      extraction submit anyway, so this is purely a signal to ops.
+--   2. Extract-submit refusal path in documents.ts submitOrTrigger's
+--      seed check: emitted when the CA clicks Extract on a case whose
+--      current planType has no active templates. The route returns
+--      422 PLAN_TYPE_NOT_IMPLEMENTED; the audit gives ops a durable
+--      "here is the case that tried and was refused" trail.
+--   3. /sync-from-zoho's heal path is now DEAD under Nishant's design
+--      (rows are not created at import, so there is nothing to heal
+--      on sync). The enum value stays in place — additive, no
+--      rollback needed — in case a future recovery script wants to
+--      emit under this action for other reasons.
 --
--- Same shape and sequencing discipline as
--- 20260805200000_add_locked_field_audit_actions (Ship #1): deploy the
--- migration first, verify enum values appear (\dT+ "AuditAction"),
--- then deploy the backend image containing the writers. Rolling both
--- out in the same image would 500 on the first row insert because the
--- Prisma client shipped with the image expects the new enum values to
--- already exist in the DB.
+-- SEEDING_HEAL_ON_SYNC fired only from the 1aff6e7 heal block, which
+-- is being removed as part of the seed-at-submit refactor. The enum
+-- value stays — additive; leaving it in place lets historical rows
+-- (from the brief window between 1aff6e7 deploy and this refactor's
+-- deploy, if any staging rows exist) remain valid.
 
 ALTER TYPE "AuditAction" ADD VALUE IF NOT EXISTS 'SEEDING_ZERO_TEMPLATES';
 ALTER TYPE "AuditAction" ADD VALUE IF NOT EXISTS 'SEEDING_HEAL_ON_SYNC';
+
+-- ── Part 2: cases.extraction_submitted_at column ─────────────────────
+--
+-- Stamped by the first extraction-submit on a case (crm.ts intake no
+-- longer seeds, cases.ts manual create no longer seeds — the seed
+-- happens once, at the moment the CA clicks Extract). Also feeds
+-- Ship #1's guard predicate at cases.ts caseHasExtractionRun: after
+-- this refactor the guard fires on
+--   (aiExtractedAt IS NOT NULL OR case.extraction_submitted_at IS NOT NULL)
+-- which arms the lock at submit time, not at first-extracted-value
+-- time. Closes the concurrent-Zoho-sync race window.
+--
+-- Nullable, no default. Pre-existing rows stay NULL until they hit
+-- extract-submit under the new code (or never, if the case is
+-- already past extraction and never re-extracts).
+
+ALTER TABLE "cases" ADD COLUMN "extraction_submitted_at" TIMESTAMP(3);

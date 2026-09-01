@@ -303,6 +303,16 @@ model Case {
   approvedAt       DateTime?
   completedAt      DateTime?
   onHoldReason     String?
+  // H23 (Nishant's design): stamped by the first extraction-submit on
+  // this case. Used by Ship #1's guard predicate at
+  // caseHasExtractionRun (backend/src/routes/cases.ts) to arm the
+  // locked-field lock at submit time — closing the race window between
+  // seed and first extracted value that would otherwise let a
+  // concurrent Zoho sync flip planType against seeded rows.
+  // Idempotent: only set on transitions from NULL → now(), so bulk
+  // submits (POST /:caseId/documents/extract-pending) do not
+  // overwrite the first doc's timestamp with the last doc's.
+  extractionSubmittedAt DateTime? @map("extraction_submitted_at")
 
   // WorkDrive
   workDriveExportPath String?
