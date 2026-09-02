@@ -8,6 +8,7 @@ import { HighContrastProvider } from "@/hooks/useHighContrast";
 import { RoleProvider } from "@/hooks/useRole";
 import { AuthProvider } from "@/hooks/useAuth";
 import { RoleGuard } from "@/components/RoleGuard";
+import { PermissionGuard } from "@/components/PermissionGuard";
 import { AppLayout } from "@/components/layout/AppLayout";
 import RolePicker from "./pages/RolePicker";
 import AuthCallback from "./pages/AuthCallback";
@@ -16,6 +17,7 @@ import Cases from "./pages/Cases";
 import CaseDetail from "./pages/CaseDetail";
 import ProviderDirectory from "./pages/ProviderDirectory";
 import Admin from "./pages/Admin";
+import AiTraining from "./pages/AiTraining";
 import Presentation from "./pages/Presentation";
 import LOAWorkflow from "./pages/LOAWorkflow";
 import AuditTrail from "./pages/AuditTrail";
@@ -68,6 +70,16 @@ const App = () => (
                         <RoleGuard allow={["admin"]}>
                           <Admin />
                         </RoleGuard>
+                      }
+                    />
+                    {/* Gated by the per-user canAccessAiTraining flag,
+                        NOT by role — grantees span CA_TEAM and ADMIN. */}
+                    <Route
+                      path="/ai-training"
+                      element={
+                        <PermissionGuard perm="canAccessAiTraining">
+                          <AiTraining />
+                        </PermissionGuard>
                       }
                     />
                   </Route>

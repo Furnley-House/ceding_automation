@@ -259,14 +259,50 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
       include: { provider: true, createdBy: true, assignedTo: true, paraplanner: true },
     });
 
-    // 7. Initialise checklist fields from active templates
-    const templates = await prisma.checklistTemplate.findMany({
+    // 7. Intake-time template-availability check (audit only — NO seed).
+    //
+    // H23 (Nishant's design): checklist_fields are seeded at the moment
+    // the CA clicks Extract in Stage 4, NOT at case creation. Rationale:
+    // planType is intentionally mutable through stages 1-3 (Messina
+    // FH-2026-000173 was corrected FINAL_SALARY → PENSION 98 min after
+    // import); seeding at creation locked us into whichever planType
+    // arrived first, then had no way to recover on subsequent
+    // corrections. Deferring seed to submit means rows can never be
+    // created for a stale planType. See documents.ts
+    // ensureCaseSeededForExtraction for the seed site.
+    //
+    // We STILL audit an unserviceable planType at intake (FINAL_SALARY,
+    // BOND — no active templates today). This is not a blocker; it is
+    // an ops signal so unserviceable-plan cases surface at the earliest
+    // possible moment rather than the CA discovering it at Stage 4.
+    // Same audit shape as the extract-submit refusal in documents.ts,
+    // distinguishable via metadata.source.
+    const activeTemplateCount = await prisma.checklistTemplate.count({
       where: { planType: mapping.planType, isActive: true },
     });
-    if (templates.length > 0) {
-      await prisma.checklistField.createMany({
-        data: templates.map((t) => ({ caseId: newCase.id, templateId: t.id })),
+    if (activeTemplateCount === 0) {
+      await prisma.auditLog.create({
+        data: {
+          caseId: newCase.id,
+          userId: req.user!.id,
+          action: 'SEEDING_ZERO_TEMPLATES',
+          source: 'SYSTEM',
+          newValue: `Zoho import: planType "${mapping.planType}" has no active checklist templates. Case created; extract-submit will refuse with 422 until templates ship or planType is corrected via /sync-from-zoho.`,
+          metadata: {
+            planType: mapping.planType,
+            source: 'ZOHO_IMPORT_AUDIT_ONLY',
+            zohoTaskId: taskId,
+          } as Prisma.InputJsonValue,
+        },
       });
+      console.warn(
+        JSON.stringify({
+          evt: 'SEEDING_ZERO_TEMPLATES',
+          caseRef: newCase.caseRef,
+          planType: mapping.planType,
+          source: 'ZOHO_IMPORT_AUDIT_ONLY',
+        }),
+      );
     }
 
     // 8. Audit log

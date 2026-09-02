@@ -48,11 +48,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     api
       .get("/auth/me")
       .then((res) => {
-        const u = res.data as { id: string; email: string; name: string; role: string };
+        const u = res.data as {
+          id: string;
+          email: string;
+          name: string;
+          role: string;
+          canAccessAiTraining?: boolean;
+        };
         const latestToken = useAuthStore.getState().token;
         if (!latestToken) return; // user logged out mid-flight
         useAuthStore.getState().setAuth(
-          { id: u.id, email: u.email, name: u.name, role: u.role as never },
+          {
+            id: u.id,
+            email: u.email,
+            name: u.name,
+            role: u.role as never,
+            canAccessAiTraining: u.canAccessAiTraining ?? false,
+          },
           latestToken
         );
         setProfile({ full_name: u.name ?? null, role: u.role.toLowerCase() });

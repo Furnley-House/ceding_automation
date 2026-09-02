@@ -27,6 +27,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 
 type UserRole = "CA_TEAM" | "ADVISER" | "PARAPLANNER" | "ADMIN";
@@ -38,6 +39,7 @@ interface AppUser {
   name: string;
   role: UserRole;
   status: UserStatus;
+  canAccessAiTraining: boolean;
   ssoId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -83,7 +85,7 @@ export function UserManagementPanel() {
       updates,
     }: {
       id: string;
-      updates: Partial<Pick<AppUser, "role" | "status" | "name">>;
+      updates: Partial<Pick<AppUser, "role" | "status" | "name" | "canAccessAiTraining">>;
     }) => {
       const res = await usersApi.update(id, updates);
       return res.data as AppUser;
@@ -93,6 +95,21 @@ export function UserManagementPanel() {
     },
     onError: (e: Error) => toast.error("Update failed", { description: e.message }),
   });
+
+  const handleAiTrainingToggle = (user: AppUser, next: boolean) => {
+    if (next === user.canAccessAiTraining) return;
+    updateMutation.mutate(
+      { id: user.id, updates: { canAccessAiTraining: next } },
+      {
+        onSuccess: () =>
+          toast.success(
+            next
+              ? `AI Training Hub granted to ${user.name}`
+              : `AI Training Hub revoked from ${user.name}`,
+          ),
+      },
+    );
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -273,6 +290,7 @@ export function UserManagementPanel() {
                 <th className="text-left px-3 py-2 font-bold">Name & email</th>
                 <th className="text-left px-3 py-2 font-bold">Role</th>
                 <th className="text-left px-3 py-2 font-bold">Status</th>
+                <th className="text-left px-3 py-2 font-bold">AI Training</th>
                 <th className="text-left px-3 py-2 font-bold">Sign-in</th>
                 <th className="text-right px-3 py-2 font-bold">Joined</th>
               </tr>
@@ -335,6 +353,19 @@ export function UserManagementPanel() {
                       >
                         {u.status}
                       </button>
+                    </td>
+                    <td className="px-3 py-2.5 align-top">
+                      <div className="flex items-center gap-2">
+                        <Switch
+                          checked={u.canAccessAiTraining}
+                          onCheckedChange={(v) => handleAiTrainingToggle(u, v)}
+                          disabled={updateMutation.isPending}
+                          aria-label={`Toggle AI Training Hub access for ${u.name}`}
+                        />
+                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                          {u.canAccessAiTraining ? "Granted" : "Off"}
+                        </span>
+                      </div>
                     </td>
                     <td className="px-3 py-2.5 align-top text-xs">
                       {u.ssoId ? (

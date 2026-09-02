@@ -20,7 +20,14 @@ router.post("/login", async (req: Request, res: Response) => {
 
   const user = await prisma.user.findUnique({
     where: { email },
-    select: { id: true, email: true, name: true, role: true, status: true },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      status: true,
+      canAccessAiTraining: true,
+    },
   });
 
   if (!user || user.status === "INACTIVE") {
@@ -40,9 +47,20 @@ router.get("/me", async (req: Request, res: Response) => {
   const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { userId: string };
+    // `status` is included for consistency with the /login response and the
+    // requireAuth middleware — NOT as a security fix: requireAuth already
+    // rejects INACTIVE on every request including /me. `canAccessAiTraining`
+    // carries the AI Training Hub grant flag the frontend needs for gating.
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
-      select: { id: true, email: true, name: true, role: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        status: true,
+        canAccessAiTraining: true,
+      },
     });
     res.json(user);
   } catch {
@@ -153,7 +171,15 @@ router.get("/azure/callback", async (req: Request, res: Response) => {
     // Look up our app user by email
     let user = await prisma.user.findUnique({
       where: { email },
-      select: { id: true, email: true, name: true, role: true, status: true, ssoId: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        status: true,
+        ssoId: true,
+        canAccessAiTraining: true,
+      },
     });
 
     // Auto-provision on first sign-in.
@@ -187,7 +213,15 @@ router.get("/azure/callback", async (req: Request, res: Response) => {
           ssoId: azureOid,
           ssoRefreshToken: msRefreshToken,
         },
-        select: { id: true, email: true, name: true, role: true, status: true, ssoId: true },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          status: true,
+          ssoId: true,
+          canAccessAiTraining: true,
+        },
       });
     } else if (user.status === "INACTIVE") {
       const msg = encodeURIComponent("Your account is inactive. Contact an admin.");
@@ -217,7 +251,13 @@ router.get("/azure/callback", async (req: Request, res: Response) => {
     // Redirect to frontend callback page with all the info it needs
     const cbParams = new URLSearchParams({
       token: appToken,
-      user: JSON.stringify({ id: user.id, email: user.email, name: user.name, role: user.role }),
+      user: JSON.stringify({
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        canAccessAiTraining: user.canAccessAiTraining,
+      }),
       returnTo,
     });
 
@@ -268,6 +308,7 @@ router.post("/refresh", async (req: Request, res: Response) => {
       role: true,
       status: true,
       ssoRefreshToken: true,
+      canAccessAiTraining: true,
     },
   });
   if (!user) return res.status(401).json({ error: "User not found" });
@@ -332,7 +373,13 @@ router.post("/refresh", async (req: Request, res: Response) => {
 
   res.json({
     token: appToken,
-    user: { id: user.id, email: user.email, name: user.name, role: user.role },
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      canAccessAiTraining: user.canAccessAiTraining,
+    },
   });
 });
 

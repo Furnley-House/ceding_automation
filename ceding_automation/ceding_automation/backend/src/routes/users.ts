@@ -1,8 +1,9 @@
 // backend/src/routes/users.ts
 import { Router, Request, Response } from "express";
-import { PrismaClient, UserRole, UserStatus } from "@prisma/client";
+import { PrismaClient, UserRole, UserStatus, UserAuditAction } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { z } from "zod";
+import { diffUserFields } from "../utils/diffUserFields";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -23,9 +24,10 @@ const UpdateUserSchema = z
     name: z.string().trim().min(1).optional(),
     role: z.nativeEnum(UserRole).optional(),
     status: z.nativeEnum(UserStatus).optional(),
+    canAccessAiTraining: z.boolean().optional(),
   })
   .refine((d) => Object.keys(d).length > 0, {
-    message: "At least one of name / role / status must be provided",
+    message: "At least one of name / role / status / canAccessAiTraining must be provided",
   });
 
 router.get("/", requireAuth, requireRole(["ADMIN"]), async (_req, res: Response) => {
@@ -37,6 +39,7 @@ router.get("/", requireAuth, requireRole(["ADMIN"]), async (_req, res: Response)
       name: true,
       role: true,
       status: true,
+      canAccessAiTraining: true,
       ssoId: true,
       createdAt: true,
       updatedAt: true,
@@ -76,6 +79,7 @@ router.post(
           name: true,
           role: true,
           status: true,
+          canAccessAiTraining: true,
           ssoId: true,
           createdAt: true,
           updatedAt: true,
@@ -121,20 +125,56 @@ router.patch(
       }
     }
 
+    // Snapshot the audit-relevant fields BEFORE the update so we can diff
+    // against the incoming values. A no-op PATCH (same values) writes no
+    // audit rows — the audit trail represents state transitions, not
+    // intent. See diffUserFields.test.ts for the full behaviour matrix.
+    const before = await prisma.user.findUnique({
+      where: { id: targetId },
+      select: { role: true, status: true, canAccessAiTraining: true },
+    });
+    if (!before) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    const changes = diffUserFields(before, updates);
+
     try {
-      const user = await prisma.user.update({
-        where: { id: targetId },
-        data: updates,
-        select: {
-          id: true,
-          email: true,
-          name: true,
-          role: true,
-          status: true,
-          ssoId: true,
-          createdAt: true,
-          updatedAt: true,
-        },
+      // Update + write one UserAuditLog row per actually-changed field, in
+      // a single transaction so a mid-flight crash cannot leave the
+      // audit-vs-state pair inconsistent.
+      const user = await prisma.$transaction(async (tx) => {
+        const u = await tx.user.update({
+          where: { id: targetId },
+          data: updates,
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            role: true,
+            status: true,
+            canAccessAiTraining: true,
+            ssoId: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+        if (changes.length > 0) {
+          await tx.userAuditLog.createMany({
+            data: changes.map((c) => ({
+              actorUserId: req.user!.id,
+              targetUserId: targetId,
+              action: c.action as UserAuditAction,
+              field: c.field,
+              oldValue: c.oldValue,
+              newValue: c.newValue,
+              metadata: {
+                targetUserEmail: u.email,
+                actorEmail: req.user!.email,
+              },
+            })),
+          });
+        }
+        return u;
       });
       res.json(user);
     } catch (err) {

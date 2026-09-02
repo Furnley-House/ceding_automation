@@ -297,11 +297,14 @@ export async function uploadPolicyDocument(file: File, caseId: string) {
 
 // ==================== AI EXTRACTION ====================
 
-export async function runAIExtraction(documentId: string, caseId?: string) {
-  const url = caseId
-    ? `/cases/${caseId}/documents/${documentId}/extract`
-    : `/documents/${documentId}/extract`;
-  const res = await api.post(url);
+// H23: caseId is required. The prior `/documents/:documentId/extract`
+// fallback pointed at a route that does not exist on the backend
+// (searched backend/src/routes for /extract; only :caseId-scoped
+// variants are registered). Any caller invoking runAIExtraction
+// without caseId would have hit a 404. Making it required at the
+// type level prevents the same mistake recurring.
+export async function runAIExtraction(documentId: string, caseId: string) {
+  const res = await api.post(`/cases/${caseId}/documents/${documentId}/extract`);
   return snakeKeys(res.data);
 }
 

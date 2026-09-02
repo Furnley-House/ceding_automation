@@ -373,9 +373,24 @@ router.post(
     const NA_VALUE = "N/A";
     const caseRecord = await prisma.case.findUnique({
       where: { id: req.params.caseId },
-      select: { id: true, planType: true },
+      select: { id: true, planType: true, extractionSubmittedAt: true },
     });
     if (!caseRecord) return res.status(404).json({ error: "Case not found" });
+
+    // H23 (Nishant's design): under seed-at-submit, checklist_fields are
+    // created at extract-submit time (documents.ts
+    // ensureCaseSeededForExtraction). Before that, this endpoint would
+    // create rows fresh AS N/A — wrong behaviour: a case in stages 1-3
+    // has no committed planType yet, and marking the whole checklist
+    // N/A before extraction has been submitted is meaningless. Refuse
+    // with 409 until submit has happened.
+    if (caseRecord.extractionSubmittedAt === null) {
+      return res.status(409).json({
+        error:
+          "Cannot mark missing as N/A before extraction has been submitted for this case. Submit at least one document for extraction first (Stage 4).",
+        code: "EXTRACTION_NOT_SUBMITTED",
+      });
+    }
 
     const templates = await prisma.checklistTemplate.findMany({
       where: { planType: caseRecord.planType, isActive: true },

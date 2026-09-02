@@ -134,6 +134,19 @@ enum AuditAction {
   // Distinct action so recovery queries can find snapshots without
   // relying on a metadata.snapshot boolean flag.
   CHECKLIST_ROWS_SNAPSHOTTED
+  // H23: Checklist-seeding observability. SEEDING_ZERO_TEMPLATES fires
+  // when a case is created (Zoho import) or synced (/sync-from-zoho
+  // heal attempt) and the effective planType has no active
+  // checklist_templates today (FINAL_SALARY, BOND). Case is still
+  // created; the /sync-from-zoho path heals when planType is corrected.
+  // SEEDING_HEAL_ON_SYNC fires when /sync-from-zoho finds a zero-row
+  // case with active templates for the effective planType and seeds
+  // them. Together these close the silent-fail Messina landed in
+  // (FH-2026-000173, 2026-08-21: FINAL_SALARY at import → PENSION at
+  // 08:47 sync → seeding never re-ran → 3 extractions had no rows to
+  // land on). See docs/phase2/PHASE2_TASKS.md §H23.
+  SEEDING_ZERO_TEMPLATES
+  SEEDING_HEAL_ON_SYNC
 }
 
 enum ContactMethod {
@@ -167,6 +180,12 @@ model User {
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
+  // Per-user access flag for /ai-training. Deliberately not a role because
+  // the grantees span CA_TEAM and ADMIN (see project note 2026-08-11).
+  // Toggled from UserManagementPanel by any ADMIN; every flip writes a
+  // UserAuditLog row so the grant history is reconstructable.
+  canAccessAiTraining Boolean @default(false)
+
   // RingCentral per-user OAuth — each user connects their own RC account
   rcRefreshToken         String?
   rcAccessToken          String?
@@ -185,6 +204,10 @@ model User {
   fundLineEdits    ChecklistFundLine[] @relation("FundLineEditedBy")
   comments         Comment[]
   notifications    Notification[]
+  // User-admin audit trail — same User appears on both sides. `Actor` is the
+  // ADMIN who made the change; `Target` is the user whose row was changed.
+  userAuditLogsAsActor  UserAuditLog[] @relation("UserAuditLogActor")
+  userAuditLogsAsTarget UserAuditLog[] @relation("UserAuditLogTarget")
 
   @@map("users")
 }
@@ -280,6 +303,16 @@ model Case {
   approvedAt       DateTime?
   completedAt      DateTime?
   onHoldReason     String?
+  // H23 (Nishant's design): stamped by the first extraction-submit on
+  // this case. Used by Ship #1's guard predicate at
+  // caseHasExtractionRun (backend/src/routes/cases.ts) to arm the
+  // locked-field lock at submit time — closing the race window between
+  // seed and first extracted value that would otherwise let a
+  // concurrent Zoho sync flip planType against seeded rows.
+  // Idempotent: only set on transitions from NULL → now(), so bulk
+  // submits (POST /:caseId/documents/extract-pending) do not
+  // overwrite the first doc's timestamp with the last doc's.
+  extractionSubmittedAt DateTime? @map("extraction_submitted_at")
 
   // WorkDrive
   workDriveExportPath String?
@@ -559,6 +592,39 @@ model AuditLog {
   @@index([userId])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────
+// USER-ADMIN AUDIT LOG
+// Separate from AuditLog because AuditLog.caseId is NOT NULL (every row
+// is case-scoped by design). This table records changes an ADMIN makes
+// to another user's role / status / canAccessAiTraining permission.
+// Write-only for now — no viewer UI in this pass; the two indexes below
+// anticipate a future admin viewer scoped by target or actor.
+// ─────────────────────────────────────────────
+
+enum UserAuditAction {
+  USER_PERMISSION_CHANGED
+  USER_ROLE_CHANGED
+  USER_STATUS_CHANGED
+}
+
+model UserAuditLog {
+  id           String          @id @default(cuid())
+  actorUserId  String
+  actor        User            @relation("UserAuditLogActor", fields: [actorUserId], references: [id])
+  targetUserId String
+  target       User            @relation("UserAuditLogTarget", fields: [targetUserId], references: [id])
+  action       UserAuditAction
+  field        String // "canAccessAiTraining" | "role" | "status" — kept as a string so future fields don't force an enum extension every time
+  oldValue     String? // stringified prior value; null when the record has no prior value (not expected for the current three fields, but the shape is future-proof)
+  newValue     String // stringified new value
+  metadata     Json?
+  createdAt    DateTime        @default(now())
+
+  @@index([targetUserId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@map("user_audit_logs")
 }
 
 // ─────────────────────────────────────────────
