@@ -351,6 +351,49 @@ WORKDRIVE_REQUIRE_PER_CLIENT_FOLDER=true
 
 ---
 
+## 10. Deploy history
+
+Append newest at top. For each release, capture the main sha, migrations
+applied, backend image + digest + revision + rollback anchor, frontend
+bundle + rollback snapshot, and the staging scenarios that signed the
+release off. Timestamps are UTC. Cross-references: PITR anchors in
+`.prod-pitr-log`; per-release cutover notes in `PROD_DEPLOY.md`.
+
+### 2026-09-02 — `main` `d8fed9d`
+
+- **Merge:** `d8fed9d` = `develop` → `main`, three commits: `87fe45d`
+  (canAccessAiTraining per-user permission + `UserAuditLog`), `1aff6e7`
+  and `f946ed8` (H23 checklist-seed-at-extraction-submit).
+- **Migrations applied to `pg-cedingai-prod` at
+  `2026-09-02T07:55:46Z`** (PRE_MIGRATE_UTC — see `.prod-pitr-log`):
+  - `20260811120000_add_user_can_access_ai_training`
+  - `20260811120001_add_user_audit_log`
+  - `20260830120000_add_seeding_audit_actions`
+- **Backend:** image
+  `crcedingaiprod.azurecr.io/ceding-backend:d8fed9d`, digest
+  `sha256:c4b77280…af8d2289`, revision
+  `ca-cedingai-backend-prod--0000018`. **Rollback anchor:** revision
+  `ca-cedingai-backend-prod--0000017` on image `:d988ec7` (retained
+  inactive).
+- **Frontend:** bundle `assets/index-Dave5ilh.js` (was
+  `index-D0KWc2no.js`). CSS unchanged (`index-BG7uDXLB.css`).
+  **Rollback snapshot:**
+  `frontend/dist.PROD-rollback-pre-d8fed9d-20260902T122235Z/` — 34
+  files, 32.83 MB, downloaded from `$web` before upload.
+- **Staging verification (FH-2026-000119, five scenarios) before prod:**
+  1. **Case creation** — zero `checklist_fields` rows (no premature
+     seeding at case creation).
+  2. **Unserviceable `planType` on extract** — 422 with
+     `SEEDING_ZERO_TEMPLATES` audit row written.
+  3. **Success path** — 71 rows seeded, 65 filled, 12 fund lines.
+  4. **Re-extract** — idempotent: no duplicate rows,
+     `cases.extraction_submitted_at` preserved.
+  5. **Locked-field guard 409** — armed by
+     `cases.extraction_submitted_at` being non-NULL (the H18 lock is
+     now gated on the H23 submit timestamp).
+
+---
+
 *Last updated: post the auto-SSO + per-client-WorkDrive prod cutover
 (commit `35a3395`). Maintained by Revathy. When env-flag policy changes,
 update §2 and §7.3 in the same PR.*
