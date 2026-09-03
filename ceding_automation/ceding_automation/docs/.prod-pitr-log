@@ -4,4 +4,5 @@
 2026-07-23T07:57:03Z  pg-cedingai-prod  3a88a3b — export+courier+website
 2026-07-27T17:45:39Z  pg-cedingai-staging  contributions-table
 2026-07-29T05:35:53Z  pg-cedingai-prod  8cd0cdb (contributions-table + refresh-zoho fixes)
+2026-08-07T12:36:53Z  pg-cedingai-prod  9bc9d39 — Ship #1 locked-field guard (AuditAction enum, additive) + H17 poll-loop fix
 2026-09-01T14:46:08Z  pg-cedingai-staging  20260830120000_add_seeding_audit_actions (H23 seed-at-submit)

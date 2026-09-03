@@ -445,12 +445,18 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
     ];
   }
 
-  // CA Team and Advisers only see their own cases (Admin sees all)
+  // CA Team and Advisers only see their own cases (Admin sees all).
+  // Advisers additionally see every case whose Zoho Client has them as
+  // the assigned Adviser on the Contact record — populated by the
+  // Refresh-from-Zoho sync (see Case.adviserId) — so they can step in
+  // for an absent paraplanner. All roles retain visibility into cases
+  // they created / are assigned to / paraplan.
   if (req.user!.role !== "ADMIN") {
     where.OR = [
       { createdById: req.user!.id },
       { assignedToId: req.user!.id },
       { paralPlannerId: req.user!.id },
+      { adviserId: req.user!.id },
     ];
   }
 
@@ -1325,10 +1331,17 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   let resolvedParaplannerName: string | null = null;
   let paraplannerSyncNote: string | null = null;
 
+  // Adviser resolution mirrors the paraplanner path — read the same
+  // Contact record, resolve to an app user, auto-provision on new email.
+  let resolvedAdviserId: string | null = caseRecord.adviserId;
+  let resolvedAdviserName: string | null = null;
+  let adviserSyncNote: string | null = null;
+
   // Cached Zoho IDs — set during sync, used at export time.
   let cachedZohoOwnerId: string | null = null;
   let cachedZohoClientOwnerIds: string[] = [];
   let cachedZohoParaplannerId: string | null = null;
+  let cachedZohoAdviserId: string | null = null;
 
   if (effectiveClientZohoId) {
     try {
@@ -1343,6 +1356,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
         cachedZohoOwnerId = fields.owner?.id ?? null;
         cachedZohoClientOwnerIds = fields.clientOwners.map((u) => u.id);
         cachedZohoParaplannerId = fields.paraplanner?.id ?? null;
+        cachedZohoAdviserId = fields.adviser?.id ?? null;
 
         // Prefer single Paraplanner field; fall back to first Client_Owners entry.
         let ref = fields.paraplanner ?? fields.clientOwners[0] ?? null;
@@ -1404,6 +1418,63 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
             paraplannerSyncNote = `Paraplanner "${ref.name}" not found in app users (no email on Contact to auto-create).`;
           }
         }
+
+        // ── Adviser resolution ────────────────────────────────────────
+        // Same shape as the paraplanner block above: pick the ref, enrich
+        // email if the Contact lookup only carried {id, name}, then
+        // match / auto-provision / name-fallback. Auto-created rows land
+        // as role=ADVISER so they immediately get the widened case-list
+        // scope + approval permissions.
+        let advRef = fields.adviser;
+        if (advRef && !advRef.email && advRef.id) {
+          const full = await findZohoUserById(advRef.id);
+          if (full) {
+            advRef = {
+              id: advRef.id,
+              name: advRef.name ?? full.full_name,
+              email: full.email,
+            };
+          }
+        }
+        if (!advRef) {
+          adviserSyncNote = "No Adviser field on Contact.";
+        } else if (advRef.email) {
+          const lower = advRef.email.toLowerCase();
+          const existing = await prisma.user.findUnique({ where: { email: lower } });
+          if (existing && existing.status === "ACTIVE") {
+            resolvedAdviserId = existing.id;
+            resolvedAdviserName = existing.name;
+          } else if (existing && existing.status === "INACTIVE") {
+            resolvedAdviserId = null;
+            resolvedAdviserName = null;
+            adviserSyncNote = `Matched adviser ${lower} is inactive — unassigning.`;
+          } else {
+            const created = await prisma.user.create({
+              data: {
+                email: lower,
+                name: advRef.name?.trim() || lower.split("@")[0],
+                role: "ADVISER",
+                status: "ACTIVE",
+              },
+            });
+            resolvedAdviserId = created.id;
+            resolvedAdviserName = created.name;
+          }
+        } else if (advRef.name) {
+          const byName = await prisma.user.findFirst({
+            where: {
+              name: { equals: advRef.name, mode: "insensitive" },
+              role: "ADVISER",
+              status: "ACTIVE",
+            },
+          });
+          if (byName) {
+            resolvedAdviserId = byName.id;
+            resolvedAdviserName = byName.name;
+          } else {
+            adviserSyncNote = `Adviser "${advRef.name}" not found in app users (no email on Contact to auto-create).`;
+          }
+        }
       }
     } catch (err) {
       paraplannerSyncNote = `Contact fetch failed: ${(err as Error).message}`;
@@ -1435,6 +1506,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   updates.zohoOwnerId = cachedZohoOwnerId;
   updates.zohoClientOwnerIds = cachedZohoClientOwnerIds;
   updates.zohoParaplannerId = cachedZohoParaplannerId;
+  updates.zohoAdviserId = cachedZohoAdviserId;
   updates.zohoProviderRecordId = cachedZohoProviderId;
   updates.zohoSyncedAt = new Date();
   // We deliberately do NOT push these into `changes[]` — they're internal
@@ -1665,6 +1737,14 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
       // metadata below still captures the full transition.
       from: caseRecord.paralPlannerId,
       to: resolvedParaplannerName ?? resolvedParaplannerId,
+    });
+  }
+  if (resolvedAdviserId !== caseRecord.adviserId) {
+    updates.adviserId = resolvedAdviserId;
+    changes.push({
+      field: "adviser",
+      from: caseRecord.adviserId,
+      to: resolvedAdviserName ?? resolvedAdviserId,
     });
   }
 

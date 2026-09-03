@@ -199,6 +199,7 @@ model User {
   casesCreated     Case[]              @relation("CaseCreatedBy")
   casesAssigned    Case[]              @relation("CaseAssignedTo")
   casesParaplanner Case[]              @relation("CaseParaplanner")
+  casesAdviser     Case[]              @relation("CaseAdviser")
   auditLogs        AuditLog[]
   fieldEdits       ChecklistField[]
   fundLineEdits    ChecklistFundLine[] @relation("FundLineEditedBy")
@@ -295,6 +296,13 @@ model Case {
   assignedTo     User?   @relation("CaseAssignedTo", fields: [assignedToId], references: [id])
   paralPlannerId String?
   paraplanner    User?   @relation("CaseParaplanner", fields: [paralPlannerId], references: [id])
+  // Adviser — sourced from Zoho Contact.Adviser field. Lets an adviser see
+  // every case whose client sits under them, and (per Furnley policy) sign
+  // off checklist approvals when the assigned paraplanner is unavailable.
+  // Nullable because pre-existing cases don't have this wired yet — the
+  // Refresh from Zoho sync populates it on first refresh.
+  adviserId      String?
+  adviser        User?   @relation("CaseAdviser", fields: [adviserId], references: [id])
 
   // Timestamps
   createdAt        DateTime  @default(now())
@@ -326,6 +334,7 @@ model Case {
   zohoOwnerId          String?   // Plan.Owner ← Contact.Owner (single user)
   zohoClientOwnerIds   String[]  // Plan.Client_Owners ← Contact.Client_Owners (multi-user)
   zohoParaplannerId    String?   // Single paraplanner user id (fallback / convenience)
+  zohoAdviserId        String?   // Contact.Adviser (single user id) — audit trail for who the sync resolved
   zohoProviderRecordId String?   // Plan.Provider ← Providers-module record id
   zohoSyncedAt         DateTime? // When the cached IDs above were last refreshed
 
