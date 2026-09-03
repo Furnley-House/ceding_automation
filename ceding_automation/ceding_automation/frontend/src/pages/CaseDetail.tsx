@@ -419,6 +419,10 @@ const CaseDetail = () => {
                     label="Paraplanner"
                     value={(caseItem as any).paraplanner_name ?? "—"}
                   />
+                  <HeaderField
+                    label="Adviser"
+                    value={(caseItem as any).adviser_name ?? "—"}
+                  />
                   <HeaderField label="Zoho task" value={(caseItem as any).zoho_task_id ?? "—"} mono />
                   <HeaderField
                     label="Created"

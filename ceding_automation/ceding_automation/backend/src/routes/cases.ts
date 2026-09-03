@@ -469,6 +469,8 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
       include: {
         provider: { select: { name: true } },
         assignedTo: { select: { name: true } },
+        paraplanner: { select: { name: true } },
+        adviser: { select: { name: true } },
         documents: { select: { id: true } },
         _count: { select: { checklistFields: true } },
       },
@@ -488,6 +490,7 @@ router.get("/:id", requireAuth, async (req: Request, res: Response) => {
       createdBy: { select: { id: true, name: true, role: true } },
       assignedTo: { select: { id: true, name: true, role: true } },
       paraplanner: { select: { id: true, name: true, role: true } },
+      adviser: { select: { id: true, name: true, role: true } },
       documents: true,
       checklistFields: {
         include: { template: true, sourceDocument: { select: { filename: true } } },

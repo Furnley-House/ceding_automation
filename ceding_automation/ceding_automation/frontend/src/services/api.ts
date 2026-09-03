@@ -82,6 +82,7 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
   const assignedTo = c.assigned_to as Record<string, unknown> | null | undefined;
   const createdBy = c.created_by as Record<string, unknown> | null | undefined;
   const paraplanner = c.paraplanner as Record<string, unknown> | null | undefined;
+  const adviser = c.adviser as Record<string, unknown> | null | undefined;
   const rawStatus = (c.status as string | undefined) ?? "";
   const upperStatus = rawStatus.toUpperCase();
   const uiStatus = STATUS_MAP[upperStatus] ?? rawStatus.toLowerCase();
@@ -160,6 +161,11 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
     owner_id: ownerId,
     paraplanner_id: (paraplanner?.id as string | undefined) ?? (c.paral_planner_id as string | undefined) ?? null,
     paraplanner_name: (paraplanner?.name as string | undefined) ?? null,
+    // Adviser exposed in the same snake-case shape the header + case-list
+    // reads use. Populated by the Refresh-from-Zoho sync off
+    // Contact.Adviser; null when the Contact has no adviser mapped yet.
+    adviser_id: (adviser?.id as string | undefined) ?? (c.adviser_id as string | undefined) ?? null,
+    adviser_name: (adviser?.name as string | undefined) ?? null,
   };
 }
 
