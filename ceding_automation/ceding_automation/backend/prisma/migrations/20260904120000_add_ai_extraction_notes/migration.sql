@@ -1,0 +1,60 @@
+-- H33 piece 1b: Reviewer-visible detection outcome column on documents.
+--
+-- Purpose. The AI pipeline (piece 1a, ceding-ai-pipeline commit 168fb64)
+-- now falls back to case-supplied values when Stage 1 / Stage 2 detection
+-- cannot identify a provider or plan type from the document. That was
+-- previously a silent failure — the job either 10-min-timed-out and
+-- doc.status flipped to ERROR (FH-2026-000148 shape), or it completed
+-- with the wrong provider/plan_type propagated downstream (FH-2026-000188
+-- shape). Piece 1a fixes the underlying behaviour; this migration adds
+-- the column the frontend banner reads to surface the note visibly to
+-- the reviewer, so the change is not just quietly happening under the
+-- hood.
+--
+-- Shape. JSONB. Populated by aiBffApply.applyExtractionResult from the
+-- BffJobResult.response.detection payload emitted by the pipeline.
+-- Nullable — pre-piece-1b documents (including all rows at migration
+-- time) have NULL; the frontend treats null as "happy-path, no banner".
+--
+-- The stored object mirrors the wire contract in
+-- ceding-ai-pipeline models/extraction_response.py DetectionOutcome:
+--   {
+--     "provider": {
+--       "detected":  {name, canonical, confidence, is_known_provider},
+--       "effective": {name, canonical, is_known_provider},
+--       "failed": bool,
+--       "failure_reason": string | null,
+--       "notes": string[]
+--     },
+--     "plan_type": {
+--       "detected": string,
+--       "effective": string,
+--       "failed": bool,
+--       "failure_reason": string | null
+--     }
+--   }
+--
+-- Piece 5 will extend each sub-object with block fields (blocked,
+-- block_reason, block_details) without breaking this shape. Nullable
+-- JSONB is future-proof against additional detection outcomes — if we
+-- add a Stage 3 or Stage 4 detection layer later, another sibling key
+-- joins provider/plan_type in the same column.
+--
+-- Additive-only. Rollback of the backend image WITHOUT rolling this
+-- migration back is safe:
+--   - The column is nullable with no default; pre-existing rows all
+--     remain NULL after ALTER.
+--   - Old code that doesn't know about the column simply doesn't read
+--     or write it — Prisma is nullable-tolerant, and every SELECT is
+--     column-explicit.
+--   - Rolling this migration back is unnecessary in prod — accepted
+--     practice to leave the additive column in place across a rollback
+--     (docs/DEPLOYMENT.md §9).
+--
+-- Two-part deploy discipline as with H23 and H28: apply this migration
+-- first, verify with `\d documents` that the column is present, then
+-- deploy the backend image containing aiBffApply write. Rolling both
+-- out in the same image would 500 on the first writer hit — the Prisma
+-- client shipped with the image expects the column to already exist.
+
+ALTER TABLE "documents" ADD COLUMN "ai_extraction_notes" JSONB;

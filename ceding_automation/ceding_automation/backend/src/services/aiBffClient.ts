@@ -129,14 +129,60 @@ export interface BffExtractedField {
   reasoning: string | null;
 }
 
+// ── H33 piece 1b: detection outcome (wire type) ──────────────────────────
+//
+// The pipeline emits this under response.detection. See the pipeline's
+// models/extraction_response.py DetectionOutcome for the source contract.
+// Nullable — case-extractions docs written before piece 1b shipped will
+// not have this field; treat null as "happy-path, no reviewer banner".
+// Piece 5 will extend each sub-object with `blocked`, `blockReason`,
+// `blockDetails` fields without breaking this shape.
+export interface DetectionOutcome {
+  provider: {
+    detected: {
+      name: string | null;
+      canonical: string | null;
+      confidence: string | null;
+      isKnownProvider: boolean;
+    };
+    effective: {
+      name: string | null;
+      canonical: string | null;
+      isKnownProvider: boolean;
+      // NOTE: `confidence` intentionally OMITTED — an effective value
+      // taken from the case is a policy assertion, not a measurement.
+      // See ProviderDetectionSnapshot docstring in the pipeline.
+    };
+    failed: boolean;
+    failureReason: string | null;
+    notes: string[];
+  };
+  planType: {
+    detected: string | null;
+    effective: string | null;
+    failed: boolean;
+    failureReason: string | null;
+  };
+}
+
 export interface BffJobResult {
   jobId: string;
   caseId: string;
   documentId: string;
   status: "COMPLETE" | "EXTRACTED_WITH_WARNINGS";
   response: {
+    // **DEPRECATED IN FAVOUR OF `detection.provider.detected`.** Retained
+    // because it is load-bearing at aiBffApply.ts:312 (providerCanonical
+    // aliasing) and audit-log :366. Same fact in two places until a
+    // coordinated cross-repo cleanup can retire the sibling.
     detectedProvider: { name: string; canonical: string; confidence: string };
+    // **DEPRECATED IN FAVOUR OF `detection.planType.detected`.** Same
+    // reason — load-bearing on the audit-log write path.
     detectedPlanType: string;
+    // H33 piece 1b: nested detection outcome. New consumers should read
+    // from here; piece 5 will add block fields to the sub-objects.
+    // Nullable for backward-compat with pre-piece-1b case-extractions docs.
+    detection: DetectionOutcome | null;
     fields: BffExtractedField[];
     // Shape mirroring the BFF /result reshape (extract.py) and the pipeline's
     // FundLine Pydantic model. OCF and Transaction Costs are deliberately NOT
@@ -256,6 +302,32 @@ interface RawBffResult {
   response?: {
     detected_provider?: { name?: string; canonical?: string; confidence?: string };
     detected_plan_type?: string;
+    // H33 piece 1b: nested detection outcome. See DetectionOutcome type
+    // above for the deprecation note on the sibling detected_* fields.
+    detection?: {
+      provider?: {
+        detected?: {
+          name?: string | null;
+          canonical?: string | null;
+          confidence?: string | null;
+          is_known_provider?: boolean;
+        };
+        effective?: {
+          name?: string | null;
+          canonical?: string | null;
+          is_known_provider?: boolean;
+        };
+        failed?: boolean;
+        failure_reason?: string | null;
+        notes?: string[];
+      };
+      plan_type?: {
+        detected?: string | null;
+        effective?: string | null;
+        failed?: boolean;
+        failure_reason?: string | null;
+      };
+    } | null;
     fields?: Array<{
       field_key: string;
       value: string | number | null;
@@ -304,6 +376,41 @@ export async function getJobResult(jobId: string): Promise<BffJobResult> {
           confidence: data.response?.detected_provider?.confidence ?? "",
         },
         detectedPlanType: data.response?.detected_plan_type ?? "",
+        // H33 piece 1b: pass detection outcome through. Null means the
+        // BFF sent nothing (old case-extractions doc predating piece 1b);
+        // treat that as happy-path — the frontend renders no banner.
+        detection: (() => {
+          const raw = data.response?.detection;
+          if (!raw) return null;
+          const prov = raw.provider ?? {};
+          const provDetected = prov.detected ?? {};
+          const provEffective = prov.effective ?? {};
+          const pt = raw.plan_type ?? {};
+          return {
+            provider: {
+              detected: {
+                name: provDetected.name ?? null,
+                canonical: provDetected.canonical ?? null,
+                confidence: provDetected.confidence ?? null,
+                isKnownProvider: provDetected.is_known_provider ?? false,
+              },
+              effective: {
+                name: provEffective.name ?? null,
+                canonical: provEffective.canonical ?? null,
+                isKnownProvider: provEffective.is_known_provider ?? false,
+              },
+              failed: prov.failed ?? false,
+              failureReason: prov.failure_reason ?? null,
+              notes: prov.notes ?? [],
+            },
+            planType: {
+              detected: pt.detected ?? null,
+              effective: pt.effective ?? null,
+              failed: pt.failed ?? false,
+              failureReason: pt.failure_reason ?? null,
+            },
+          };
+        })(),
         fields: (data.response?.fields ?? []).map((f) => ({
           fieldKey: f.field_key,
           value: f.value,

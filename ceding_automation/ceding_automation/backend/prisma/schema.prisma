@@ -396,6 +396,15 @@ model Document {
   aiJobCostUsd      Decimal? @db.Decimal(10, 6) // from BFF llm_call_meta.total_cost_usd
   aiJobTokens       Int? // from BFF llm_call_meta.total_tokens
 
+  // H33 piece 1b — Reviewer-visible detection outcome. Populated by
+  // aiBffApply.applyExtractionResult from BffJobResult.response.detection.
+  // NULL for docs extracted before piece 1b shipped (frontend treats null
+  // as "happy-path, no banner"). Shape mirrored from ceding-ai-pipeline
+  // models/extraction_response.py DetectionOutcome — see the migration
+  // file for the full contract. Piece 5 extends the sub-objects with
+  // block fields without breaking this shape.
+  aiExtractionNotes Json? @map("ai_extraction_notes")
+
   // Relations
   checklistFields ChecklistField[]    @relation("FieldSourceDocument")
   fundLines       ChecklistFundLine[] @relation("FundLineSourceDocument")

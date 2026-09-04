@@ -290,6 +290,31 @@ export async function applyFieldExtraction(args: {
   return { outcome: "applied", fieldId: field.id };
 }
 
+// H33 piece 1b: derive the reviewer-visible detection-notes payload
+// from the pipeline's response.detection object.
+//
+// Returns null in two cases:
+//   1. The BFF sent no detection object (old case-extractions doc from
+//      before piece 1b shipped). Backward-compat: treat as happy path.
+//   2. Neither provider nor plan_type detection failed. Nothing worth
+//      surfacing to the reviewer — no banner should render.
+//
+// When either failed, returns the full object verbatim so the frontend
+// can render whichever variant of the banner is appropriate (provider
+// only / plan_type only / both). The shape is preserved end-to-end so
+// piece 5's block fields slot in additively without a migration.
+function buildAiExtractionNotes(
+  result: BffJobResult
+): BffJobResult["response"]["detection"] | null {
+  const detection = result.response.detection;
+  if (!detection) return null;
+  if (!detection.provider.failed && !detection.planType.failed) {
+    // Happy-path outcome — nothing to surface to the reviewer.
+    return null;
+  }
+  return detection;
+}
+
 // Document-level idempotent application. Called from the poller after a
 // successful GET /result. The PATCH /api/documents/:id endpoint handles its
 // own (simpler) document-state update — this helper is the "I have the full
@@ -335,6 +360,13 @@ export async function applyExtractionResult(
   const submittedAt = doc.aiJobSubmittedAt ?? doc.uploadedAt;
   const elapsedMs = Date.now() - submittedAt.getTime();
 
+  // H33 piece 1b: derive the reviewer-visible notes payload from the
+  // pipeline's detection outcome. Null (old case-extractions docs
+  // predating piece 1b) or a happy-path outcome (neither provider nor
+  // plan_type failed) writes NULL so the frontend renders no banner.
+  // Only fallback-fired jobs land a non-null value here.
+  const aiExtractionNotes = buildAiExtractionNotes(result);
+
   await prisma.document.update({
     where: { id: documentId },
     data: {
@@ -347,6 +379,14 @@ export async function applyExtractionResult(
       extractionMs: elapsedMs,
       aiJobCostUsd: new Prisma.Decimal(result.llmCallMeta.totalCostUsd),
       aiJobTokens: result.llmCallMeta.totalTokens,
+      aiExtractionNotes:
+        aiExtractionNotes === null
+          ? Prisma.DbNull
+          : // DetectionOutcome is a plain data shape; the cast is safe.
+            // Prisma's InputJsonValue requires an index signature that
+            // our named interfaces don't declare — same pattern used
+            // elsewhere in this file for auditLog metadata.
+            (aiExtractionNotes as unknown as Prisma.InputJsonValue),
     },
   });
 
