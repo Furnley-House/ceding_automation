@@ -2,6 +2,7 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient, CaseStatus, LOAStatus, PlanType, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { z } from "zod";
 import * as zoho from "../services/zohoCrm";
 import { SYSTEM_USER_ID } from "../services/aiBffApply";
@@ -482,7 +483,7 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
 });
 
 // ── Get Single Case ─────────────────────────────────────
-router.get("/:id", requireAuth, async (req: Request, res: Response) => {
+router.get("/:id", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
   const caseRecord = await prisma.case.findUnique({
     where: { id: req.params.id },
     include: {
@@ -660,6 +661,7 @@ router.patch(
   "/:id",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     // Body keys arrive in camelCase (the frontend's camelKeys helper converts before send).
     const body = req.body as Record<string, unknown>;
@@ -920,7 +922,7 @@ router.patch(
 );
 
 // ── Update Case Stage ────────────────────────────────────
-router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER", "ADVISER"]), async (req: Request, res: Response) => {
+router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER", "ADVISER"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { status: rawStatus, onHoldReason } = req.body;
 
   // Normalise: accept both the Prisma enum literal ("IN_REVIEW") and the
@@ -977,7 +979,7 @@ router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAP
 });
 
 // ── Update LOA Status ────────────────────────────────────
-router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Request, res: Response) => {
+router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { loaStatus } = req.body;
   const updated = await prisma.case.update({
     where: { id: req.params.id },
@@ -1012,7 +1014,7 @@ router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (
 });
 
 // ── Assign to Paraplanner ────────────────────────────────
-router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Request, res: Response) => {
+router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { paralPlannerId, note } = req.body;
 
   const updated = await prisma.case.update({
@@ -1075,7 +1077,7 @@ router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADM
 });
 
 // ── Log Chase Attempt ─────────────────────────────────────
-router.post("/:id/chase", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Request, res: Response) => {
+router.post("/:id/chase", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { method, notes } = req.body;
 
   const chase = await prisma.chaseAttempt.create({
@@ -1108,7 +1110,7 @@ router.post("/:id/chase", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async 
 //
 // Response shape:
 //   { synced: true, changed: boolean, changes: [{field, from, to}], case }
-router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Response) => {
+router.post("/:id/sync-from-zoho", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
   const id = req.params.id;
   const caseRecord = await prisma.case.findUnique({
     where: { id },
@@ -1896,6 +1898,7 @@ router.post(
   "/:id/link-plan",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const parsed = LinkPlanSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
@@ -1973,6 +1976,7 @@ router.post(
   "/:id/create-plan",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const caseRow = await prisma.case.findUnique({
       where: { id: req.params.id },
@@ -2126,6 +2130,7 @@ router.patch(
   "/:id/locked-field/:field",
   requireAuth,
   requireRole(["ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const field = req.params.field;
     if (!isLockedField(field)) {
@@ -2209,6 +2214,7 @@ router.post(
   "/:id/locked-field/:field/dismiss",
   requireAuth,
   requireRole(["ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const field = req.params.field;
     if (!isLockedField(field)) {
@@ -2270,6 +2276,7 @@ router.post(
   "/admin/cases/:id/reset-plan-type",
   requireAuth,
   requireRole(["ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const target = typeof body.target === "string" ? body.target : "";

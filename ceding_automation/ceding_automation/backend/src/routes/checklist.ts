@@ -3,6 +3,7 @@ import { Router, Request, Response } from "express";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { requireInternalKey } from "../middleware/internalKey";
 import { applyFieldExtraction } from "../services/aiBffApply";
 import { mirrorChecklistToCase } from "../services/caseFieldMirror";
@@ -11,7 +12,7 @@ const router = Router();
 const prisma = new PrismaClient();
 
 // ── Get all checklist fields for a case ─────────────────
-router.get("/:caseId/checklist", requireAuth, async (req: Request, res: Response) => {
+router.get("/:caseId/checklist", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
   const fields = await prisma.checklistField.findMany({
     where: { caseId: req.params.caseId },
     include: {
@@ -69,6 +70,7 @@ router.get("/:caseId/checklist", requireAuth, async (req: Request, res: Response
 router.post(
   "/:caseId/checklist/seed",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { fieldKey, label, section, value } = req.body;
     if (!fieldKey) return res.status(400).json({ error: "fieldKey is required" });
@@ -137,6 +139,7 @@ router.patch(
   "/:caseId/checklist/:fieldId",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { value, resolvedConflict, source } = req.body;
 
@@ -215,6 +218,7 @@ router.post(
   "/:caseId/checklist/:fieldId/resolve-conflict",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { chosenValue } = req.body;
 
@@ -258,6 +262,7 @@ router.post(
   "/:caseId/checklist/:fieldId/approve",
   requireAuth,
   requireRole(["ADVISER", "PARAPLANNER", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const field = await prisma.checklistField.findUnique({
       where: { id: req.params.fieldId },
@@ -296,6 +301,7 @@ router.post(
   "/:caseId/checklist/:fieldId/request-review",
   requireAuth,
   requireRole(["ADVISER", "PARAPLANNER", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { comment } = req.body;
 
@@ -369,6 +375,7 @@ router.post(
   "/:caseId/checklist/mark-missing-na",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const NA_VALUE = "N/A";
     const caseRecord = await prisma.case.findUnique({
@@ -469,6 +476,7 @@ router.post(
   "/:caseId/checklist/approve-all",
   requireAuth,
   requireRole(["ADVISER", "PARAPLANNER", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     await prisma.checklistField.updateMany({
       where: { caseId: req.params.caseId, isApproved: false },
@@ -499,6 +507,7 @@ router.post(
   "/:caseId/call-script",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const caseRecord = await prisma.case.findUnique({
       where: { id: req.params.caseId },
@@ -561,6 +570,7 @@ router.post(
   "/:caseId/transcript",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { text, source = "MANUAL_PASTE", ringCentralId } = req.body;
 

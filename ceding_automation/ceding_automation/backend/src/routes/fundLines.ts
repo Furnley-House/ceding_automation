@@ -6,6 +6,7 @@ import { Router, Request, Response } from "express";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireCaseAccess } from "../middleware/requireCaseAccess";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -46,7 +47,7 @@ function toDecimal(v: unknown): Prisma.Decimal | null {
 }
 
 // ── List fund lines for a case ──────────────────────────
-router.get("/:caseId/fund-lines", requireAuth, async (req: Request, res: Response) => {
+router.get("/:caseId/fund-lines", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
   const lines = await prisma.checklistFundLine.findMany({
     where: { caseId: req.params.caseId },
     include: {
@@ -77,6 +78,7 @@ router.post(
   "/:caseId/fund-lines",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const parse = fundLineCreateSchema.safeParse(req.body);
     if (!parse.success) {
@@ -133,6 +135,7 @@ router.post(
   "/:caseId/fund-lines/bulk",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const parse = fundLineBulkSchema.safeParse(req.body);
     if (!parse.success) {
@@ -197,6 +200,7 @@ router.patch(
   "/:caseId/fund-lines/:lineId",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const parse = fundLineUpdateSchema.safeParse(req.body);
     if (!parse.success) {
@@ -253,6 +257,7 @@ router.delete(
   "/:caseId/fund-lines/:lineId",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const existing = await prisma.checklistFundLine.findUnique({
       where: { id: req.params.lineId },

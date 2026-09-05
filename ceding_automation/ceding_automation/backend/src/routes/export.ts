@@ -11,6 +11,7 @@ import { Router, Request, Response } from "express";
 import multer from "multer";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { uploadToWorkDrive, resolveCaseFolderId, WorkDriveFolderResolutionError } from "../services/workdrive";
 import {
   updatePlanRecord,
@@ -135,6 +136,7 @@ router.post(
   "/:id/complete-export",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER", "ADVISER"]),
+  requireCaseAccess,
   upload.single("file"),
   async (req: Request, res: Response) => {
     const caseId = req.params.id;

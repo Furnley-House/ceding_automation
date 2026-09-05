@@ -4,6 +4,7 @@ import { Prisma, PrismaClient, DocumentStatus } from "@prisma/client";
 import multer from "multer";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { requireInternalKey } from "../middleware/internalKey";
 import { uploadToAzureBlob, generateSasUrl, downloadBlobAsBuffer } from "../services/storage";
 import { extractDocumentWithAI } from "../services/aiExtraction";
@@ -49,6 +50,7 @@ router.post(
   "/:caseId/documents",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   upload.single("file"),
   async (req: Request, res: Response) => {
     if (!req.file) {
@@ -97,7 +99,7 @@ router.post(
 );
 
 // ── Get Documents for Case ──────────────────────────────
-router.get("/:caseId/documents", requireAuth, async (req: Request, res: Response) => {
+router.get("/:caseId/documents", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
   const docs = await prisma.document.findMany({
     where: { caseId: req.params.caseId },
     orderBy: { uploadedAt: "desc" },
@@ -106,7 +108,7 @@ router.get("/:caseId/documents", requireAuth, async (req: Request, res: Response
 });
 
 // ── Get Document with Signed URL ────────────────────────
-router.get("/:caseId/documents/:docId/url", requireAuth, async (req: Request, res: Response) => {
+router.get("/:caseId/documents/:docId/url", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
   const doc = await prisma.document.findUnique({ where: { id: req.params.docId } });
   if (!doc) return res.status(404).json({ error: "Document not found" });
 
@@ -132,6 +134,7 @@ router.get("/:caseId/documents/:docId/url", requireAuth, async (req: Request, re
 router.get(
   "/:caseId/documents/:docId/raw",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const doc = await prisma.document.findUnique({
       where: { id: req.params.docId },
@@ -178,6 +181,7 @@ router.delete(
   "/:caseId/documents/:docId",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const doc = await prisma.document.findUnique({ where: { id: req.params.docId } });
     if (!doc) return res.status(404).json({ error: "Document not found" });
@@ -301,6 +305,7 @@ router.post(
   "/:caseId/documents/extract-pending",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const pending = await prisma.document.findMany({
       where: { caseId: req.params.caseId, status: "UPLOADED" },
@@ -346,6 +351,7 @@ router.post(
   "/:caseId/documents/:docId/extract",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const doc = await prisma.document.findUnique({ where: { id: req.params.docId } });
     if (!doc) return res.status(404).json({ error: "Document not found" });
@@ -400,6 +406,7 @@ router.post(
   "/:caseId/documents/:docId/cancel",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const doc = await prisma.document.findUnique({
       where: { id: req.params.docId },
@@ -863,6 +870,7 @@ async function triggerExtraction(docId: string, caseId: string, userId: string) 
 router.get(
   "/:caseId/documents/:documentId/ai-status",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const doc = await prisma.document.findFirst({
       where: { id: req.params.documentId, caseId: req.params.caseId },

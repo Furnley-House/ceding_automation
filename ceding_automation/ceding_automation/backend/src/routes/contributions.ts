@@ -9,6 +9,7 @@ import { Router, Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireCaseAccess } from "../middleware/requireCaseAccess";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -80,6 +81,7 @@ const contributionUpdateSchema = z.object({
 router.get(
   "/:caseId/contributions",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     // Guard against seeding rows for a caseId that doesn't exist.
     const caseExists = await prisma.case.findUnique({
@@ -100,6 +102,7 @@ router.patch(
   "/:caseId/contributions/:id",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const parsed = contributionUpdateSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -133,6 +136,7 @@ router.post(
   "/:caseId/contributions/reset",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const caseExists = await prisma.case.findUnique({
       where: { id: req.params.caseId },
