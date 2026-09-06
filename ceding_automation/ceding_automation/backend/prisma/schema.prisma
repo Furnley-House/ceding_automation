@@ -147,6 +147,12 @@ enum AuditAction {
   // land on). See docs/phase2/PHASE2_TASKS.md §H23.
   SEEDING_ZERO_TEMPLATES
   SEEDING_HEAL_ON_SYNC
+  // H33-followup PR2: manual contribution transaction entry. Written by
+  // POST /:caseId/contributions/:id/transactions when a CA types a
+  // number into a contributions grid cell. metadata captures the new
+  // value and the supersededDetails of any prior rows in the same
+  // (contributionId, type) that were superseded by this entry.
+  CONTRIBUTION_TRANSACTION_ADDED
 }
 
 enum ContactMethod {

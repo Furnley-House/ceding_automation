@@ -6,10 +6,14 @@
 // early stage before plan_type is known can still fetch an empty set.
 
 import { Router, Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { requireCaseAccess } from "../middleware/requireCaseAccess";
+import {
+  createManualContributionTransaction,
+  ContributionNotFoundError,
+} from "../services/contributionsService";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -92,12 +96,91 @@ router.get(
       res.status(404).json({ error: "Case not found" });
       return;
     }
-    const rows = await ensureRows(req.params.caseId);
+    // Seed if needed, then re-read with children included.
+    await ensureRows(req.params.caseId);
+    // H33-followup PR2: return each parent row with its non-superseded
+    // transaction children (grouped by type client-side; the client
+    // sums for the displayed total and derives the conflict marker
+    // against the parent's *AiTotal columns). Superseded rows are
+    // deliberately excluded — drill-down history is a PR3 concern and
+    // will extend this include with a query param when it lands.
+    const rows = await prisma.checklistContribution.findMany({
+      where: { caseId: req.params.caseId },
+      orderBy: { position: "asc" },
+      include: {
+        transactions: {
+          where: { supersededAt: null },
+          orderBy: [{ date: "asc" }, { createdAt: "asc" }],
+        },
+      },
+    });
     res.json({ rows });
   },
 );
 
+// ── Manual contribution entry — one MANUAL child, atomic supersede ──────
+// H33-followup PR2. Called by the redesigned two-grid Stage-4 UI when a
+// CA types a number into a cell (PR3). Creates ONE child, source=MANUAL,
+// null date/documentId, description='Manual entry'. Atomically supersedes
+// any non-superseded prior rows in the same (contributionId, type) —
+// both AI and MANUAL (see service docstring for the supersede-ALL
+// rationale). The parent's employerAiTotal / personalAiTotal is
+// PRESERVED. Audit action CONTRIBUTION_TRANSACTION_ADDED captures the
+// new value AND full details of anything superseded.
+const manualEntrySchema = z.object({
+  type: z.enum(["EMPLOYER", "PERSONAL"]),
+  // Accept either "5000.00", 5000, or 5000.00 — matches how the
+  // existing PATCH amount body is shaped so the client can send one
+  // consistent currency-input format across old and new grids.
+  amount: z.union([z.string(), z.number()]),
+});
+
+router.post(
+  "/:caseId/contributions/:id/transactions",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
+  async (req: Request, res: Response) => {
+    const parsed = manualEntrySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
+      return;
+    }
+    let amount: Prisma.Decimal;
+    try {
+      amount = new Prisma.Decimal(parsed.data.amount);
+    } catch {
+      res.status(400).json({ error: "Amount is not a valid decimal" });
+      return;
+    }
+    try {
+      const result = await createManualContributionTransaction(prisma, {
+        caseId: req.params.caseId,
+        contributionId: req.params.id,
+        type: parsed.data.type,
+        amount,
+        userId: req.user!.id,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof ContributionNotFoundError) {
+        res.status(404).json({ error: "Contribution row not found" });
+        return;
+      }
+      throw err;
+    }
+  },
+);
+
 // ── Update one contribution row (label and/or amount) ──────────────────
+// H33-followup PR2 note: the `amount` field on the parent
+// (checklist_contributions.amount TEXT, legacy single-total column) is
+// kept-and-deprecated per the design session. This PATCH remains the
+// path for the OLD single-grid UI to write the legacy amount, so
+// deploying PR2 without PR3 does not break Carmel's current type-a-
+// number workflow. The new POST /transactions above is the path the
+// PR3 two-grid UI will use; retirement of this amount write happens
+// only after PR3 ships and the pipeline emits per-row data.
 router.patch(
   "/:caseId/contributions/:id",
   requireAuth,
