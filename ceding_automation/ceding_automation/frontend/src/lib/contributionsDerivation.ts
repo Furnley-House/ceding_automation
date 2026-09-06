@@ -117,3 +117,44 @@ export function contributionsProgress(
     filled: (employerFilled ? 1 : 0) + (personalFilled ? 1 : 0),
   };
 }
+
+/**
+ * Apply the result of a successful POST /contributions/:id/transactions
+ * to a local rows array — without refetching. Mirrors PR2's server-side
+ * supersede-ALL: strips any non-superseded rows in the same
+ * (rowId, newTxn.type) cell (which the server just superseded atomically)
+ * and appends the new MANUAL row. Other cells are untouched, superseded
+ * rows in the same cell are untouched (they belong to the drill-down
+ * history, once a variant of GET starts returning them).
+ *
+ * This replaced a `refresh()` call after every manual save. Refresh
+ * flipped useContributions.loading → true, which unmounted the entire
+ * ContributionsTable body to a "Loading contributions…" placeholder,
+ * which (a) destroyed the editing input's focus mid-Tab flow — a CA
+ * typing amount + Tab + amount + Tab across 8 cells lost focus every
+ * time and had to click into each cell — and (b) briefly unmounted
+ * any expanded drill-down. The POST response has everything needed to
+ * reconstruct the post-supersede local state, so no refetch is needed.
+ */
+export function applyManualTransactionLocal(
+  rows: ContributionRow[],
+  rowId: string,
+  newTxn: ContributionTransaction,
+): ContributionRow[] {
+  return rows.map((r) => {
+    if (r.id !== rowId) return r;
+    return {
+      ...r,
+      transactions: [
+        // Drop only non-superseded rows of the SAME type — mirrors the
+        // server's WHERE contributionId=? AND type=? AND supersededAt
+        // IS NULL. Rows of the other type stay put (type-scoped
+        // supersede); already-superseded rows stay put (audit history).
+        ...r.transactions.filter(
+          (t) => !(t.type === newTxn.type && t.supersededAt === null),
+        ),
+        newTxn,
+      ],
+    };
+  });
+}

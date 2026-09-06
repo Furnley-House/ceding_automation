@@ -4,6 +4,7 @@ import {
   shouldShowConflictMarker,
   isGridFilled,
   contributionsProgress,
+  applyManualTransactionLocal,
 } from "./contributionsDerivation";
 import type { ContributionRow, ContributionTransaction } from "@/hooks/useContributions";
 
@@ -192,5 +193,90 @@ describe("contributionsProgress", () => {
       }),
     ];
     expect(contributionsProgress(rows, "PENSION")).toEqual({ add: 2, filled: 2 });
+  });
+});
+
+// ── applyManualTransactionLocal ──────────────────────────────────────────
+// Regression-and-behaviour guard for the UX hotfix that removed the
+// refresh() call in useContributions.addManualTransaction. If a future
+// edit reintroduces refetch after save (or narrows the strip filter),
+// these tests break loudly.
+
+describe("applyManualTransactionLocal", () => {
+  it("appends new MANUAL to an empty cell and does not touch other rows", () => {
+    const rowsBefore = [
+      row({ id: "r1", position: 1, transactions: [] }),
+      row({
+        id: "r2",
+        position: 2,
+        transactions: [tx({ id: "r2-e-ai", type: "EMPLOYER" })],
+      }),
+    ];
+    const newTxn = tx({
+      id: "new",
+      type: "EMPLOYER",
+      source: "MANUAL",
+      date: null,
+      amount: "5000.00",
+    });
+    const out = applyManualTransactionLocal(rowsBefore, "r1", newTxn);
+    expect(out[0].transactions).toEqual([newTxn]);
+    // Other row untouched.
+    expect(out[1].transactions).toHaveLength(1);
+    expect(out[1].transactions[0].id).toBe("r2-e-ai");
+  });
+
+  it("strips existing non-superseded rows in the same (rowId, type) and appends the new MANUAL — mirrors server supersede", () => {
+    const existing = [
+      tx({ id: "ai-1", type: "EMPLOYER", source: "AI", amount: "1000.00" }),
+      tx({ id: "ai-2", type: "EMPLOYER", source: "AI", amount: "500.00" }),
+      tx({ id: "manual-old", type: "EMPLOYER", source: "MANUAL", amount: "2500.00" }),
+    ];
+    const rowsBefore = [row({ id: "r1", transactions: existing })];
+    const newTxn = tx({
+      id: "new",
+      type: "EMPLOYER",
+      source: "MANUAL",
+      date: null,
+      amount: "6000.00",
+    });
+    const out = applyManualTransactionLocal(rowsBefore, "r1", newTxn);
+    // All 3 prior EMPLOYER rows dropped; only the new MANUAL remains.
+    expect(out[0].transactions).toEqual([newTxn]);
+  });
+
+  it("does NOT strip rows of the OTHER type in the same row (type-scoped supersede)", () => {
+    const existing = [
+      tx({ id: "e-ai", type: "EMPLOYER", source: "AI" }),
+      tx({ id: "p-ai", type: "PERSONAL", source: "AI" }),
+    ];
+    const rowsBefore = [row({ id: "r1", transactions: existing })];
+    const newTxn = tx({ id: "new-emp", type: "EMPLOYER", source: "MANUAL" });
+    const out = applyManualTransactionLocal(rowsBefore, "r1", newTxn);
+    const ids = out[0].transactions.map((t) => t.id).sort();
+    expect(ids).toEqual(["new-emp", "p-ai"]);
+  });
+
+  it("does NOT strip already-superseded rows (they belong to drill-down history)", () => {
+    const existing = [
+      tx({
+        id: "old",
+        type: "EMPLOYER",
+        source: "AI",
+        supersededAt: "2026-09-01T00:00:00.000Z",
+      }),
+    ];
+    const rowsBefore = [row({ id: "r1", transactions: existing })];
+    const newTxn = tx({ id: "new", type: "EMPLOYER", source: "MANUAL" });
+    const out = applyManualTransactionLocal(rowsBefore, "r1", newTxn);
+    const ids = out[0].transactions.map((t) => t.id).sort();
+    expect(ids).toEqual(["new", "old"]);
+  });
+
+  it("no-op on rowId not found", () => {
+    const rowsBefore = [row({ id: "r1" })];
+    const newTxn = tx({ id: "new", type: "EMPLOYER", source: "MANUAL" });
+    const out = applyManualTransactionLocal(rowsBefore, "r-doesnt-exist", newTxn);
+    expect(out).toEqual(rowsBefore);
   });
 });

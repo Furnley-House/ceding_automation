@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { contributionsApi } from "@/lib/api";
+import { applyManualTransactionLocal } from "@/lib/contributionsDerivation";
 
 export interface ContributionTransaction {
   id: string;
@@ -148,17 +149,61 @@ export function useContributions(caseId: string, enabled: boolean = true) {
    * Manual entry into a (contributionId, type) cell. POSTs to the PR2
    * endpoint which atomically supersedes any non-superseded prior rows
    * in that cell (both AI and MANUAL) and inserts ONE new MANUAL row.
-   * Optimistic — we refresh after the round trip since supersede shifts
-   * multiple rows in one shot and reconstructing the shape client-side
-   * is more error-prone than one extra GET.
+   *
+   * Local-state update — do NOT refresh(). refresh() flips `loading`
+   * true, which unmounts the entire ContributionsTable body to a
+   * "Loading contributions…" placeholder — that destroys the editing
+   * input's focus mid-Tab flow (a CA typing amount + Tab + amount +
+   * Tab across the 8 cells lost focus every save and had to click
+   * into each cell) and unmounts any expanded drill-down. The POST
+   * response has everything needed to reconstruct the post-supersede
+   * shape via applyManualTransactionLocal.
+   *
+   * Trade-off: local state can drift from server if another user is
+   * editing the same case concurrently. Rare (multi-CA on one case
+   * simultaneously); the next page navigation picks up any drift. Not
+   * worse than the checklist-field flow which also doesn't real-time
+   * sync across users.
    */
   const addManualTransaction = async (
     rowId: string,
     type: "EMPLOYER" | "PERSONAL",
     amount: string | number,
   ) => {
-    await contributionsApi.addTransaction(caseId, rowId, { type, amount });
-    await refresh();
+    const res = await contributionsApi.addTransaction(caseId, rowId, { type, amount });
+    // Backend returns a partial row (id, contributionId, type, amount,
+    // description, source, createdAt) — reconstruct the full
+    // ContributionTransaction locally. MANUAL entries have null date /
+    // documentId / sourcePage / sourceRef / supersededAt by definition
+    // (no source date, no source document — see contributionsService.ts
+    // docstring for the "honest > made-up" rule).
+    const partial = (res.data as {
+      transaction: {
+        id: string;
+        contributionId: string;
+        type: "EMPLOYER" | "PERSONAL";
+        amount: string;
+        description: string;
+        source: "MANUAL";
+        createdAt: string;
+      };
+    }).transaction;
+    const newTxn: ContributionTransaction = {
+      id: partial.id,
+      contributionId: partial.contributionId,
+      type: partial.type,
+      date: null,
+      amount: partial.amount,
+      description: partial.description,
+      documentId: null,
+      sourcePage: null,
+      sourceRef: null,
+      source: "MANUAL",
+      supersededAt: null,
+      createdAt: partial.createdAt,
+      updatedAt: partial.createdAt,
+    };
+    setRows((prev) => applyManualTransactionLocal(prev, rowId, newTxn));
   };
 
   return { rows, loading, error, refresh, updateRow, resetRows, addManualTransaction };

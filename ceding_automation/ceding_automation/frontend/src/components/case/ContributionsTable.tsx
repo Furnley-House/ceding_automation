@@ -309,6 +309,11 @@ function ContributionCell({
             <button
               type="button"
               onClick={startEdit}
+              // Auto-enter edit mode on focus (Tab or click) so the
+              // Tab-Type-Tab-Type flow across 8 cells works in one pass
+              // without pressing Space/Enter per cell. Idempotent: if
+              // already editing, setEditing(true) is a no-op.
+              onFocus={startEdit}
               disabled={readOnly}
               className={`flex-1 text-center ${
                 readOnly ? "cursor-default" : "cursor-text hover:bg-muted/40 rounded px-1"
@@ -329,6 +334,10 @@ function ContributionCell({
               <button
                 type="button"
                 onClick={onToggleExpand}
+                // Off the Tab flow — CAs Tab through amount cells only.
+                // Chevron is mouse-only; keyboard drill-down can be
+                // added later if requested.
+                tabIndex={-1}
                 title={isExpanded ? "Hide transactions" : "View transactions"}
                 aria-label={isExpanded ? "Hide transactions" : "View transactions"}
                 className="p-0.5 rounded hover:bg-muted flex-shrink-0"
