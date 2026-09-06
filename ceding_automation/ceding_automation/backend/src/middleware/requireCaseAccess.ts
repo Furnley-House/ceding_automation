@@ -40,9 +40,26 @@ export async function requireCaseAccess(
   // (`if (req.user!.role !== "ADMIN") { where.OR = [...] }`). No DB hit.
   if (req.user.role === "ADMIN") return next();
 
-  // Case identifier arrives as either :id (cases.ts route) or :caseId
-  // (checklist/documents/fundLines/contributions/export routes).
-  const caseId = (req.params.id ?? req.params.caseId) as string | undefined;
+  // Case identifier arrives as either :id (cases.ts /:id family +
+  // export.ts /:id/complete-export) or :caseId (checklist / documents /
+  // fundLines / contributions / audit / calls routes).
+  //
+  // TRAP — do NOT swap this order back. Two contributions routes carry
+  // BOTH :caseId AND :id in the path
+  // (PATCH /:caseId/contributions/:id and
+  //  POST  /:caseId/contributions/:id/transactions), where the :id is a
+  // CHILD row id (contribution row), NOT a case id. Reading :id first
+  // makes the case lookup below query by contribution id → no match →
+  // 403 for legitimate users. This shipped to prod on 2026-09-06 via
+  // 3e0c515 and 403'd every non-ADMIN contribution edit until the
+  // one-line hotfix that reversed the precedence. Regression covered
+  // by requireCaseAccess.test.ts "prefers :caseId when BOTH …" —
+  // that test fails immediately if this order is swapped back.
+  //
+  // Rule: prefer :caseId. Routes with only :id (no :caseId) resolve
+  // correctly via the fall-through; routes with only :caseId already
+  // preferred it; routes with both now pick the correct one.
+  const caseId = (req.params.caseId ?? req.params.id) as string | undefined;
   if (!caseId) {
     // Middleware mounted on a path with no case identifier — programmer
     // error. Fail closed rather than silently pass.

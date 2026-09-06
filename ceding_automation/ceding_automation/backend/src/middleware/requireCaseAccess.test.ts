@@ -140,6 +140,34 @@ describe("requireCaseAccess", () => {
     expect(next).toHaveBeenCalledOnce();
   });
 
+  // Regression guard for the prod incident on 2026-09-06: two
+  // contributions routes carry both :caseId AND :id (where :id is a
+  // child-row id, not a case id). Reading :id first queries the case
+  // table by contribution id → no match → 403 for legitimate users.
+  // This test locks the resolution order so a future edit swapping
+  // req.params.caseId ?? req.params.id back to
+  // req.params.id ?? req.params.caseId fails immediately.
+  it("prefers :caseId when BOTH :caseId and a non-case :id are present (regression: prod 403 incident 2026-09-06)", async () => {
+    findFirstMock.mockResolvedValueOnce({ id: "the-real-case-id" });
+    // Mirrors PATCH /:caseId/contributions/:id — :caseId is the case,
+    // :id is the child contribution row. The middleware must query by
+    // :caseId ("the-real-case-id"), not by :id ("contrib-row-xyz").
+    const req = makeReq({
+      user: USER("ADVISER"),
+      caseId: "the-real-case-id",
+      id: "contrib-row-xyz",
+    });
+    const res = makeRes();
+    const next = vi.fn() as NextFunction;
+    await requireCaseAccess(req, res, next);
+    expect(findFirstMock).toHaveBeenCalledOnce();
+    const whereArg = findFirstMock.mock.calls[0][0].where;
+    expect(whereArg.id).toBe("the-real-case-id");
+    expect(whereArg.id).not.toBe("contrib-row-xyz");
+    expect(next).toHaveBeenCalledOnce();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
   // ── Fail-closed guards ──────────────────────────────────────────────
   it("401s when req.user is missing (misordered mount — should be after requireAuth)", async () => {
     const req = makeReq({ id: "case-1" }); // no user
