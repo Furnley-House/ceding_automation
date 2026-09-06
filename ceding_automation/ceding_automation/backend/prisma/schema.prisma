@@ -199,6 +199,7 @@ model User {
   casesCreated     Case[]              @relation("CaseCreatedBy")
   casesAssigned    Case[]              @relation("CaseAssignedTo")
   casesParaplanner Case[]              @relation("CaseParaplanner")
+  casesAdviser     Case[]              @relation("CaseAdviser")
   auditLogs        AuditLog[]
   fieldEdits       ChecklistField[]
   fundLineEdits    ChecklistFundLine[] @relation("FundLineEditedBy")
@@ -295,6 +296,13 @@ model Case {
   assignedTo     User?   @relation("CaseAssignedTo", fields: [assignedToId], references: [id])
   paralPlannerId String?
   paraplanner    User?   @relation("CaseParaplanner", fields: [paralPlannerId], references: [id])
+  // Adviser — sourced from Zoho Contact.Adviser field. Lets an adviser see
+  // every case whose client sits under them, and (per Furnley policy) sign
+  // off checklist approvals when the assigned paraplanner is unavailable.
+  // Nullable because pre-existing cases don't have this wired yet — the
+  // Refresh from Zoho sync populates it on first refresh.
+  adviserId      String?
+  adviser        User?   @relation("CaseAdviser", fields: [adviserId], references: [id])
 
   // Timestamps
   createdAt        DateTime  @default(now())
@@ -326,6 +334,7 @@ model Case {
   zohoOwnerId          String?   // Plan.Owner ← Contact.Owner (single user)
   zohoClientOwnerIds   String[]  // Plan.Client_Owners ← Contact.Client_Owners (multi-user)
   zohoParaplannerId    String?   // Single paraplanner user id (fallback / convenience)
+  zohoAdviserId        String?   // Contact.Adviser (single user id) — audit trail for who the sync resolved
   zohoProviderRecordId String?   // Plan.Provider ← Providers-module record id
   zohoSyncedAt         DateTime? // When the cached IDs above were last refreshed
 
@@ -386,6 +395,15 @@ model Document {
   aiJobError        String?
   aiJobCostUsd      Decimal? @db.Decimal(10, 6) // from BFF llm_call_meta.total_cost_usd
   aiJobTokens       Int? // from BFF llm_call_meta.total_tokens
+
+  // H33 piece 1b — Reviewer-visible detection outcome. Populated by
+  // aiBffApply.applyExtractionResult from BffJobResult.response.detection.
+  // NULL for docs extracted before piece 1b shipped (frontend treats null
+  // as "happy-path, no banner"). Shape mirrored from ceding-ai-pipeline
+  // models/extraction_response.py DetectionOutcome — see the migration
+  // file for the full contract. Piece 5 extends the sub-objects with
+  // block fields without breaking this shape.
+  aiExtractionNotes Json? @map("ai_extraction_notes")
 
   // Relations
   checklistFields ChecklistField[]    @relation("FieldSourceDocument")

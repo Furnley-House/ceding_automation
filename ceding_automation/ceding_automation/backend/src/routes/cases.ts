@@ -2,6 +2,7 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient, CaseStatus, LOAStatus, PlanType, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { z } from "zod";
 import * as zoho from "../services/zohoCrm";
 import { SYSTEM_USER_ID } from "../services/aiBffApply";
@@ -445,12 +446,18 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
     ];
   }
 
-  // CA Team and Advisers only see their own cases (Admin sees all)
+  // CA Team and Advisers only see their own cases (Admin sees all).
+  // Advisers additionally see every case whose Zoho Client has them as
+  // the assigned Adviser on the Contact record — populated by the
+  // Refresh-from-Zoho sync (see Case.adviserId) — so they can step in
+  // for an absent paraplanner. All roles retain visibility into cases
+  // they created / are assigned to / paraplan.
   if (req.user!.role !== "ADMIN") {
     where.OR = [
       { createdById: req.user!.id },
       { assignedToId: req.user!.id },
       { paralPlannerId: req.user!.id },
+      { adviserId: req.user!.id },
     ];
   }
 
@@ -463,6 +470,8 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
       include: {
         provider: { select: { name: true } },
         assignedTo: { select: { name: true } },
+        paraplanner: { select: { name: true } },
+        adviser: { select: { name: true } },
         documents: { select: { id: true } },
         _count: { select: { checklistFields: true } },
       },
@@ -474,7 +483,7 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
 });
 
 // ── Get Single Case ─────────────────────────────────────
-router.get("/:id", requireAuth, async (req: Request, res: Response) => {
+router.get("/:id", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
   const caseRecord = await prisma.case.findUnique({
     where: { id: req.params.id },
     include: {
@@ -482,6 +491,7 @@ router.get("/:id", requireAuth, async (req: Request, res: Response) => {
       createdBy: { select: { id: true, name: true, role: true } },
       assignedTo: { select: { id: true, name: true, role: true } },
       paraplanner: { select: { id: true, name: true, role: true } },
+      adviser: { select: { id: true, name: true, role: true } },
       documents: true,
       checklistFields: {
         include: { template: true, sourceDocument: { select: { filename: true } } },
@@ -651,6 +661,7 @@ router.patch(
   "/:id",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     // Body keys arrive in camelCase (the frontend's camelKeys helper converts before send).
     const body = req.body as Record<string, unknown>;
@@ -911,7 +922,7 @@ router.patch(
 );
 
 // ── Update Case Stage ────────────────────────────────────
-router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER", "ADVISER"]), async (req: Request, res: Response) => {
+router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER", "ADVISER"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { status: rawStatus, onHoldReason } = req.body;
 
   // Normalise: accept both the Prisma enum literal ("IN_REVIEW") and the
@@ -968,7 +979,7 @@ router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAP
 });
 
 // ── Update LOA Status ────────────────────────────────────
-router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Request, res: Response) => {
+router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { loaStatus } = req.body;
   const updated = await prisma.case.update({
     where: { id: req.params.id },
@@ -1003,7 +1014,7 @@ router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (
 });
 
 // ── Assign to Paraplanner ────────────────────────────────
-router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Request, res: Response) => {
+router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { paralPlannerId, note } = req.body;
 
   const updated = await prisma.case.update({
@@ -1066,7 +1077,7 @@ router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADM
 });
 
 // ── Log Chase Attempt ─────────────────────────────────────
-router.post("/:id/chase", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Request, res: Response) => {
+router.post("/:id/chase", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { method, notes } = req.body;
 
   const chase = await prisma.chaseAttempt.create({
@@ -1099,7 +1110,7 @@ router.post("/:id/chase", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async 
 //
 // Response shape:
 //   { synced: true, changed: boolean, changes: [{field, from, to}], case }
-router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Response) => {
+router.post("/:id/sync-from-zoho", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
   const id = req.params.id;
   const caseRecord = await prisma.case.findUnique({
     where: { id },
@@ -1325,10 +1336,17 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   let resolvedParaplannerName: string | null = null;
   let paraplannerSyncNote: string | null = null;
 
+  // Adviser resolution mirrors the paraplanner path — read the same
+  // Contact record, resolve to an app user, auto-provision on new email.
+  let resolvedAdviserId: string | null = caseRecord.adviserId;
+  let resolvedAdviserName: string | null = null;
+  let adviserSyncNote: string | null = null;
+
   // Cached Zoho IDs — set during sync, used at export time.
   let cachedZohoOwnerId: string | null = null;
   let cachedZohoClientOwnerIds: string[] = [];
   let cachedZohoParaplannerId: string | null = null;
+  let cachedZohoAdviserId: string | null = null;
 
   if (effectiveClientZohoId) {
     try {
@@ -1343,6 +1361,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
         cachedZohoOwnerId = fields.owner?.id ?? null;
         cachedZohoClientOwnerIds = fields.clientOwners.map((u) => u.id);
         cachedZohoParaplannerId = fields.paraplanner?.id ?? null;
+        cachedZohoAdviserId = fields.adviser?.id ?? null;
 
         // Prefer single Paraplanner field; fall back to first Client_Owners entry.
         let ref = fields.paraplanner ?? fields.clientOwners[0] ?? null;
@@ -1404,6 +1423,63 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
             paraplannerSyncNote = `Paraplanner "${ref.name}" not found in app users (no email on Contact to auto-create).`;
           }
         }
+
+        // ── Adviser resolution ────────────────────────────────────────
+        // Same shape as the paraplanner block above: pick the ref, enrich
+        // email if the Contact lookup only carried {id, name}, then
+        // match / auto-provision / name-fallback. Auto-created rows land
+        // as role=ADVISER so they immediately get the widened case-list
+        // scope + approval permissions.
+        let advRef = fields.adviser;
+        if (advRef && !advRef.email && advRef.id) {
+          const full = await findZohoUserById(advRef.id);
+          if (full) {
+            advRef = {
+              id: advRef.id,
+              name: advRef.name ?? full.full_name,
+              email: full.email,
+            };
+          }
+        }
+        if (!advRef) {
+          adviserSyncNote = "No Adviser field on Contact.";
+        } else if (advRef.email) {
+          const lower = advRef.email.toLowerCase();
+          const existing = await prisma.user.findUnique({ where: { email: lower } });
+          if (existing && existing.status === "ACTIVE") {
+            resolvedAdviserId = existing.id;
+            resolvedAdviserName = existing.name;
+          } else if (existing && existing.status === "INACTIVE") {
+            resolvedAdviserId = null;
+            resolvedAdviserName = null;
+            adviserSyncNote = `Matched adviser ${lower} is inactive — unassigning.`;
+          } else {
+            const created = await prisma.user.create({
+              data: {
+                email: lower,
+                name: advRef.name?.trim() || lower.split("@")[0],
+                role: "ADVISER",
+                status: "ACTIVE",
+              },
+            });
+            resolvedAdviserId = created.id;
+            resolvedAdviserName = created.name;
+          }
+        } else if (advRef.name) {
+          const byName = await prisma.user.findFirst({
+            where: {
+              name: { equals: advRef.name, mode: "insensitive" },
+              role: "ADVISER",
+              status: "ACTIVE",
+            },
+          });
+          if (byName) {
+            resolvedAdviserId = byName.id;
+            resolvedAdviserName = byName.name;
+          } else {
+            adviserSyncNote = `Adviser "${advRef.name}" not found in app users (no email on Contact to auto-create).`;
+          }
+        }
       }
     } catch (err) {
       paraplannerSyncNote = `Contact fetch failed: ${(err as Error).message}`;
@@ -1435,6 +1511,7 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
   updates.zohoOwnerId = cachedZohoOwnerId;
   updates.zohoClientOwnerIds = cachedZohoClientOwnerIds;
   updates.zohoParaplannerId = cachedZohoParaplannerId;
+  updates.zohoAdviserId = cachedZohoAdviserId;
   updates.zohoProviderRecordId = cachedZohoProviderId;
   updates.zohoSyncedAt = new Date();
   // We deliberately do NOT push these into `changes[]` — they're internal
@@ -1667,6 +1744,14 @@ router.post("/:id/sync-from-zoho", requireAuth, async (req: Request, res: Respon
       to: resolvedParaplannerName ?? resolvedParaplannerId,
     });
   }
+  if (resolvedAdviserId !== caseRecord.adviserId) {
+    updates.adviserId = resolvedAdviserId;
+    changes.push({
+      field: "adviser",
+      from: caseRecord.adviserId,
+      to: resolvedAdviserName ?? resolvedAdviserId,
+    });
+  }
 
   // Ship #1 (H18): filter Zoho-driven writes through the locked-field
   // guard BEFORE applying updates. Any block emits an audit row and
@@ -1813,6 +1898,7 @@ router.post(
   "/:id/link-plan",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const parsed = LinkPlanSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
@@ -1890,6 +1976,7 @@ router.post(
   "/:id/create-plan",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const caseRow = await prisma.case.findUnique({
       where: { id: req.params.id },
@@ -2043,6 +2130,7 @@ router.patch(
   "/:id/locked-field/:field",
   requireAuth,
   requireRole(["ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const field = req.params.field;
     if (!isLockedField(field)) {
@@ -2126,6 +2214,7 @@ router.post(
   "/:id/locked-field/:field/dismiss",
   requireAuth,
   requireRole(["ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const field = req.params.field;
     if (!isLockedField(field)) {
@@ -2187,6 +2276,7 @@ router.post(
   "/admin/cases/:id/reset-plan-type",
   requireAuth,
   requireRole(["ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const target = typeof body.target === "string" ? body.target : "";

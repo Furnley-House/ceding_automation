@@ -82,7 +82,13 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
     isParaplanner: role === "paraplanner",
     isAdmin: role === "admin",
     canEditChecklist: role === "ca_team" || role === "admin",
-    canApprove: role === "adviser" || role === "paraplanner",
+    // canApprove now includes admin — the backend approve routes
+    // (POST /checklist/:id/approve, /approve-all) already accept the
+    // ADMIN role, but the UI was hiding the buttons. Furnley policy:
+    // when the assigned paraplanner is unavailable, an adviser or an
+    // admin can sign off the checklist in their place.
+    canApprove:
+      role === "adviser" || role === "paraplanner" || role === "admin",
   };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

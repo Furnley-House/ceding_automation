@@ -25,6 +25,14 @@ export interface DocumentRow {
   ai_job_submitted_at?: string | null;
   ai_job_completed_at?: string | null;
   extraction_ms?: number | null;
+  // H33 piece 1b: DetectionOutcome JSONB blob written by aiBffApply from
+  // the pipeline's Stage 1/2 fallback path (case-supplied provider or
+  // plan_type). Null on happy-path extractions and on pre-piece-1b docs.
+  // Shape is validated at read time by ExtractionNotesBanner.computeBanner
+  // — kept `unknown` here to avoid coupling the hook to the banner's
+  // internal type. Camel `aiExtractionNotes` from the API is snake-cased
+  // by snakeKeys below.
+  ai_extraction_notes?: unknown;
   [key: string]: unknown;
 }
 

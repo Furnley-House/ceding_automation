@@ -178,6 +178,11 @@ export interface ContactUserFields {
   clientOwners: ZohoUserRef[];     // Plans.Client_Owners ← Contact.Client_Owners
   paraplanner: ZohoUserRef | null;  // single user — used to derive Client_Owners if multi-select empty
   owner: ZohoUserRef | null;        // Plans.Owner ← Contact.Owner (CRM record-owner)
+  // Adviser assigned to the client. Furnley policy: when the case's
+  // paraplanner is unavailable, the adviser (or admin) signs off the
+  // checklist instead — the case-list filter unions this into the OR
+  // clause so the adviser can see every case their clients are on.
+  adviser: ZohoUserRef | null;
   workDriveFolderId: string | null; // Contact.Client_Record_Folder_ID — per-client WorkDrive folder
 }
 
@@ -206,11 +211,16 @@ export function extractContactUserFields(
   const paraplannerField =
     process.env.ZOHO_CONTACT_FIELD_PARAPLANNER ?? 'Paraplanner';
   const ownerField = process.env.ZOHO_CONTACT_FIELD_OWNER ?? 'Owner';
+  // Adviser field API name varies across Zoho orgs — 'Adviser' is the
+  // Furnley default. Overridable via env for orgs that named it e.g.
+  // Advisor / Financial_Adviser / Assigned_Adviser.
+  const adviserField = process.env.ZOHO_CONTACT_FIELD_ADVISER ?? 'Adviser';
 
   return {
     clientOwners: readMultiUserRefs(contact, clientOwnersField),
     paraplanner: readUserRef(contact, paraplannerField),
     owner: readUserRef(contact, ownerField),
+    adviser: readUserRef(contact, adviserField),
     workDriveFolderId: extractContactWorkDriveFolderId(contact),
   };
 }

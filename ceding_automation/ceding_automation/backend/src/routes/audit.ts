@@ -13,6 +13,7 @@
 
 import { Router, Request, Response } from "express";
 import { Prisma, PrismaClient } from "@prisma/client";
+import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 
@@ -62,6 +63,7 @@ function serializeAuditLog(row: AuditWithUserAndCase) {
 router.get(
   "/cases/:caseId",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const logs = await prisma.auditLog.findMany({
       where: { caseId: req.params.caseId },
@@ -166,6 +168,7 @@ const LogExportSchema = z.object({
 router.post(
   "/cases/:caseId/log-export",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const parsed = LogExportSchema.safeParse(req.body);
     if (!parsed.success) {

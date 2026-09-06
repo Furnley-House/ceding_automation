@@ -3,6 +3,7 @@ import { Router, Request, Response } from "express";
 import axios from "axios";
 import { PrismaClient } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import {
   initiateRingOut,
   getRingOutStatus,
@@ -29,7 +30,7 @@ const router = Router();
 const prisma = new PrismaClient();
 
 // ── RingCentral config probe ──────────────────────────────────────────────
-router.get("/:caseId/calls/rc-status", requireAuth, (_req: Request, res: Response) => {
+router.get("/:caseId/calls/rc-status", requireAuth, requireCaseAccess, (_req: Request, res: Response) => {
   res.json({
     configured: isRingCentralConfigured(),
     agentPhone: AGENT_PHONE ? `***${AGENT_PHONE.slice(-4)}` : null,
@@ -41,6 +42,7 @@ router.post(
   "/:caseId/calls/ring-out",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { toPhone } = req.body as { toPhone?: string };
     if (!toPhone) return res.status(400).json({ error: "toPhone is required" });
@@ -60,6 +62,7 @@ router.post(
 router.get(
   "/:caseId/calls/ring-out/:sessionId/status",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     try {
       const status = await getRingOutStatus(req.params.sessionId);
@@ -75,6 +78,7 @@ router.get(
 router.delete(
   "/:caseId/calls/ring-out/:sessionId",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     try {
       await cancelRingOut(req.params.sessionId);
@@ -91,6 +95,7 @@ router.post(
   "/:caseId/calls/script",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { missingFields, reviewFields, clientName, providerName, planNumber, planType } =
       req.body;
@@ -143,6 +148,7 @@ router.post(
   "/:caseId/calls/analyse",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { transcript, targets, clientName, providerName, planNumber } = req.body;
     if (!transcript) return res.status(400).json({ error: "transcript is required" });
@@ -169,6 +175,7 @@ router.post(
   "/:caseId/calls/log",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const {
       transcript,
@@ -263,6 +270,7 @@ router.post(
 router.get(
   "/:caseId/calls/rc-recordings-token",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { rcToken } = req.query as { rcToken?: string };
     if (!rcToken) return res.status(400).json({ error: "rcToken query param is required" });
@@ -301,6 +309,7 @@ const workdriveListCache = new Map<string, WorkDriveListCacheEntry>();
 router.get(
   "/:caseId/calls/workdrive-recordings",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     res.set("Cache-Control", "no-store");
     try {
@@ -375,6 +384,7 @@ router.get(
 router.get(
   "/:caseId/calls/workdrive-audio",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { fileId } = req.query as { fileId?: string };
     if (!fileId) return res.status(400).json({ error: "fileId required" });
@@ -395,6 +405,7 @@ router.get(
 router.post(
   "/:caseId/calls/workdrive-transcribe",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { fileId, filename } = req.body as { fileId?: string; filename?: string };
     if (!fileId) return res.status(400).json({ error: "fileId required" });
@@ -414,6 +425,7 @@ router.post(
 router.post(
   "/:caseId/calls/upload-recording-to-workdrive",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { contentUri, fileName, folderId, rcToken: userToken } = req.body as {
       contentUri?: string;
@@ -478,6 +490,7 @@ router.post(
 router.get(
   "/:caseId/calls/rc-recording-audio",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { contentUri, rcToken: userToken } = req.query as { contentUri?: string; rcToken?: string };
     if (!contentUri) return res.status(400).json({ error: "contentUri required" });
@@ -510,6 +523,7 @@ router.get(
 router.post(
   "/:caseId/calls/rc-transcribe",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { contentUri } = req.body as { contentUri?: string };
     if (!contentUri) return res.status(400).json({ error: "contentUri required" });
@@ -533,6 +547,7 @@ router.post(
 router.post(
   "/:caseId/calls/rc-transcribe-recording",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { contentUri, rcToken } = req.body as { contentUri?: string; rcToken?: string };
     if (!contentUri || !rcToken) {
@@ -553,6 +568,7 @@ router.post(
 router.get(
   "/:caseId/calls/rc-debug",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { rcToken } = req.query as { rcToken?: string };
     if (!rcToken) return res.status(400).json({ error: "rcToken required" });
@@ -588,6 +604,7 @@ router.get(
 router.get(
   "/:caseId/calls/rc-recordings",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { perPage } = req.query as { perPage?: string };
     res.set("Cache-Control", "no-store");
@@ -621,6 +638,7 @@ router.get(
 router.get(
   "/:caseId/calls/rc-transcript",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { telephonySessionId } = req.query as { telephonySessionId?: string };
     if (!telephonySessionId) {
