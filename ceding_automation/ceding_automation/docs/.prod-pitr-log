@@ -8,3 +8,4 @@
 2026-09-01T14:46:08Z  pg-cedingai-staging  20260830120000_add_seeding_audit_actions (H23 seed-at-submit)
 2026-09-02T07:55:46Z  pg-cedingai-prod  d8fed9d — 20260811120000_add_user_can_access_ai_training + 20260811120001_add_user_audit_log + 20260830120000_add_seeding_audit_actions
 2026-09-06T06:47:49Z  pg-cedingai-staging  a872ad0 — 20260904120000_add_ai_extraction_notes + case-access scoping
+2026-09-06T15:15:42Z  pg-cedingai-prod  3e0c515 — 20260812120000_add_case_adviser + 20260904120000_add_ai_extraction_notes
