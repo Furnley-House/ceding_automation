@@ -5,6 +5,7 @@ import { useExtractionDisplay } from "@/hooks/useExtractionDisplay";
 import { DocumentList } from "./DocumentList";
 import { PdfViewer } from "./PdfViewer";
 import { ChecklistPanel } from "./ChecklistPanel";
+import { ExtractionNotesBanner } from "./ExtractionNotesBanner";
 import { Button } from "@/components/ui/button";
 import { Loader2, Sparkles, CircleAlert, RotateCcw } from "lucide-react";
 import { api, documentsApi } from "@/lib/api";
@@ -350,6 +351,13 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
 
         {/* Right: checklist (DB-backed) */}
         <div className="lg:h-[700px] overflow-auto">
+          {/* H33 piece 1c: reviewer-visible advisory when Stage 1 or
+              Stage 2 fell back to case-supplied values on the current
+              document. Renders nothing on happy-path or pre-piece-1b
+              extractions. Above the field list because a CA scanning
+              the checklist needs the "why the values may need scrutiny"
+              hint before, not after, reading each row. */}
+          <ExtractionNotesBanner notes={selectedDoc?.ai_extraction_notes ?? null} />
           <ChecklistPanel
             planType={planType}
             caseId={caseId}
