@@ -57,8 +57,8 @@ enum LOAStatus {
   NOT_SENT
   SENT
   PROCESSED // provider acknowledged receipt of the LOA
-  RECEIVED  // signed PDF / policy info pack back from provider
-  SIGNED    // legacy — unused by the UI, kept so the enum migration is non-destructive
+  RECEIVED // signed PDF / policy info pack back from provider
+  SIGNED // legacy — unused by the UI, kept so the enum migration is non-destructive
 }
 
 enum DocumentStatus {
@@ -176,19 +176,19 @@ enum LOAFormat {
 // ─────────────────────────────────────────────
 
 model User {
-  id        String     @id @default(cuid())
-  email     String     @unique
-  name      String
-  role      UserRole
-  status    UserStatus @default(ACTIVE)
-  ssoId     String?    @unique // Zoho SSO identifier
+  id              String     @id @default(cuid())
+  email           String     @unique
+  name            String
+  role            UserRole
+  status          UserStatus @default(ACTIVE)
+  ssoId           String?    @unique // Zoho SSO identifier
   // Microsoft (Entra) refresh_token captured at SSO callback. Used by
   // POST /auth/refresh to silently mint a new app JWT when the previous one
   // expires, so users mid-extraction don't get dumped to the login screen.
   // Rotated on each refresh; nullable for users who pre-date this column.
-  ssoRefreshToken String? @db.Text
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  ssoRefreshToken String?    @db.Text
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
   // Per-user access flag for /ai-training. Deliberately not a role because
   // the grantees span CA_TEAM and ADMIN (see project note 2026-08-11).
@@ -206,19 +206,19 @@ model User {
   rcConnectedAt          DateTime?
 
   // Relations
-  casesCreated     Case[]              @relation("CaseCreatedBy")
-  casesAssigned    Case[]              @relation("CaseAssignedTo")
-  casesParaplanner Case[]              @relation("CaseParaplanner")
-  casesAdviser     Case[]              @relation("CaseAdviser")
-  auditLogs        AuditLog[]
-  fieldEdits       ChecklistField[]
-  fundLineEdits    ChecklistFundLine[] @relation("FundLineEditedBy")
-  comments         Comment[]
-  notifications    Notification[]
+  casesCreated          Case[]              @relation("CaseCreatedBy")
+  casesAssigned         Case[]              @relation("CaseAssignedTo")
+  casesParaplanner      Case[]              @relation("CaseParaplanner")
+  casesAdviser          Case[]              @relation("CaseAdviser")
+  auditLogs             AuditLog[]
+  fieldEdits            ChecklistField[]
+  fundLineEdits         ChecklistFundLine[] @relation("FundLineEditedBy")
+  comments              Comment[]
+  notifications         Notification[]
   // User-admin audit trail — same User appears on both sides. `Actor` is the
   // ADMIN who made the change; `Target` is the user whose row was changed.
-  userAuditLogsAsActor  UserAuditLog[] @relation("UserAuditLogActor")
-  userAuditLogsAsTarget UserAuditLog[] @relation("UserAuditLogTarget")
+  userAuditLogsAsActor  UserAuditLog[]      @relation("UserAuditLogActor")
+  userAuditLogsAsTarget UserAuditLog[]      @relation("UserAuditLogTarget")
 
   @@map("users")
 }
@@ -280,24 +280,24 @@ model Case {
   provider   Provider? @relation(fields: [providerId], references: [id])
 
   // Status & stage
-  status      CaseStatus @default(STAGE_1_LOA_PREP)
-  loaStatus   LOAStatus  @default(NOT_SENT)
-  loaSentAt   DateTime?  // exposed to UI as loa_sent_date via flattenCase
-  loaProcessedAt DateTime? // stamped when loaStatus → PROCESSED
-  loaReceivedAt  DateTime? // stamped when loaStatus → RECEIVED
+  status          CaseStatus @default(STAGE_1_LOA_PREP)
+  loaStatus       LOAStatus  @default(NOT_SENT)
+  loaSentAt       DateTime? // exposed to UI as loa_sent_date via flattenCase
+  loaProcessedAt  DateTime? // stamped when loaStatus → PROCESSED
+  loaReceivedAt   DateTime? // stamped when loaStatus → RECEIVED
   // LOA bookkeeping written from Stage 2 SendLOAWorkspace.
   // The chosen send-method (origo / email / courier) — drives which set
   // of method-scoped fields below are authoritative for the case.
-  loaMethod        String?
+  loaMethod       String?
   // Per-method notes + references. Each panel on Stage 2 owns its own
   // textarea / input, so the values don't leak across tabs when the
   // operator switches methods.
-  loaOrigoRef      String? // Origo reference (after Unipass submission)
-  loaOrigoNotes    String?
-  loaEmailNotes    String? // (no separate ref for email — recipient is canonical)
-  loaCourierRef    String? // courier tracking number
-  loaCourierNotes  String?
-  ragStatus   String? // "GREEN", "AMBER", "RED"
+  loaOrigoRef     String? // Origo reference (after Unipass submission)
+  loaOrigoNotes   String?
+  loaEmailNotes   String? // (no separate ref for email — recipient is canonical)
+  loaCourierRef   String? // courier tracking number
+  loaCourierNotes String?
+  ragStatus       String? // "GREEN", "AMBER", "RED"
 
   // Assignment
   createdById    String
@@ -315,12 +315,12 @@ model Case {
   adviser        User?   @relation("CaseAdviser", fields: [adviserId], references: [id])
 
   // Timestamps
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  readyForReviewAt DateTime?
-  approvedAt       DateTime?
-  completedAt      DateTime?
-  onHoldReason     String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  readyForReviewAt      DateTime?
+  approvedAt            DateTime?
+  completedAt           DateTime?
+  onHoldReason          String?
   // H23 (Nishant's design): stamped by the first extraction-submit on
   // this case. Used by Ship #1's guard predicate at
   // caseHasExtractionRun (backend/src/routes/cases.ts) to arm the
@@ -341,11 +341,11 @@ model Case {
   // them keeps the export deterministic and avoids the "id seems to be
   // invalid" errors that come from race conditions or stale Contact
   // field types. Run another sync to refresh.
-  zohoOwnerId          String?   // Plan.Owner ← Contact.Owner (single user)
-  zohoClientOwnerIds   String[]  // Plan.Client_Owners ← Contact.Client_Owners (multi-user)
-  zohoParaplannerId    String?   // Single paraplanner user id (fallback / convenience)
-  zohoAdviserId        String?   // Contact.Adviser (single user id) — audit trail for who the sync resolved
-  zohoProviderRecordId String?   // Plan.Provider ← Providers-module record id
+  zohoOwnerId          String? // Plan.Owner ← Contact.Owner (single user)
+  zohoClientOwnerIds   String[] // Plan.Client_Owners ← Contact.Client_Owners (multi-user)
+  zohoParaplannerId    String? // Single paraplanner user id (fallback / convenience)
+  zohoAdviserId        String? // Contact.Adviser (single user id) — audit trail for who the sync resolved
+  zohoProviderRecordId String? // Plan.Provider ← Providers-module record id
   zohoSyncedAt         DateTime? // When the cached IDs above were last refreshed
 
   // Relations
@@ -403,7 +403,7 @@ model Document {
   aiJobCompletedAt  DateTime? // idempotency guard — set once by whichever path settles first
   aiJobLastPolledAt DateTime? // cadence control for the background poller
   aiJobError        String?
-  aiJobCostUsd      Decimal? @db.Decimal(10, 6) // from BFF llm_call_meta.total_cost_usd
+  aiJobCostUsd      Decimal?  @db.Decimal(10, 6) // from BFF llm_call_meta.total_cost_usd
   aiJobTokens       Int? // from BFF llm_call_meta.total_tokens
 
   // H33 piece 1b — Reviewer-visible detection outcome. Populated by
@@ -416,8 +416,8 @@ model Document {
   aiExtractionNotes Json? @map("ai_extraction_notes")
 
   // Relations
-  checklistFields ChecklistField[]    @relation("FieldSourceDocument")
-  fundLines       ChecklistFundLine[] @relation("FundLineSourceDocument")
+  checklistFields          ChecklistField[]          @relation("FieldSourceDocument")
+  fundLines                ChecklistFundLine[]       @relation("FundLineSourceDocument")
   // Contribution transactions cite this document as their source once
   // piece 2b lands and the pipeline starts emitting per-row data. FK is
   // ON DELETE SET NULL — a document delete loses the "Jump to source
@@ -435,19 +435,19 @@ model Document {
 // ─────────────────────────────────────────────
 
 model ChecklistTemplate {
-  id              String   @id @default(cuid())
-  planType        PlanType
-  sectionName     String // e.g. "Pension Details", "Charges", "Benefits"
-  fieldName       String
-  fieldKey        String // snake_case key used in API
-  fieldType       String // "text" | "number" | "currency" | "date" | "dropdown" | "yes_no" | "percentage" | "url" | "free_text"
-  dropdownOptions String[] // If fieldType = "dropdown"
-  isRequired      Boolean  @default(true)
-  displayOrder    Int
-  isActive        Boolean  @default(true)
-  isManualEntryOnly Boolean @default(false) // when true, AI BFF never writes this field — manual entry only
-  conditionalNote String? // Tooltip / guidance for CA team
-  metadata        Json?   // v1.1 canonical extras: typical_values, normalize_per, allows_defer_to_source, defer_examples, auto_extract_hint, parent_field, accepts_non_applicable_markers, columns, section_order
+  id                String   @id @default(cuid())
+  planType          PlanType
+  sectionName       String // e.g. "Pension Details", "Charges", "Benefits"
+  fieldName         String
+  fieldKey          String // snake_case key used in API
+  fieldType         String // "text" | "number" | "currency" | "date" | "dropdown" | "yes_no" | "percentage" | "url" | "free_text"
+  dropdownOptions   String[] // If fieldType = "dropdown"
+  isRequired        Boolean  @default(true)
+  displayOrder      Int
+  isActive          Boolean  @default(true)
+  isManualEntryOnly Boolean  @default(false) // when true, AI BFF never writes this field — manual entry only
+  conditionalNote   String? // Tooltip / guidance for CA team
+  metadata          Json? // v1.1 canonical extras: typical_values, normalize_per, allows_defer_to_source, defer_examples, auto_extract_hint, parent_field, accepts_non_applicable_markers, columns, section_order
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -478,16 +478,16 @@ model ChecklistField {
   status     FieldStatus     @default(AI_EXTRACTED)
 
   // Source citation
-  sourceDocumentId String?
-  sourceDocument   Document? @relation("FieldSourceDocument", fields: [sourceDocumentId], references: [id])
+  sourceDocumentId   String?
+  sourceDocument     Document? @relation("FieldSourceDocument", fields: [sourceDocumentId], references: [id])
   // Snapshot of the source document's filename at extraction time. Persists
   // after the FK is SET NULL by a doc-delete cascade, so the audit trail can
   // still name the (now-gone) source. Written alongside sourceDocumentId in
   // aiBffApply.applyFieldExtraction. (S5 / Decision 6 step 2.)
   sourceDocumentName String?
-  sourcePageNumber Int?
-  sourceSection    String? // Table heading or section name in document
-  sourceQuote      String? // Raw text snippet extracted
+  sourcePageNumber   Int?
+  sourceSection      String? // Table heading or section name in document
+  sourceQuote        String? // Raw text snippet extracted
 
   // Manual override tracking
   isManuallyOverridden Boolean   @default(false)
@@ -675,11 +675,11 @@ model ChecklistFundLine {
   planType PlanType // PENSION | ISA | GIA — copied from case for fast filtering
 
   // Row data (matches Excel columns; all nullable so partial rows can be saved)
-  fundName      String
-  isinSedolCiti String? // ISIN / Sedol / Citi code
-  numberOfUnits Decimal? @db.Decimal(20, 6)
-  pricePerUnit  Decimal? @db.Decimal(20, 6)
-  value         Decimal? @db.Decimal(20, 2)
+  fundName         String
+  isinSedolCiti    String? // ISIN / Sedol / Citi code
+  numberOfUnits    Decimal? @db.Decimal(20, 6)
+  pricePerUnit     Decimal? @db.Decimal(20, 6)
+  value            Decimal? @db.Decimal(20, 2)
   // Manual-entry only — AI BFF intentionally does not populate these.
   ocf              Decimal? @db.Decimal(8, 4) // ongoing charges figure, stored as percentage e.g. 0.7500 = 0.75%
   transactionCosts Decimal? @db.Decimal(8, 4) // stored as percentage e.g. 0.0900 = 0.09%
