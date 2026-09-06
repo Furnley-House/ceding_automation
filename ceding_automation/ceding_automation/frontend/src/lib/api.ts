@@ -207,6 +207,17 @@ export const contributionsApi = {
     patch: { taxYearLabel?: string; amount?: string | null },
   ) => api.patch(`/cases/${caseId}/contributions/${id}`, patch),
   reset: (caseId: string) => api.post(`/cases/${caseId}/contributions/reset`, {}),
+  // H33-followup PR3: manual entry into a two-grid contributions cell.
+  // Posts to the PR2 endpoint that atomically supersedes any non-
+  // superseded prior rows in (contributionId, type) and inserts one
+  // MANUAL child. Server preserves parent.employerAiTotal /
+  // personalAiTotal — that's the AI's forensic record of what it read.
+  addTransaction: (
+    caseId: string,
+    contributionId: string,
+    body: { type: "EMPLOYER" | "PERSONAL"; amount: string | number },
+  ) =>
+    api.post(`/cases/${caseId}/contributions/${contributionId}/transactions`, body),
 };
 
 // ── Providers ────────────────────────────────────────────

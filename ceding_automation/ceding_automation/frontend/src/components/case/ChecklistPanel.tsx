@@ -14,6 +14,8 @@ import { useFundLines } from "@/hooks/useFundLines";
 import { checklistApi } from "@/lib/api";
 import { FundDetailsTable } from "./FundDetailsTable";
 import { ContributionsTable } from "./ContributionsTable";
+import { useContributions } from "@/hooks/useContributions";
+import { contributionsProgress } from "@/lib/contributionsDerivation";
 
 // Legacy free-text fields that the AI extractor populates with unstructured
 // contributions text ("See contributions tables for full history"). These
@@ -234,6 +236,16 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
   const { rows: fundLines } = useFundLines(caseId);
   const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
 
+  // H33-followup PR3: the two-grid contributions (Employer + Personal) fold
+  // into the completion counter on Pension cases. +2 to the denominator;
+  // each grid contributes 1 to the "filled" bucket only when it has at
+  // least one non-superseded transaction. Pension cases pre-PR3 (or with
+  // no CA entry yet) drop by ~2 pts of completion until a CA types into
+  // the grids — the "100% complete with zero contribution data" reading
+  // was wrong on every case; this makes it honest. See commit message
+  // for the team-facing note.
+  const { rows: contributions } = useContributions(caseId, isPension);
+
   const stats = useMemo(() => {
     const counts = { high: 0, medium: 0, low: 0, conflict: 0, missing: 0, approved: 0, review: 0 };
     visibleFields.forEach((f) => {
@@ -263,10 +275,17 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     if (fundStatus === "missing") counts.missing++;
     else if (fundStatus === "review") counts.low++;
     else if (fundStatus === "filled") counts.high++;
-    const total = visibleFields.length + 1; // +1 for the Fund Details section
+    // Fold the two contributions grids. Non-Pension returns {add:0, filled:0}.
+    const contribProgress = contributionsProgress(
+      contributions,
+      isPension ? "PENSION" : null,
+    );
+    counts.high += contribProgress.filled;
+    counts.missing += contribProgress.add - contribProgress.filled;
+    const total = visibleFields.length + 1 + contribProgress.add;
     const completion = total === 0 ? 0 : Math.round(((total - counts.missing) / total) * 100);
     return { ...counts, total, completion };
-  }, [visibleFields, byKey, fundStatus]);
+  }, [visibleFields, byKey, fundStatus, contributions, isPension]);
 
   // Assemble the two-candidate resolver pack for a CONFLICT field. Returns
   // undefined when not conflicted or when the row lacks conflict_values

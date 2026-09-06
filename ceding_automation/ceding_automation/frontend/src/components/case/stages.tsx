@@ -29,6 +29,8 @@ import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useChecklistFields, isMissing, displayValue, fundDetailsStatus } from "@/hooks/useChecklistFields";
 import { useFundLines } from "@/hooks/useFundLines";
+import { useContributions } from "@/hooks/useContributions";
+import { contributionsProgress } from "@/lib/contributionsDerivation";
 import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation } from "react-router-dom";
@@ -305,6 +307,13 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
   // doesn't read as "All filled".
   const { rows: fundLines } = useFundLines(caseItem.id);
   const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
+  // H33-followup PR3: two-grid contributions (Employer + Personal) fold
+  // into the paraplanner-facing count on Pension cases. +2 to the
+  // denominator; the counter reads honestly rather than "100% complete
+  // with zero contribution data" (which was wrong on every completed
+  // Pension case pre-PR3). See commit message for team-facing note.
+  const isPension = (caseItem.plan_type ?? "").toUpperCase() === "PENSION";
+  const { rows: contributions } = useContributions(caseItem.id, isPension);
 
   const totals = useMemo(() => {
     const fieldTotal = visibleFields.length;
@@ -319,8 +328,15 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
     // (the section has data, just not all high-confidence); missing only when
     // there are no rows / every row is empty.
     const fundFilled = fundStatus !== "missing";
-    const total = fieldTotal + 1;
     if (fundFilled) filled += 1;
+    // +2 for the two contributions grids on Pension. contributionsProgress
+    // returns {add: 0, filled: 0} for non-Pension.
+    const contribProgress = contributionsProgress(
+      contributions,
+      isPension ? "PENSION" : null,
+    );
+    filled += contribProgress.filled;
+    const total = fieldTotal + 1 + contribProgress.add;
     const missing = total - filled;
     return {
       total,
@@ -329,7 +345,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
       returned,
       complete: total > 0 && missing === 0 && returned === 0,
     };
-  }, [visibleFields, byKey, fundStatus]);
+  }, [visibleFields, byKey, fundStatus, contributions, isPension]);
 
   const grouped = useMemo(() => groupBySection(visibleFields), [visibleFields]);
 
