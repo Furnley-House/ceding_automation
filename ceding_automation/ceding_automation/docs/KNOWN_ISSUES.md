@@ -5,6 +5,97 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-04 — AI write paths batch-audit; manual entries per-row-audit
+
+**Filed:** 2026-09-07
+**Owner:** unassigned
+**Severity:** Low today, Medium when contributions land in prod and CAs
+start asking "where did this £ figure come from?" — the conflict-marker
+rule (H33-followup PR3) makes the traceability gap user-visible.
+
+### The gap
+
+Two AI helpers write ONE audit row per batch, regardless of how many
+child rows were inserted:
+
+| Helper | Action | Audit rows per call |
+|---|---|---|
+| `applyFundLines` (`services/aiBffApply.ts`) | `FUND_LINE_ADDED` | 1 |
+| `applyContributionTransactions` (`services/aiBffApply.ts`) | `CONTRIBUTION_TRANSACTION_ADDED` | 1 |
+
+The manual counterpart writes ONE audit row per inserted transaction:
+
+| Helper | Action | Audit rows per call |
+|---|---|---|
+| `createManualContributionTransaction` (`services/contributionsService.ts`) | `CONTRIBUTION_TRANSACTION_ADDED` | 1 per row |
+
+So a CA who types £500 into an EMPLOYER 2025/26 cell can be traced to
+exactly one audit row naming the transaction id, amount, user, and any
+superseded siblings. An AI extraction that inserts nine transactions
+across four tax years produces one audit row saying "9 contribution
+rows extracted" — you can find WHICH rows via `sourceDocumentId +
+createdAt` on the transaction table itself, but there is no direct
+audit trail per transaction saying which job wrote it and when it
+landed.
+
+### Why fund_lines has been like this forever and nobody noticed
+
+`applyFundLines` shipped with the same batch-audit pattern and no one
+raised it because funds are read-only in the app — the CA compares the
+extracted rows against a screenshot and either accepts or overrides.
+The audit is used at the "did AI touch this document" grain, not the
+"who wrote this specific £value" grain.
+
+Contributions are different: PR3's conflict-marker rule will compare
+`sum(non-superseded children)` against `AiTotal` and flag mismatches
+to the CA. When a CA sees a marker on £5,000 EMPLOYER 2025/26 and asks
+"where did this come from — which run, which prompt version, which
+doc?" — the answer today is "search the transactions by
+sourceDocumentId then cross-reference against the parent's `AI_EXTRACTION_RUN`
+audit" rather than a direct row-level audit.
+
+### Root cause
+
+`applyFundLines` set the batch-audit precedent (single
+`FUND_LINE_ADDED` per call) at line 511. `applyContributionTransactions`
+matched for consistency across the AI write paths — but the pattern to
+match for per-row traceability was the manual service, not the sibling
+AI helper.
+
+### Fix direction
+
+1. **Preferred:** in `applyContributionTransactions`, emit one
+   `CONTRIBUTION_TRANSACTION_ADDED` audit per row inserted, matching
+   `createManualContributionTransaction`. Keep the current batch
+   summary too (rename e.g. `CONTRIBUTION_EXTRACTION_RUN`) so the
+   "how many rows did this job write" grain doesn't disappear.
+2. **Same treatment for `applyFundLines`** so the two AI helpers move
+   as one — one PR, one shape change, symmetric to the manual pattern
+   already established.
+3. **Alternative (cheaper):** stamp a `batchId` on every inserted row's
+   audit metadata so a downstream query can reconstruct the group.
+   Doesn't add per-row audit; just makes the batch audit joinable to
+   the rows it produced. Less useful than (1) for the "where did this
+   figure come from" question.
+
+### Notes for whoever picks this up
+
+- `AI_EXTRACTION_RUN` at `aiBffApply.ts:393` already writes one doc-level
+  summary per extraction. Between that and the per-row audit proposed
+  above, the batch audit inside each helper becomes redundant — could
+  be removed rather than renamed. Weigh against the cost of a search
+  pattern that currently works ("find `FUND_LINE_ADDED` where
+  metadata.documentId = X") breaking for any tool that relies on it.
+- The manual service's `supersededDetails` metadata is the pattern
+  worth copying for the AI per-row audit — capture what was superseded
+  and what replaced it, so the audit tells the full story of the cell
+  transition rather than the delta.
+- Cross-refs H31 (DLQ observability) — same class of "silent no-op ==
+  invisible" hygiene. This one is not silent (rows do land), just
+  low-resolution.
+
+---
+
 ## KI-02 — `GET /api/cases/:id` fans out to ~9–10 DB round-trips per hit
 
 **Filed:** 2026-09-08

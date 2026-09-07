@@ -357,6 +357,32 @@ export async function applyExtractionResult(
     fundLines: result.response.fundLines,
   });
 
+  // Pension contributions — same helper the PATCH push path uses. LOAD-
+  // BEARING on the pull path today because H16 leaves COLLEAGUE_BACKEND_URL
+  // unset on the prodai apps, so the poller is the ONLY functioning write-
+  // back path in production. Wiring only the push path would produce the
+  // exact H21 shape we're avoiding: pipeline emits, backend accepts on
+  // paper, prod silently drops. Both paths carry the same shape so a
+  // future H16 fix doesn't require touching this call site.
+  await applyContributionTransactions({
+    caseId: doc.caseId,
+    documentId,
+    jobId: result.jobId,
+    // Wire keeps date as YYYY-MM-DD string (matches completedAt precedent);
+    // convert to Date here at the persistence boundary.
+    transactions: result.response.contributionTransactions.map((c) => ({
+      type: c.type,
+      taxYearLabel: c.taxYearLabel,
+      date: c.date ? new Date(c.date) : null,
+      amount: c.amount,
+      description: c.description,
+      sourcePage: c.sourcePage,
+      sourceRef: c.sourceRef,
+      confidence: c.confidence,
+    })),
+    totals: result.response.contributionTotals,
+  });
+
   const submittedAt = doc.aiJobSubmittedAt ?? doc.uploadedAt;
   const elapsedMs = Date.now() - submittedAt.getTime();
 
@@ -524,4 +550,240 @@ export async function applyFundLines(
   });
 
   return { count: fundLines.length };
+}
+
+// ── ChecklistContribution + ContributionTransaction persistence ─────────────
+//
+// Called from BOTH the PATCH /api/documents/:id push path AND the poller's
+// applyExtractionResult pull path (same shape, one helper). Pull-path
+// coverage is LOAD-BEARING in production: H16 leaves COLLEAGUE_BACKEND_URL
+// unset on the prodai apps so the BFF cannot push, and the poller is the
+// only functioning write-back today. If we shipped push-only, contributions
+// would emit from the pipeline and never reach Postgres — the exact H21
+// shape (silent-drop between contract layers) we're building this to avoid.
+//
+// Contract:
+//   - No-op when BOTH transactions and totals are empty / missing.
+//   - Upserts ChecklistContribution parents from totals[] keyed on
+//     (caseId, position). taxYearLabel is CREATE-only; a re-extraction
+//     does NOT overwrite a CA relabel. AI totals are written on both
+//     CREATE and UPDATE.
+//   - Supersedes (stamps supersededAt=now) any non-superseded AI rows
+//     previously inserted from THIS sourceDocumentId. MANUAL rows are
+//     never touched. Matches the schema.prisma header comment on
+//     contribution_transactions: "Nothing is deleted."
+//   - Resolves each transaction to a parent row: primary by taxYearLabel
+//     string match against DB; fallback via the pipeline's own
+//     (taxYearLabel → position) map so a CA relabel does not strand
+//     the new children. No-parent transactions are counted-and-skipped.
+//   - Per (parentId, type) cell, if any non-superseded MANUAL child
+//     exists the CA owns that cell — SKIP inserting AI children into
+//     it. The parent's *AiTotal is still written (forensics record;
+//     see schema.prisma:employerAiTotal comment — FH-2026-000188). PR3
+//     decides whether a manually-owned cell renders a conflict marker.
+//   - Inserts surviving transactions as source='AI' with documentId,
+//     sourcePage, sourceRef populated.
+//   - Writes ONE audit row per batch — action CONTRIBUTION_TRANSACTION_ADDED
+//     (enum reused; the manual path uses the same action with
+//     source='MANUAL'), source='AI', metadata carries counts AND the
+//     list of skipped cells so the trail records WHICH cells were held
+//     back by manual ownership, not just how many. Row-level audit is
+//     intentionally omitted for parity with applyFundLines's batch audit
+//     — same asymmetry-with-manual-path exists there.
+type ContributionsTx = Pick<
+  PrismaClient,
+  "checklistContribution" | "contributionTransaction" | "auditLog"
+> | Prisma.TransactionClient;
+
+export interface WireContributionTransaction {
+  type: "EMPLOYER" | "PERSONAL";
+  taxYearLabel: string;
+  /** Nullable — a total-without-breakdown synthetic row carries no date. */
+  date: Date | null;
+  amount: number;
+  description: string;
+  sourcePage?: number | null;
+  sourceRef?: string | null;
+  /** Accepted from the pipeline but not persisted today — no column exists
+   *  on ContributionTransaction. Reserved for a future migration; keeping
+   *  it in the interface avoids a signature churn when that lands. */
+  confidence?: string | null;
+}
+
+export interface WireContributionTotal {
+  position: number;
+  taxYearLabel: string;
+  employerAiTotal: number | null;
+  personalAiTotal: number | null;
+}
+
+export interface ApplyContributionsArgs {
+  caseId: string;
+  documentId: string;
+  jobId: string;
+  transactions?: WireContributionTransaction[] | null;
+  totals?: WireContributionTotal[] | null;
+  /** Optional transaction client. Falls back to the module-level prisma. */
+  tx?: ContributionsTx;
+}
+
+export interface ApplyContributionsResult {
+  parentsUpserted: number;
+  supersededPriorAiCount: number;
+  transactionsInserted: number;
+  cellsSkippedManuallyOwned: number;
+  transactionsSkippedNoParent: number;
+}
+
+export async function applyContributionTransactions(
+  args: ApplyContributionsArgs,
+): Promise<ApplyContributionsResult> {
+  const client: ContributionsTx = args.tx ?? prisma;
+  const totals = args.totals ?? [];
+  const txs = args.transactions ?? [];
+  const empty: ApplyContributionsResult = {
+    parentsUpserted: 0,
+    supersededPriorAiCount: 0,
+    transactionsInserted: 0,
+    cellsSkippedManuallyOwned: 0,
+    transactionsSkippedNoParent: 0,
+  };
+  if (totals.length === 0 && txs.length === 0) return empty;
+
+  // (1) Upsert parents. taxYearLabel is CREATE-only (preserves CA relabel).
+  for (const t of totals) {
+    await client.checklistContribution.upsert({
+      where: { caseId_position: { caseId: args.caseId, position: t.position } },
+      create: {
+        caseId: args.caseId,
+        position: t.position,
+        taxYearLabel: t.taxYearLabel,
+        employerAiTotal:
+          t.employerAiTotal != null ? new Prisma.Decimal(t.employerAiTotal) : null,
+        personalAiTotal:
+          t.personalAiTotal != null ? new Prisma.Decimal(t.personalAiTotal) : null,
+      },
+      update: {
+        // taxYearLabel intentionally omitted — a CA edit is authoritative.
+        employerAiTotal:
+          t.employerAiTotal != null ? new Prisma.Decimal(t.employerAiTotal) : null,
+        personalAiTotal:
+          t.personalAiTotal != null ? new Prisma.Decimal(t.personalAiTotal) : null,
+      },
+    });
+  }
+
+  // (2) Supersede prior AI rows from THIS document. Idempotent.
+  const superseded = await client.contributionTransaction.updateMany({
+    where: {
+      documentId: args.documentId,
+      source: "AI",
+      supersededAt: null,
+    },
+    data: { supersededAt: new Date() },
+  });
+
+  // (3) Read parents once; build lookup maps.
+  const parents = await client.checklistContribution.findMany({
+    where: { caseId: args.caseId },
+    select: { id: true, position: true, taxYearLabel: true },
+  });
+  const parentByLabel = new Map<string, { id: string; position: number }>();
+  const parentByPosition = new Map<number, { id: string; taxYearLabel: string }>();
+  for (const p of parents) {
+    parentByLabel.set(p.taxYearLabel, { id: p.id, position: p.position });
+    parentByPosition.set(p.position, { id: p.id, taxYearLabel: p.taxYearLabel });
+  }
+  const pipelineLabelToPosition = new Map<string, number>();
+  for (const t of totals) pipelineLabelToPosition.set(t.taxYearLabel, t.position);
+
+  const resolveParentId = (label: string): string | null => {
+    const direct = parentByLabel.get(label);
+    if (direct) return direct.id;
+    const pos = pipelineLabelToPosition.get(label);
+    if (pos != null) {
+      const fallback = parentByPosition.get(pos);
+      if (fallback) return fallback.id;
+    }
+    return null;
+  };
+
+  // (4) Identify manually-owned (parentId, type) cells. Single bulk read.
+  const manuallyOwned = await client.contributionTransaction.findMany({
+    where: {
+      contribution: { caseId: args.caseId },
+      source: "MANUAL",
+      supersededAt: null,
+    },
+    select: { contributionId: true, type: true },
+  });
+  const manualCells = new Set<string>(
+    manuallyOwned.map((r) => `${r.contributionId}::${r.type}`),
+  );
+
+  // (5) Insert AI rows, skipping manually-owned cells and no-parent txs.
+  const rowsToInsert: Prisma.ContributionTransactionCreateManyInput[] = [];
+  const skippedCells = new Set<string>();
+  let noParentCount = 0;
+  for (const t of txs) {
+    const parentId = resolveParentId(t.taxYearLabel);
+    if (!parentId) {
+      noParentCount += 1;
+      continue;
+    }
+    const cellKey = `${parentId}::${t.type}`;
+    if (manualCells.has(cellKey)) {
+      skippedCells.add(cellKey);
+      continue;
+    }
+    rowsToInsert.push({
+      contributionId: parentId,
+      type: t.type,
+      date: t.date,
+      amount: new Prisma.Decimal(t.amount),
+      description: t.description,
+      documentId: args.documentId,
+      sourcePage: t.sourcePage ?? null,
+      sourceRef: t.sourceRef ?? null,
+      source: "AI",
+    });
+  }
+  if (rowsToInsert.length > 0) {
+    await client.contributionTransaction.createMany({ data: rowsToInsert });
+  }
+
+  const result: ApplyContributionsResult = {
+    parentsUpserted: totals.length,
+    supersededPriorAiCount: superseded.count,
+    transactionsInserted: rowsToInsert.length,
+    cellsSkippedManuallyOwned: skippedCells.size,
+    transactionsSkippedNoParent: noParentCount,
+  };
+
+  await client.auditLog.create({
+    data: {
+      caseId: args.caseId,
+      userId: SYSTEM_USER_ID,
+      action: "CONTRIBUTION_TRANSACTION_ADDED",
+      source: "AI",
+      newValue:
+        `${result.transactionsInserted} contribution rows extracted ` +
+        `(${result.cellsSkippedManuallyOwned} cell(s) preserved as manual)`,
+      metadata: {
+        jobId: args.jobId,
+        documentId: args.documentId,
+        parentsUpserted: result.parentsUpserted,
+        supersededPriorAiCount: result.supersededPriorAiCount,
+        transactionsInserted: result.transactionsInserted,
+        cellsSkippedManuallyOwned: result.cellsSkippedManuallyOwned,
+        transactionsSkippedNoParent: result.transactionsSkippedNoParent,
+        skippedCells: Array.from(skippedCells).map((k) => {
+          const [contributionId, type] = k.split("::");
+          return { contributionId, type };
+        }),
+      } as Prisma.InputJsonValue,
+    },
+  });
+
+  return result;
 }
