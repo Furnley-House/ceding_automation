@@ -28,6 +28,25 @@ export interface ChecklistFieldDef {
  *  Phase 1: Pension / ISA / GIA only. "Personal Pension" is a PlanSubType
  *  (asked for inside the checklist), not a top-level plan type. */
 export const SUPPORTED_PLAN_TYPES = ["Pension", "ISA", "GIA"] as const;
+
+/**
+ * H33-followup PR4: the two legacy Pension contribution scalar keys.
+ * The AI still populates them (see canonical spec structural_notes) but
+ * the visible representation is the two-grid ContributionsTable + child
+ * transaction rows. Every stage that renders scalar checklist fields
+ * (Stage 4 Extract & Fill, Stage 6 Review, Stage 8 Approval) must
+ * filter these out when isPension — otherwise a paraplanner sees "See
+ * detailed tables in document" prose next to a grid with the actual
+ * figures, which is worse than either alone.
+ *
+ * Kept load-bearing (per PR1 kept-and-deprecated) for the export
+ * fallback at exportTemplate.ts:430,436 — do not remove from the
+ * canonical spec yet.
+ */
+export const CONTRIBUTIONS_LEGACY_FIELD_KEYS: ReadonlySet<string> = new Set([
+  "contributions_4yr_history",
+  "contributions_breakdown_employer_personal",
+]);
 export type SupportedPlanType = (typeof SUPPORTED_PLAN_TYPES)[number];
 
 // Legacy display strings that used to appear as a plan type before we

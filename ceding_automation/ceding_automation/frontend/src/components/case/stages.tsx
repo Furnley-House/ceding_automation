@@ -31,7 +31,12 @@ import { useChecklistFields, isMissing, displayValue, fundDetailsStatus } from "
 import { useFundLines } from "@/hooks/useFundLines";
 import { useContributions } from "@/hooks/useContributions";
 import { contributionsProgress } from "@/lib/contributionsDerivation";
-import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
+import { ContributionsTable } from "./ContributionsTable";
+import {
+  getTemplate,
+  groupBySection,
+  CONTRIBUTIONS_LEGACY_FIELD_KEYS,
+} from "@/lib/checklistTemplates";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation } from "react-router-dom";
 import { casesApi, checklistApi } from "@/lib/api";
@@ -289,17 +294,29 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
     return m;
   }, [rows]);
 
+  // H33-followup PR4: Pension guard — needed both for the contributions
+  // fold-in (below) and for hiding the two legacy contribution scalar
+  // fields in visibleFields (they render as "See detailed tables in
+  // document" prose which contradicts the grid the paraplanner now
+  // sees; the grid is the source of truth).
+  const isPension = (caseItem.plan_type ?? "").toUpperCase() === "PENSION";
+
   // Mirror ChecklistPanel: only count template fields whose showIf condition
   // is satisfied. Counting raw DB rows pulls in stale/legacy fields and gives
   // a different total than Extract & Fill Gaps and the Excel export.
+  // Also filter the two legacy Pension contribution scalars (H33-followup
+  // PR4) — the two-grid ContributionsTable owns their visible
+  // representation now; leaving them in this list would double up as
+  // "See detailed tables in document" prose next to the grid.
   const visibleFields = useMemo(
     () =>
       template.filter((f) => {
+        if (isPension && CONTRIBUTIONS_LEGACY_FIELD_KEYS.has(f.key)) return false;
         if (!f.showIf) return true;
         const dependent = byKey.get(f.showIf.key)?.value;
         return dependent ? f.showIf.in.includes(dependent) : false;
       }),
-    [template, byKey],
+    [template, byKey, isPension],
   );
 
   // Fund Details rolls into the totals alongside the scalar fields so the
@@ -312,7 +329,6 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
   // denominator; the counter reads honestly rather than "100% complete
   // with zero contribution data" (which was wrong on every completed
   // Pension case pre-PR3). See commit message for team-facing note.
-  const isPension = (caseItem.plan_type ?? "").toUpperCase() === "PENSION";
   const { rows: contributions } = useContributions(caseItem.id, isPension);
 
   const totals = useMemo(() => {
@@ -522,6 +538,17 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
                 <div className="px-3 py-2 border-b border-border bg-muted/30">
                   <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground">{section}</h4>
                 </div>
+                {/* H33-followup PR4: paraplanner sees the same read-only
+                    two-grid contributions table inside Transaction History
+                    that CAs see at Stage 4, replacing the two legacy scalar
+                    prose fields (now filtered out of visibleFields above).
+                    Drill-down chevrons stay clickable; edit affordances +
+                    Reset button hide via ContributionsTable's readOnly. */}
+                {isPension && section === "Transaction History" && (
+                  <div className="p-3 border-b border-border">
+                    <ContributionsTable caseId={caseItem.id} readOnly />
+                  </div>
+                )}
                 <ul className="divide-y divide-border">
                   {fields.map((f) => {
                     const row = byKey.get(f.key);

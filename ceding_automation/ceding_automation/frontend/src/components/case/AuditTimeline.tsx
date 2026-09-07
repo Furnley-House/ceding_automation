@@ -27,6 +27,7 @@ import {
   Layers,
   Send,
   CircleDot,
+  Coins,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
@@ -57,6 +58,7 @@ interface AuditRow {
   actor_name?: string | null;
   actor_role?: string | null;
   notes?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 interface CaseRow {
@@ -223,7 +225,62 @@ const ACTION_META: Record<
     icon: Layers,
     cls: "bg-overdue/15 text-overdue border-overdue/30",
   },
+  // Contributions — H33-followup PR2. Written by contributionsService when
+  // a CA types a number into a Stage-4 contribution cell. metadata carries
+  // type / taxYearLabel / amount and full supersededDetails; the row
+  // renderer surfaces those as a description below the header.
+  CONTRIBUTION_TRANSACTION_ADDED: {
+    label: "Contribution added",
+    icon: Coins,
+    cls: "bg-teal/15 text-teal border-teal/30",
+  },
 };
+
+// Format the CONTRIBUTION_TRANSACTION_ADDED metadata into a one-line
+// description: "Employer · 2024/25 · £5,000.00 · supersedes 2 prior entries"
+// (supersedes clause omitted when count is 0). Runs off the raw metadata
+// blob rather than old/new values because a manual contribution entry
+// isn't a scalar change — the supersede count is the load-bearing bit.
+function contributionAddedDescription(
+  metadata: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!metadata) return null;
+  const type = typeof metadata.type === "string" ? metadata.type : null;
+  const taxYearLabel =
+    typeof metadata.taxYearLabel === "string" ? metadata.taxYearLabel : null;
+  const amountRaw =
+    typeof metadata.amount === "string"
+      ? metadata.amount
+      : typeof metadata.amount === "number"
+        ? String(metadata.amount)
+        : null;
+  const supersededCount =
+    typeof metadata.supersededCount === "number" ? metadata.supersededCount : 0;
+  if (!type && !taxYearLabel && !amountRaw) return null;
+
+  const parts: string[] = [];
+  if (type) parts.push(type === "EMPLOYER" ? "Employer" : "Personal");
+  if (taxYearLabel) parts.push(taxYearLabel);
+  if (amountRaw) {
+    const n = parseFloat(amountRaw);
+    if (Number.isFinite(n)) {
+      parts.push(
+        new Intl.NumberFormat("en-GB", {
+          style: "currency",
+          currency: "GBP",
+        }).format(n),
+      );
+    } else {
+      parts.push(amountRaw);
+    }
+  }
+  if (supersededCount > 0) {
+    parts.push(
+      `supersedes ${supersededCount} prior entr${supersededCount === 1 ? "y" : "ies"}`,
+    );
+  }
+  return parts.join(" · ");
+}
 
 const SOURCE_META: Record<string, string> = {
   AI: "AI",
@@ -517,6 +574,10 @@ export function AuditTimeline({ caseId, showCase, pageSize = 200 }: Props) {
                   hour: "2-digit",
                   minute: "2-digit",
                 });
+                const contributionDesc =
+                  r.action === "CONTRIBUTION_TRANSACTION_ADDED"
+                    ? contributionAddedDescription(r.metadata)
+                    : null;
                 return (
                   <li key={r.id} className="relative">
                     <span
@@ -562,7 +623,17 @@ export function AuditTimeline({ caseId, showCase, pageSize = 200 }: Props) {
                         </span>
                       </div>
 
-                      {(r.old_value || r.new_value) && (
+                      {contributionDesc && (
+                        <p className="mt-2 text-xs text-foreground font-medium">
+                          {contributionDesc}
+                        </p>
+                      )}
+
+                      {/* Skip the generic old→new pair for contribution
+                          entries — the description above already carries
+                          the amount and superseded count in a paraplanner-
+                          readable form. */}
+                      {!contributionDesc && (r.old_value || r.new_value) && (
                         <div className="mt-2 flex items-center gap-2 text-xs flex-wrap">
                           <span className="text-muted-foreground line-through truncate max-w-[280px]">
                             {r.old_value || (

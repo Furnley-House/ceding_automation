@@ -3,7 +3,12 @@ import { CheckCircle2, AlertTriangle, CircleDashed, ListChecks, ThumbsUp, Ban, L
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChecklistField, type ChecklistFieldState, type Confidence, type ConflictResolution } from "./ChecklistField";
 import { ChecklistTemplateView } from "./ChecklistTemplateView";
-import { getTemplate, groupBySection, type ChecklistFieldDef } from "@/lib/checklistTemplates";
+import {
+  getTemplate,
+  groupBySection,
+  CONTRIBUTIONS_LEGACY_FIELD_KEYS,
+  type ChecklistFieldDef,
+} from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
 import { useEditHistory } from "@/hooks/useEditHistory";
 import { Button } from "@/components/ui/button";
@@ -22,10 +27,8 @@ import { contributionsProgress } from "@/lib/contributionsDerivation";
 // are still saved to ChecklistField as a raw fallback, but the checklist UI
 // hides them — the new <ContributionsTable> owns the visible representation.
 // Pension-only; other plan types don't have these fields in their template.
-const CONTRIBUTIONS_LEGACY_FIELD_KEYS = new Set([
-  "contributions_4yr_history",
-  "contributions_breakdown_employer_personal",
-]);
+// Promoted to lib/checklistTemplates.ts (H33-followup PR4) so Stage 6 and
+// Stage 8 apply the same filter — imported at the top of this file.
 
 // localStorage key holding the CA's preferred Stage 4 layout. Per-user
 // (not per-case) so switching between cases keeps the CA's chosen view.
