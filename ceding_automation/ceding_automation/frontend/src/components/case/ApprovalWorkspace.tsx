@@ -287,8 +287,23 @@ export function ApprovalWorkspace({ caseItem }: Props) {
   const allFieldsApproved = stats.approved === stats.total && stats.total > 0;
   const caseAlreadyApproved = caseItem.status === "approved" || caseItem.status === "complete";
 
+  // Initial-load gate: byKey is empty on first render → every visible
+  // templated field counts as "missing" → StatCards show
+  // "71 total / 0 approved / 71 missing", which reads as no progress
+  // rather than not-yet-loaded. Hide stats + progress bar until the
+  // fetch resolves. Refetches (loading with rows.length > 0) keep the
+  // prior values visible, which is the correct UX.
+  const isInitialLoad = loading && rows.length === 0;
+
   return (
     <div className="space-y-4">
+      {isInitialLoad ? (
+        <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+          <ShieldCheck className="h-4 w-4 text-teal" />
+          Loading checklist…
+        </div>
+      ) : (
+      <>
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
         <StatCard label="Total" value={stats.total} tone="muted" icon={CheckCircle2} />
@@ -314,6 +329,8 @@ export function ApprovalWorkspace({ caseItem }: Props) {
           />
         </div>
       </div>
+      </>
+      )}
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card p-2">

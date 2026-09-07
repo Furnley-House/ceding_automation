@@ -519,6 +519,19 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
       </div>
 
       <div className="rounded-md border border-border bg-muted/30 p-4">
+        {/* Initial-load gate: byKey is empty on the first render, which
+           makes every templated field count as "missing" (0% · 71 missing
+           on a Pension case). That misleads the reviewer into thinking
+           the case is empty. Show a loading line instead until the
+           first fetch resolves; refetches keep the prior stats visible
+           (loading with rows.length > 0), which is the correct UX. */}
+        {loading && rows.length === 0 ? (
+          <div className="flex items-center gap-2 py-3 text-xs text-muted-foreground">
+            <ListChecks className="h-4 w-4 text-teal" />
+            Loading {planType} checklist…
+          </div>
+        ) : (
+        <>
         <div className="flex items-center justify-between gap-4 mb-3">
           <h3 className="text-sm font-bold theme-heading text-foreground flex items-center gap-2">
             <ListChecks className="h-4 w-4 text-teal" />
@@ -581,6 +594,8 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
               Clear filter
             </button>
           </div>
+        )}
+        </>
         )}
       </div>
 

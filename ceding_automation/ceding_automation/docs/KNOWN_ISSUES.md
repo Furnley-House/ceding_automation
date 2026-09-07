@@ -5,6 +5,69 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-02 — `GET /api/cases/:id` fans out to ~9–10 DB round-trips per hit
+
+**Filed:** 2026-09-08
+**Owner:** unassigned
+**Severity:** Low today, Medium at data-volume growth. Prod's DB tier
+(`Standard_D2s_v3` GP, 2 vCPU / 8 GiB, 240 IOPS, ZoneRedundant) absorbs the
+current load without noticeable per-request latency — the case-detail page
+felt slow for a different reason (KI-03 loading-state bug, fixed). File this
+so the query shape gets tightened before Phase 2 data volumes.
+
+### The query
+
+`backend/src/routes/cases.ts:486` — `GET /:id` uses one Prisma `include` that
+fans out to roughly 9–10 batched queries per hit:
+
+| Include | Prisma queries emitted |
+|---|---|
+| `case` + `provider` + `createdBy` + `assignedTo` + `paraplanner` + `adviser` | 1 (all joined) |
+| `documents` | 1 |
+| `checklistFields` (nested include `template`, `sourceDocument`) | 3 (parent + 2 batched nested) |
+| `fundLines` | 1 |
+| `chaseAttempts` | 1 |
+| `comments` (nested include `author`) | 2 |
+| `getLockedFieldAttempts` (separate audit-log derivation call after the main include resolves) | 1 |
+
+Total ≈ 9–10 DB round-trips per case-detail load. Payload for a Pension case
+with 71 checklist fields + docs + audit is several hundred KB uncompressed.
+
+### Why this is not classic N+1
+
+Prisma batches each `include` level into ONE query (not one-per-parent), so
+strictly this isn't the O(N) fan-out of a naive N+1. But it is still a lot
+of sequential DB round-trips on a hot path (every case-detail page load,
+every stepper stage transition that remounts the container). Prod's
+generous DB tier hides it today; Phase 2 volumes will not.
+
+### Fix direction (not urgent)
+
+1. **Split the endpoint** — separate `GET /:id/summary` (case + provider +
+   assignees only, one query) from `GET /:id/checklist`, `/:id/documents`,
+   `/:id/fund-lines`, etc. The frontend fires whichever it needs when it
+   needs it; the case-header renders on the summary payload alone.
+2. **Or: parallelise the include tree** — `Promise.all` the independent
+   sub-fetches inside the route handler so they run concurrently rather
+   than in Prisma's serialised batch chain. Cheaper change; less
+   architectural.
+3. **Or: pre-compute** — the locked-field-attempts derivation adds a whole
+   round-trip for a rarely-read banner. Materialised view or a lightweight
+   count cached on the case row would drop it out of the hot path.
+
+### Notes for whoever picks this up
+
+- Measure first. There is no request-log middleware writing to stdout on
+  either env (only startup lines land in Log Analytics). Add morgan (or
+  Prisma's `log: ['query']` gated on a debug flag) to establish real
+  per-hit timings before deciding which of the three fixes above.
+- Related front-end pattern: components that fetch on mount (`useDocuments`,
+  `useChecklistFields`, `useContributions`) all fire against a case that
+  the top-level `GET /:id` also just fetched. Consolidating either shape
+  would remove duplicate fetches on the same data.
+
+---
+
 ## KI-01 — Frontend type coverage: read paths noisy, write paths unchecked
 
 **Filed:** 2026-09-07

@@ -163,7 +163,11 @@ export function StageSendLOA({ caseItem }: StageProps) {
 
 export function StageDocumentUpload({ caseItem }: StageProps) {
   // (Stage 3 — see StageSendLOA above for stage 2)
-  const { documents, removeDocument, refresh } = useDocuments(caseItem.id, { refreshInterval: 5000 });
+  const { documents, loading, removeDocument, refresh } = useDocuments(caseItem.id, { refreshInterval: 5000 });
+  // Suppress the header count during the initial fetch — "Uploaded
+  // documents (0)" is the same wrong-state-while-loading anti-pattern
+  // as the empty-state below.
+  const showCount = !(loading && documents.length === 0);
   return (
     <StagePanel
       num={3}
@@ -175,7 +179,7 @@ export function StageDocumentUpload({ caseItem }: StageProps) {
         <DocumentUploader caseId={caseItem.id} onUploaded={refresh} />
         <div className="rounded-md border border-border bg-card p-3">
           <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground mb-2">
-            Uploaded documents ({documents.length})
+            Uploaded documents{showCount ? ` (${documents.length})` : ""}
           </h4>
           <DocumentList
             documents={documents}
@@ -187,6 +191,7 @@ export function StageDocumentUpload({ caseItem }: StageProps) {
             showExtractButton={false}
             showViewButton={false}
             simplifiedBadge
+            loading={loading}
           />
         </div>
       </div>
@@ -448,6 +453,18 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
           </div>
         )}
 
+        {/* Initial-load gate: byKey is empty on first render → every
+            templated field counts as "missing" → tiles show
+            "71 total / 0 filled / 71 missing", which reads as a
+            worst-case case rather than a not-yet-loaded one. Hide
+            tiles + returned banner until the fetch resolves. */}
+        {loading && rows.length === 0 ? (
+          <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+            <ClipboardCheck className="h-4 w-4 text-teal" />
+            Loading checklist…
+          </div>
+        ) : (
+        <>
         {/* Returned-for-re-review banner */}
         {totals.returned > 0 && (
           <div className="rounded-md border border-warning/40 bg-warning/10 p-3 flex items-start gap-3">
@@ -502,6 +519,8 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
             onClick={() => setFilter(filter === "returned" ? "all" : "returned")}
           />
         </div>
+        </>
+        )}
         {filter !== "all" && (
           <div className="flex items-center justify-between text-xs">
             <span className="text-muted-foreground">
