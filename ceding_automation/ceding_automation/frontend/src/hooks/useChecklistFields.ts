@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 import type { ChecklistRow } from "@/lib/checklistMerge";
 import type { ChecklistFieldDef } from "@/lib/checklistTemplates";
@@ -275,10 +276,28 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
           ...(audit?.source ? { source: audit.source } : {}),
         })
       );
+      // Only refresh on success — pulling the server's row after a
+      // failed save would fetch its OLD value and, in the edge cases
+      // where ChecklistField.tsx:113 mid-typing preservation doesn't
+      // catch it, clobber the CA's typed value with the pre-save value.
+      refresh();
     } catch (err) {
-      console.error("updateField error", err);
+      // User-facing feedback. Was previously console.error only, which
+      // combined with the unconditional refresh() below (now inside the
+      // try) produced silent data loss on the 71-field editing surface:
+      // any 500 / network blip / failed token refresh made the CA's
+      // typed value briefly appear then revert with no explanation.
+      // Match FundDetailsTable.commitEdit: toast the actual failure
+      // reason (backend's error string if present, else the axios
+      // message), leave the typed value in place so the CA can retry
+      // without re-typing.
+      const message =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+        (err instanceof Error ? err.message : String(err));
+      toast.error("Couldn't save checklist field", {
+        description: `${fieldKey}: ${message}`,
+      });
     }
-    refresh();
   };
 
   const approveAllFilled = async () => {
