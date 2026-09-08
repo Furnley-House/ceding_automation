@@ -5,6 +5,9 @@ import {
   isGridFilled,
   contributionsProgress,
   applyManualTransactionLocal,
+  applyNotApplicableLocal,
+  cellState,
+  isCellNotApplicable,
 } from "./contributionsDerivation";
 import type { ContributionRow, ContributionTransaction } from "@/hooks/useContributions";
 
@@ -37,6 +40,14 @@ function row(overrides: Partial<ContributionRow> = {}): ContributionRow {
     amount: overrides.amount ?? null,
     employerAiTotal: overrides.employerAiTotal !== undefined ? overrides.employerAiTotal : null,
     personalAiTotal: overrides.personalAiTotal !== undefined ? overrides.personalAiTotal : null,
+    employerNotApplicableAt:
+      overrides.employerNotApplicableAt !== undefined ? overrides.employerNotApplicableAt : null,
+    employerNotApplicableById:
+      overrides.employerNotApplicableById !== undefined ? overrides.employerNotApplicableById : null,
+    personalNotApplicableAt:
+      overrides.personalNotApplicableAt !== undefined ? overrides.personalNotApplicableAt : null,
+    personalNotApplicableById:
+      overrides.personalNotApplicableById !== undefined ? overrides.personalNotApplicableById : null,
     transactions: overrides.transactions ?? [],
     createdAt: overrides.createdAt ?? "2026-09-07T12:00:00.000Z",
     updatedAt: overrides.updatedAt ?? "2026-09-07T12:00:00.000Z",
@@ -277,6 +288,277 @@ describe("applyManualTransactionLocal", () => {
     const rowsBefore = [row({ id: "r1" })];
     const newTxn = tx({ id: "new", type: "EMPLOYER", source: "MANUAL" });
     const out = applyManualTransactionLocal(rowsBefore, "r-doesnt-exist", newTxn);
+    expect(out).toEqual(rowsBefore);
+  });
+
+  it("clears the paired *NotApplicable flags when a MANUAL row lands", () => {
+    // Typing a number into a previously-N/A cell should implicitly
+    // clear the flag — the CA has stated the cell IS applicable by
+    // entering a value.
+    const rowsBefore = [
+      row({
+        id: "r1",
+        employerNotApplicableAt: "2026-09-08T00:00:00.000Z",
+        employerNotApplicableById: "user-1",
+      }),
+    ];
+    const newTxn = tx({ id: "new", type: "EMPLOYER", source: "MANUAL" });
+    const out = applyManualTransactionLocal(rowsBefore, "r1", newTxn);
+    expect(out[0].employerNotApplicableAt).toBeNull();
+    expect(out[0].employerNotApplicableById).toBeNull();
+    // The other type's flag is untouched.
+    expect(out[0].personalNotApplicableAt).toBeNull();
+  });
+});
+
+// ── isCellNotApplicable ───────────────────────────────────────────────────
+
+describe("isCellNotApplicable", () => {
+  it("returns false on a clean row", () => {
+    const r = row();
+    expect(isCellNotApplicable(r, "EMPLOYER")).toBe(false);
+    expect(isCellNotApplicable(r, "PERSONAL")).toBe(false);
+  });
+
+  it("reads the per-type flag independently", () => {
+    const r = row({ employerNotApplicableAt: "2026-09-08T00:00:00.000Z" });
+    expect(isCellNotApplicable(r, "EMPLOYER")).toBe(true);
+    expect(isCellNotApplicable(r, "PERSONAL")).toBe(false);
+  });
+});
+
+// ── cellState ─────────────────────────────────────────────────────────────
+
+describe("cellState", () => {
+  it("resolves an empty cell to { kind: 'empty' }", () => {
+    expect(cellState(row(), "EMPLOYER")).toEqual({ kind: "empty" });
+  });
+
+  it("resolves a cell with a positive amount to { kind: 'amount', total }", () => {
+    const r = row({
+      transactions: [tx({ id: "e1", type: "EMPLOYER", amount: "1500.50" })],
+    });
+    expect(cellState(r, "EMPLOYER")).toEqual({ kind: "amount", total: 1500.5 });
+  });
+
+  it("resolves a cell whose transactions sum to zero to { kind: 'zero' }", () => {
+    // Real "£0.00 — contributions existed and totalled nothing".
+    const r = row({
+      transactions: [
+        tx({ id: "e1", type: "EMPLOYER", amount: "500.00" }),
+        tx({ id: "e2", type: "EMPLOYER", amount: "-500.00" }),
+      ],
+    });
+    expect(cellState(r, "EMPLOYER")).toEqual({ kind: "zero" });
+  });
+
+  it("N/A takes precedence over transactions (belt-and-braces)", () => {
+    // Server supersedes on flip, so we shouldn't normally see this
+    // shape, but if a partial write left transactions behind, the
+    // flag wins.
+    const r = row({
+      employerNotApplicableAt: "2026-09-08T00:00:00.000Z",
+      transactions: [tx({ id: "e1", type: "EMPLOYER", amount: "500.00" })],
+    });
+    expect(cellState(r, "EMPLOYER")).toEqual({ kind: "notApplicable" });
+  });
+
+  it("per-type flags are independent", () => {
+    const r = row({
+      employerNotApplicableAt: "2026-09-08T00:00:00.000Z",
+      transactions: [tx({ id: "p1", type: "PERSONAL", amount: "200.00" })],
+    });
+    expect(cellState(r, "EMPLOYER")).toEqual({ kind: "notApplicable" });
+    expect(cellState(r, "PERSONAL")).toEqual({ kind: "amount", total: 200 });
+  });
+
+  it("ignores superseded transactions", () => {
+    const r = row({
+      transactions: [
+        tx({
+          id: "old",
+          type: "EMPLOYER",
+          amount: "999.00",
+          supersededAt: "2026-09-01T00:00:00.000Z",
+        }),
+      ],
+    });
+    expect(cellState(r, "EMPLOYER")).toEqual({ kind: "empty" });
+  });
+});
+
+// ── shouldShowConflictMarker (PR5 N/A branch) ─────────────────────────────
+
+describe("shouldShowConflictMarker — N/A branch", () => {
+  it("suppresses the marker when the cell is N/A, even with an AiTotal mismatch", () => {
+    const txns = [tx({ id: "e1", type: "EMPLOYER", source: "AI", amount: "100.00" })];
+    expect(shouldShowConflictMarker("500.00", txns, "EMPLOYER", true)).toBe(false);
+  });
+
+  it("still fires normally on non-N/A cells with an AiTotal mismatch", () => {
+    const txns = [tx({ id: "e1", type: "EMPLOYER", source: "AI", amount: "100.00" })];
+    expect(shouldShowConflictMarker("500.00", txns, "EMPLOYER", false)).toBe(true);
+  });
+});
+
+// ── isGridFilled (PR5 N/A counts as engagement) ───────────────────────────
+
+describe("isGridFilled — N/A counts as filled", () => {
+  it("returns true when any row has the type's N/A flag set", () => {
+    const rows = [
+      row({ id: "r1", employerNotApplicableAt: "2026-09-08T00:00:00.000Z" }),
+      row({ id: "r2" }),
+      row({ id: "r3" }),
+      row({ id: "r4" }),
+    ];
+    expect(isGridFilled(rows, "EMPLOYER")).toBe(true);
+    // Other type's grid is still unfilled — the flag is type-scoped.
+    expect(isGridFilled(rows, "PERSONAL")).toBe(false);
+  });
+
+  it("returns false only when every row is both empty AND not N/A", () => {
+    const rows = [row(), row(), row(), row()];
+    expect(isGridFilled(rows, "EMPLOYER")).toBe(false);
+  });
+});
+
+// ── contributionsProgress (PR5 all-N/A reads as 2 filled) ─────────────────
+
+describe("contributionsProgress — all-N/A grids", () => {
+  it("counts an all-N/A employer grid as engaged (filled=1)", () => {
+    // Intentional: a CA who marks all four Employer cells N/A has
+    // made a full decision — grid engagement is what we're
+    // measuring, not "was money captured". See derivation-file
+    // comment above isGridFilled.
+    const rows = [
+      row({ id: "r1", employerNotApplicableAt: "t" }),
+      row({ id: "r2", employerNotApplicableAt: "t" }),
+      row({ id: "r3", employerNotApplicableAt: "t" }),
+      row({ id: "r4", employerNotApplicableAt: "t" }),
+    ];
+    expect(contributionsProgress(rows, "PENSION")).toEqual({ add: 2, filled: 1 });
+  });
+
+  it("both grids all-N/A reads as fully engaged (filled=2 of 2)", () => {
+    const rows = [
+      row({
+        id: "r1",
+        employerNotApplicableAt: "t",
+        personalNotApplicableAt: "t",
+      }),
+      row({
+        id: "r2",
+        employerNotApplicableAt: "t",
+        personalNotApplicableAt: "t",
+      }),
+      row({
+        id: "r3",
+        employerNotApplicableAt: "t",
+        personalNotApplicableAt: "t",
+      }),
+      row({
+        id: "r4",
+        employerNotApplicableAt: "t",
+        personalNotApplicableAt: "t",
+      }),
+    ];
+    expect(contributionsProgress(rows, "PENSION")).toEqual({ add: 2, filled: 2 });
+  });
+});
+
+// ── applyNotApplicableLocal ───────────────────────────────────────────────
+
+describe("applyNotApplicableLocal", () => {
+  it("setting N/A strips non-superseded rows of that type and sets the flag", () => {
+    const rowsBefore = [
+      row({
+        id: "r1",
+        transactions: [
+          tx({ id: "e1", type: "EMPLOYER", amount: "500.00" }),
+          tx({ id: "e2", type: "EMPLOYER", amount: "300.00" }),
+          tx({ id: "p1", type: "PERSONAL", amount: "100.00" }),
+        ],
+      }),
+    ];
+    const out = applyNotApplicableLocal(
+      rowsBefore,
+      "r1",
+      "EMPLOYER",
+      true,
+      "2026-09-08T00:00:00.000Z",
+      "user-1",
+    );
+    // Employer transactions gone (server supersedes them; local mirrors).
+    expect(out[0].transactions.map((t) => t.id).sort()).toEqual(["p1"]);
+    expect(out[0].employerNotApplicableAt).toBe("2026-09-08T00:00:00.000Z");
+    expect(out[0].employerNotApplicableById).toBe("user-1");
+    // Personal side untouched.
+    expect(out[0].personalNotApplicableAt).toBeNull();
+  });
+
+  it("clearing N/A nulls the flags but does NOT restore transactions (KI-05)", () => {
+    // Deliberate trade-off — a mis-click costs a re-extraction to
+    // recover. See KNOWN_ISSUES.md § KI-05.
+    const rowsBefore = [
+      row({
+        id: "r1",
+        employerNotApplicableAt: "2026-09-08T00:00:00.000Z",
+        employerNotApplicableById: "user-1",
+        transactions: [
+          // A previously-superseded row is what's left behind after a set.
+          tx({
+            id: "old",
+            type: "EMPLOYER",
+            supersededAt: "2026-09-08T00:00:00.000Z",
+          }),
+        ],
+      }),
+    ];
+    const out = applyNotApplicableLocal(
+      rowsBefore,
+      "r1",
+      "EMPLOYER",
+      false,
+      null,
+      null,
+    );
+    expect(out[0].employerNotApplicableAt).toBeNull();
+    expect(out[0].employerNotApplicableById).toBeNull();
+    // Superseded row is still superseded — no un-supersede.
+    expect(out[0].transactions).toHaveLength(1);
+    expect(out[0].transactions[0].supersededAt).not.toBeNull();
+  });
+
+  it("does not touch the other type's flag on set", () => {
+    const rowsBefore = [
+      row({
+        id: "r1",
+        personalNotApplicableAt: "2026-09-01T00:00:00.000Z",
+        personalNotApplicableById: "user-2",
+      }),
+    ];
+    const out = applyNotApplicableLocal(
+      rowsBefore,
+      "r1",
+      "EMPLOYER",
+      true,
+      "2026-09-08T00:00:00.000Z",
+      "user-1",
+    );
+    expect(out[0].personalNotApplicableAt).toBe("2026-09-01T00:00:00.000Z");
+    expect(out[0].personalNotApplicableById).toBe("user-2");
+  });
+
+  it("no-op on rowId not found", () => {
+    const rowsBefore = [row({ id: "r1" })];
+    const out = applyNotApplicableLocal(
+      rowsBefore,
+      "r-doesnt-exist",
+      "EMPLOYER",
+      true,
+      "2026-09-08T00:00:00.000Z",
+      "user-1",
+    );
     expect(out).toEqual(rowsBefore);
   });
 });

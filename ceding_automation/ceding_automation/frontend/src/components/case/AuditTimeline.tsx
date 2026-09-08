@@ -28,6 +28,7 @@ import {
   Send,
   CircleDot,
   Coins,
+  Ban,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
@@ -234,6 +235,16 @@ const ACTION_META: Record<
     icon: Coins,
     cls: "bg-teal/15 text-teal border-teal/30",
   },
+  // Contributions — H33-followup PR5. Written when a CA flips the
+  // per-cell "not applicable" flag. metadata mirrors the transaction-
+  // added shape but adds `flag: "set" | "cleared"`. Distinct icon +
+  // colour so a paraplanner scanning the timeline can distinguish
+  // "money entered" from "cell dismissed as not applicable".
+  CONTRIBUTION_MARKED_NA: {
+    label: "Marked N/A",
+    icon: Ban,
+    cls: "bg-muted text-muted-foreground border-border",
+  },
 };
 
 // Format the CONTRIBUTION_TRANSACTION_ADDED metadata into a one-line
@@ -275,6 +286,34 @@ function contributionAddedDescription(
     }
   }
   if (supersededCount > 0) {
+    parts.push(
+      `supersedes ${supersededCount} prior entr${supersededCount === 1 ? "y" : "ies"}`,
+    );
+  }
+  return parts.join(" · ");
+}
+
+// H33-followup PR5. Metadata shape is a superset of PR2's (adds
+// `flag`, no `amount`); reuse the same "Employer/Personal · 2024/25 ·
+// supersedes N entries" formatter but swap the amount slot for a
+// "Not applicable" / "Cleared" verb.
+function contributionMarkedNADescription(
+  metadata: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!metadata) return null;
+  const type = typeof metadata.type === "string" ? metadata.type : null;
+  const taxYearLabel =
+    typeof metadata.taxYearLabel === "string" ? metadata.taxYearLabel : null;
+  const flag = typeof metadata.flag === "string" ? metadata.flag : null;
+  const supersededCount =
+    typeof metadata.supersededCount === "number" ? metadata.supersededCount : 0;
+  if (!type && !taxYearLabel && !flag) return null;
+
+  const parts: string[] = [];
+  if (type) parts.push(type === "EMPLOYER" ? "Employer" : "Personal");
+  if (taxYearLabel) parts.push(taxYearLabel);
+  parts.push(flag === "cleared" ? "Cleared N/A" : "Marked not applicable");
+  if (flag !== "cleared" && supersededCount > 0) {
     parts.push(
       `supersedes ${supersededCount} prior entr${supersededCount === 1 ? "y" : "ies"}`,
     );
@@ -577,7 +616,9 @@ export function AuditTimeline({ caseId, showCase, pageSize = 200 }: Props) {
                 const contributionDesc =
                   r.action === "CONTRIBUTION_TRANSACTION_ADDED"
                     ? contributionAddedDescription(r.metadata)
-                    : null;
+                    : r.action === "CONTRIBUTION_MARKED_NA"
+                      ? contributionMarkedNADescription(r.metadata)
+                      : null;
                 return (
                   <li key={r.id} className="relative">
                     <span

@@ -15,7 +15,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { contributionsApi } from "@/lib/api";
-import { applyManualTransactionLocal } from "@/lib/contributionsDerivation";
+import {
+  applyManualTransactionLocal,
+  applyNotApplicableLocal,
+} from "@/lib/contributionsDerivation";
 
 export interface ContributionTransaction {
   id: string;
@@ -61,6 +64,17 @@ export interface ContributionRow {
   /** Non-superseded child transactions; grouped by `type` on render.
    *  Empty array until PR3 manual entries or piece 2b AI emissions. */
   transactions: ContributionTransaction[];
+  /** H33-followup PR5: per-cell "not applicable" flags. Non-null
+   *  timestamp = a human has explicitly marked the cell N/A ("no
+   *  employer scheme"), distinct from the cell being empty because
+   *  nobody has filled it in yet. When set, the sum for that cell is
+   *  treated as excluded (not zero), and any prior non-superseded
+   *  transactions in the cell were atomically superseded by the flip.
+   *  MANUAL ONLY — AI never writes these. */
+  employerNotApplicableAt: string | null;
+  employerNotApplicableById: string | null;
+  personalNotApplicableAt: string | null;
+  personalNotApplicableById: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -206,5 +220,56 @@ export function useContributions(caseId: string, enabled: boolean = true) {
     setRows((prev) => applyManualTransactionLocal(prev, rowId, newTxn));
   };
 
-  return { rows, loading, error, refresh, updateRow, resetRows, addManualTransaction };
+  /**
+   * H33-followup PR5. Flip the per-cell "not applicable" flag. Same
+   * local-state-update-no-refetch pattern as addManualTransaction —
+   * refetching would flicker the whole grid to "Loading contributions…"
+   * mid-flow, which destroys focus and drill-down state.
+   *
+   * MANUAL only; the endpoint refuses AI callers via role gates.
+   * Optimistic-friendly: server returns `notApplicableAt` (the
+   * timestamp it just wrote, or null on clear) and we stitch that
+   * into the local row via applyNotApplicableLocal.
+   */
+  const setNotApplicable = async (
+    rowId: string,
+    type: "EMPLOYER" | "PERSONAL",
+    on: boolean,
+  ) => {
+    const res = await contributionsApi.setNotApplicable(caseId, rowId, {
+      type,
+      on,
+    });
+    const data = res.data as {
+      contributionId: string;
+      type: "EMPLOYER" | "PERSONAL";
+      on: boolean;
+      notApplicableAt: string | null;
+      supersededCount: number;
+    };
+    setRows((prev) =>
+      applyNotApplicableLocal(
+        prev,
+        rowId,
+        type,
+        on,
+        data.notApplicableAt,
+        // We don't have the user id on the client separately from
+        // whatever the server just recorded; pass null and let the
+        // server's next GET populate the display-only *ById field.
+        null,
+      ),
+    );
+  };
+
+  return {
+    rows,
+    loading,
+    error,
+    refresh,
+    updateRow,
+    resetRows,
+    addManualTransaction,
+    setNotApplicable,
+  };
 }

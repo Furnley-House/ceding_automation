@@ -12,6 +12,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import {
   createManualContributionTransaction,
+  setContributionNotApplicable,
   ContributionNotFoundError,
 } from "../services/contributionsService";
 
@@ -162,6 +163,51 @@ router.post(
         userId: req.user!.id,
       });
       res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof ContributionNotFoundError) {
+        res.status(404).json({ error: "Contribution row not found" });
+        return;
+      }
+      throw err;
+    }
+  },
+);
+
+// ── Per-cell "not applicable" flip ─────────────────────────────────────
+// H33-followup PR5. When a CA marks a (contributionId, type) cell as
+// N/A (or clears the flag), we set the paired flag columns on the
+// parent row and — when setting — atomically supersede any non-
+// superseded transactions in that cell. See the service docstring for
+// the supersede rationale and the deliberate "clear doesn't
+// un-supersede" trade-off (KI-05).
+//
+// MANUAL ONLY. No AI helper hits this endpoint; the AI leaves cells
+// empty and a human decides whether empty means N/A.
+const notApplicableSchema = z.object({
+  type: z.enum(["EMPLOYER", "PERSONAL"]),
+  on: z.boolean(),
+});
+
+router.post(
+  "/:caseId/contributions/:id/not-applicable",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
+  async (req: Request, res: Response) => {
+    const parsed = notApplicableSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
+      return;
+    }
+    try {
+      const result = await setContributionNotApplicable(prisma, {
+        caseId: req.params.caseId,
+        contributionId: req.params.id,
+        type: parsed.data.type,
+        on: parsed.data.on,
+        userId: req.user!.id,
+      });
+      res.status(200).json(result);
     } catch (err) {
       if (err instanceof ContributionNotFoundError) {
         res.status(404).json({ error: "Contribution row not found" });

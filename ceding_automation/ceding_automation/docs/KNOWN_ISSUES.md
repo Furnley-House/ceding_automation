@@ -5,6 +5,63 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-05 — Clearing per-cell N/A does not restore superseded AI transactions
+
+**Filed:** 2026-09-08
+**Owner:** unassigned
+**Severity:** Low — a deliberate trade-off, not a bug. Recorded so it doesn't
+surprise a CA who mis-clicks and expects "clear N/A" to undo the whole flip.
+
+### The trade-off
+
+When a CA marks a contributions cell as "not applicable" (H33-followup PR5),
+the atomic write does two things:
+
+1. Sets `checklist_contributions.employerNotApplicableAt` /
+   `personalNotApplicableAt` (whichever type applies) to `now()`.
+2. Supersedes every non-superseded transaction in that
+   `(contributionId, type)` cell by stamping `supersededAt = now()` — same
+   pattern as `createManualContributionTransaction`.
+
+Clearing the flag (via the Undo affordance in the ContributionCell popover)
+only reverses step 1. Step 2 is NOT reversed: the transactions stay
+superseded. So a cell that had £5,000 in AI-extracted transactions, got
+marked N/A by mistake, and then cleared reads as **empty** — not as
+"£5,000 again".
+
+### Why this shape
+
+Un-superseding is a separate decision: it needs its own audit action
+(`CONTRIBUTION_UNSUPERSEDED` or similar), a policy for which superseded
+rows to bring back (only the most recent batch? all of them? just AI, or
+MANUAL too?), and a way to reason about what happens when N/A is set
+twice with different transactions in between. Baking any of that in with
+PR5 would have coupled two orthogonal decisions.
+
+The current shape is the minimum: "clear N/A" restores the flag state,
+not the transaction state. Symmetric to how retyping a number in a
+MANUAL cell doesn't restore any prior AI reads either.
+
+### Recovery path today
+
+Re-run extraction on the source document (Stage 4 → the affected document
+→ Extract). The AI will re-emit its transactions and land them fresh, at
+which point the sum will match the AI's read again. This is slow (a
+whole extraction cycle) and involves a BFF call, but no data was lost —
+the superseded rows are still visible in the drill-down, they're just
+not counted.
+
+### What would fix it properly
+
+An "undo last N/A flip" affordance that runs in a bounded window (say,
+5 minutes) and un-supersedes only the rows superseded by that specific
+flip (findable by the audit metadata's `supersededDetails[].id` list).
+Outside the window, defer to re-extraction. Not urgent — CAs who care
+already know to re-extract; the message on the "Clear N/A" tooltip
+warns about this behaviour up front.
+
+---
+
 ## KI-04 — AI write paths batch-audit; manual entries per-row-audit
 
 **Filed:** 2026-09-07

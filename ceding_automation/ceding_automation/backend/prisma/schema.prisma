@@ -153,6 +153,15 @@ enum AuditAction {
   // value and the supersededDetails of any prior rows in the same
   // (contributionId, type) that were superseded by this entry.
   CONTRIBUTION_TRANSACTION_ADDED
+  // H33-followup PR5: per-cell "not applicable" flip. Written by POST
+  // /:caseId/contributions/:id/not-applicable when a CA marks a cell
+  // as "does not apply" (or clears the flag). metadata captures which
+  // (contributionId, type) cell, whether the flip set or cleared the
+  // flag, and the full supersededDetails of any rows superseded when
+  // the flag was set. Mirrors CONTRIBUTION_TRANSACTION_ADDED shape so
+  // AuditTimeline's description helper can reuse the metadata parser
+  // with minor branching.
+  CONTRIBUTION_MARKED_NA
 }
 
 enum ContactMethod {
@@ -212,19 +221,22 @@ model User {
   rcConnectedAt          DateTime?
 
   // Relations
-  casesCreated          Case[]              @relation("CaseCreatedBy")
-  casesAssigned         Case[]              @relation("CaseAssignedTo")
-  casesParaplanner      Case[]              @relation("CaseParaplanner")
-  casesAdviser          Case[]              @relation("CaseAdviser")
+  casesCreated          Case[]                  @relation("CaseCreatedBy")
+  casesAssigned         Case[]                  @relation("CaseAssignedTo")
+  casesParaplanner      Case[]                  @relation("CaseParaplanner")
+  casesAdviser          Case[]                  @relation("CaseAdviser")
   auditLogs             AuditLog[]
   fieldEdits            ChecklistField[]
-  fundLineEdits         ChecklistFundLine[] @relation("FundLineEditedBy")
+  fundLineEdits         ChecklistFundLine[]     @relation("FundLineEditedBy")
+  // H33-followup PR5 — see ChecklistContribution.*NotApplicableBy.
+  contribEmployerNA     ChecklistContribution[] @relation("ContribEmployerNA")
+  contribPersonalNA     ChecklistContribution[] @relation("ContribPersonalNA")
   comments              Comment[]
   notifications         Notification[]
   // User-admin audit trail — same User appears on both sides. `Actor` is the
   // ADMIN who made the change; `Target` is the user whose row was changed.
-  userAuditLogsAsActor  UserAuditLog[]      @relation("UserAuditLogActor")
-  userAuditLogsAsTarget UserAuditLog[]      @relation("UserAuditLogTarget")
+  userAuditLogsAsActor  UserAuditLog[]          @relation("UserAuditLogActor")
+  userAuditLogsAsTarget UserAuditLog[]          @relation("UserAuditLogTarget")
 
   @@map("users")
 }
@@ -770,6 +782,32 @@ model ChecklistContribution {
   // prejudice that decision.
   employerAiTotal Decimal? @db.Decimal(12, 2)
   personalAiTotal Decimal? @db.Decimal(12, 2)
+
+  // H33-followup PR5: per-cell "not applicable" flags. Non-null
+  // *NotApplicableAt = cell has been explicitly marked N/A by a human
+  // (e.g. "no employer scheme, this doesn't apply"). Distinct from
+  // "cell is empty because nobody has filled it in yet" — the latter
+  // is all four columns null. Timestamps double as boolean state +
+  // provenance so no separate flag column is needed; the paired
+  // *NotApplicableById FK captures who set it.
+  //
+  // MANUAL ONLY — AI never sets these. The AI leaves a cell empty when
+  // it finds nothing; a human decides whether empty means "not
+  // applicable" or "not yet reviewed".
+  //
+  // When a cell is marked N/A, any non-superseded (contributionId,
+  // type) transactions are atomically superseded — the drill-down
+  // still shows them (audit trail preserved), the sum sees zero, and
+  // the cell renders "Not applicable". Clearing N/A leaves the
+  // superseded rows superseded — a mis-click costs a re-extraction to
+  // recover the AI transactions. Recorded as a known limitation in
+  // docs/KNOWN_ISSUES.md (KI-05).
+  employerNotApplicableAt   DateTime?
+  employerNotApplicableById String?
+  employerNotApplicableBy   User?     @relation("ContribEmployerNA", fields: [employerNotApplicableById], references: [id])
+  personalNotApplicableAt   DateTime?
+  personalNotApplicableById String?
+  personalNotApplicableBy   User?     @relation("ContribPersonalNA", fields: [personalNotApplicableById], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

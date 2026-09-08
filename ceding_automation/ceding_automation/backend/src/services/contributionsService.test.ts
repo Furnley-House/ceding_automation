@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import {
   createManualContributionTransaction,
+  setContributionNotApplicable,
   ContributionNotFoundError,
   type ContributionsPrismaLike,
 } from "./contributionsService";
@@ -13,13 +14,14 @@ import {
 
 function makeMockDb() {
   const contribFindFirst = vi.fn();
+  const contribUpdate = vi.fn();
   const txFindMany = vi.fn();
   const txUpdateMany = vi.fn();
   const txCreate = vi.fn();
   const auditCreate = vi.fn();
 
   const tx = {
-    checklistContribution: { findFirst: contribFindFirst },
+    checklistContribution: { findFirst: contribFindFirst, update: contribUpdate },
     contributionTransaction: {
       findMany: txFindMany,
       updateMany: txUpdateMany,
@@ -35,13 +37,24 @@ function makeMockDb() {
     ...tx,
   } as unknown as ContributionsPrismaLike;
 
-  return { db, contribFindFirst, txFindMany, txUpdateMany, txCreate, auditCreate, $transaction };
+  return {
+    db,
+    contribFindFirst,
+    contribUpdate,
+    txFindMany,
+    txUpdateMany,
+    txCreate,
+    auditCreate,
+    $transaction,
+  };
 }
 
 const CONTRIB_ROW = {
   id: "contrib-1",
   position: 1,
   taxYearLabel: "2025/26",
+  employerNotApplicableAt: null,
+  personalNotApplicableAt: null,
 };
 
 function txRow(overrides: {
@@ -254,5 +267,188 @@ describe("createManualContributionTransaction — type scoping", () => {
     // Both the read-for-audit and the supersede filter narrow by type.
     expect(txFindMany.mock.calls[0][0].where.type).toBe("PERSONAL");
     expect(txUpdateMany.mock.calls[0][0].where.type).toBe("PERSONAL");
+  });
+});
+
+// ── setContributionNotApplicable (H33-followup PR5) ──────────────────────
+
+describe("setContributionNotApplicable", () => {
+  it("setting on an empty cell writes the flag, supersedes nothing, and audits with supersededCount=0", async () => {
+    const {
+      db,
+      contribFindFirst,
+      contribUpdate,
+      txFindMany,
+      txUpdateMany,
+      auditCreate,
+    } = makeMockDb();
+    contribFindFirst.mockResolvedValueOnce(CONTRIB_ROW);
+    txFindMany.mockResolvedValueOnce([]);
+    contribUpdate.mockResolvedValueOnce({});
+    auditCreate.mockResolvedValueOnce({});
+
+    const result = await setContributionNotApplicable(db, {
+      caseId: "case-1",
+      contributionId: "contrib-1",
+      type: "EMPLOYER",
+      on: true,
+      userId: "user-1",
+    });
+
+    expect(result.on).toBe(true);
+    expect(result.supersededCount).toBe(0);
+    expect(result.notApplicableAt).toBeInstanceOf(Date);
+
+    // No updateMany when there's nothing to supersede — avoids a
+    // pointless write.
+    expect(txUpdateMany).not.toHaveBeenCalled();
+
+    // Parent row updated with the paired columns for this type only.
+    const updateArg = contribUpdate.mock.calls[0][0];
+    expect(updateArg.where).toEqual({ id: "contrib-1" });
+    expect(updateArg.data.employerNotApplicableAt).toBeInstanceOf(Date);
+    expect(updateArg.data.employerNotApplicableById).toBe("user-1");
+    // Other type untouched.
+    expect(updateArg.data.personalNotApplicableAt).toBeUndefined();
+
+    // Audit: shape mirrors CONTRIBUTION_TRANSACTION_ADDED with a flag.
+    const auditArg = auditCreate.mock.calls[0][0].data;
+    expect(auditArg.action).toBe("CONTRIBUTION_MARKED_NA");
+    expect(auditArg.source).toBe("MANUAL");
+    expect(auditArg.metadata.flag).toBe("set");
+    expect(auditArg.metadata.supersededCount).toBe(0);
+    expect(auditArg.metadata.supersededDetails).toEqual([]);
+    expect(auditArg.metadata.type).toBe("EMPLOYER");
+    expect(auditArg.metadata.taxYearLabel).toBe("2025/26");
+  });
+
+  it("setting on a cell with AI transactions atomically supersedes them and records their detail", async () => {
+    const {
+      db,
+      contribFindFirst,
+      contribUpdate,
+      txFindMany,
+      txUpdateMany,
+      auditCreate,
+    } = makeMockDb();
+    contribFindFirst.mockResolvedValueOnce(CONTRIB_ROW);
+    txFindMany.mockResolvedValueOnce([
+      txRow({ id: "ai-1", source: "AI", amount: "1200.00" }),
+      txRow({ id: "ai-2", source: "AI", amount: "800.00" }),
+    ]);
+    txUpdateMany.mockResolvedValueOnce({ count: 2 });
+    contribUpdate.mockResolvedValueOnce({});
+    auditCreate.mockResolvedValueOnce({});
+
+    const result = await setContributionNotApplicable(db, {
+      caseId: "case-1",
+      contributionId: "contrib-1",
+      type: "EMPLOYER",
+      on: true,
+      userId: "user-1",
+    });
+
+    expect(result.supersededCount).toBe(2);
+
+    // Supersede-ALL narrowed by (contributionId, type, supersededAt IS NULL).
+    expect(txUpdateMany).toHaveBeenCalledWith({
+      where: { contributionId: "contrib-1", type: "EMPLOYER", supersededAt: null },
+      data: { supersededAt: expect.any(Date) },
+    });
+
+    // Audit metadata carries the full supersededDetails so the trail
+    // is self-contained.
+    const auditArg = auditCreate.mock.calls[0][0].data;
+    expect(auditArg.metadata.supersededCount).toBe(2);
+    expect(auditArg.metadata.supersededDetails).toHaveLength(2);
+    expect(auditArg.metadata.supersededDetails[0].id).toBe("ai-1");
+    expect(auditArg.metadata.supersededDetails[0].source).toBe("AI");
+    expect(auditArg.metadata.supersededDetails[0].amount).toBe("1200");
+  });
+
+  it("clearing nulls the flag columns and does NOT supersede anything (KI-05)", async () => {
+    // Deliberate trade-off: clear leaves prior supersedes in place.
+    const {
+      db,
+      contribFindFirst,
+      contribUpdate,
+      txFindMany,
+      txUpdateMany,
+      auditCreate,
+    } = makeMockDb();
+    contribFindFirst.mockResolvedValueOnce({
+      ...CONTRIB_ROW,
+      employerNotApplicableAt: new Date("2026-09-08T00:00:00Z"),
+    });
+    contribUpdate.mockResolvedValueOnce({});
+    auditCreate.mockResolvedValueOnce({});
+
+    const result = await setContributionNotApplicable(db, {
+      caseId: "case-1",
+      contributionId: "contrib-1",
+      type: "EMPLOYER",
+      on: false,
+      userId: "user-1",
+    });
+
+    expect(result.on).toBe(false);
+    expect(result.notApplicableAt).toBeNull();
+    expect(result.supersededCount).toBe(0);
+
+    // No read-for-audit or supersede on the clear path.
+    expect(txFindMany).not.toHaveBeenCalled();
+    expect(txUpdateMany).not.toHaveBeenCalled();
+
+    // Parent columns nulled for this type only.
+    const updateArg = contribUpdate.mock.calls[0][0];
+    expect(updateArg.data.employerNotApplicableAt).toBeNull();
+    expect(updateArg.data.employerNotApplicableById).toBeNull();
+
+    // Audit reflects the clear.
+    const auditArg = auditCreate.mock.calls[0][0].data;
+    expect(auditArg.metadata.flag).toBe("cleared");
+    expect(auditArg.newValue).toBe("N/A cleared");
+  });
+
+  it("PERSONAL type touches only the personal columns", async () => {
+    const { db, contribFindFirst, contribUpdate, txFindMany, txUpdateMany, auditCreate } = makeMockDb();
+    contribFindFirst.mockResolvedValueOnce(CONTRIB_ROW);
+    txFindMany.mockResolvedValueOnce([]);
+    contribUpdate.mockResolvedValueOnce({});
+    auditCreate.mockResolvedValueOnce({});
+
+    await setContributionNotApplicable(db, {
+      caseId: "case-1",
+      contributionId: "contrib-1",
+      type: "PERSONAL",
+      on: true,
+      userId: "user-1",
+    });
+
+    const updateArg = contribUpdate.mock.calls[0][0];
+    expect(updateArg.data.personalNotApplicableAt).toBeInstanceOf(Date);
+    expect(updateArg.data.personalNotApplicableById).toBe("user-1");
+    expect(updateArg.data.employerNotApplicableAt).toBeUndefined();
+
+    // Supersede filter also narrows by PERSONAL.
+    expect(txFindMany.mock.calls[0][0].where.type).toBe("PERSONAL");
+
+    // Belt-and-braces: no updateMany when supersededCount=0.
+    expect(txUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("throws ContributionNotFoundError on cross-case id", async () => {
+    const { db, contribFindFirst } = makeMockDb();
+    contribFindFirst.mockResolvedValueOnce(null);
+
+    await expect(
+      setContributionNotApplicable(db, {
+        caseId: "case-1",
+        contributionId: "contrib-from-another-case",
+        type: "EMPLOYER",
+        on: true,
+        userId: "user-1",
+      }),
+    ).rejects.toBeInstanceOf(ContributionNotFoundError);
   });
 });

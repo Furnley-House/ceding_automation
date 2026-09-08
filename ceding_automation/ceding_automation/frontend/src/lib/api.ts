@@ -218,6 +218,19 @@ export const contributionsApi = {
     body: { type: "EMPLOYER" | "PERSONAL"; amount: string | number },
   ) =>
     api.post(`/cases/${caseId}/contributions/${contributionId}/transactions`, body),
+  // H33-followup PR5: flip the per-cell "not applicable" flag. Setting
+  // atomically supersedes any non-superseded transactions in the same
+  // (contributionId, type); clearing just nulls the flag columns.
+  // MANUAL only — no AI helper hits this endpoint.
+  setNotApplicable: (
+    caseId: string,
+    contributionId: string,
+    body: { type: "EMPLOYER" | "PERSONAL"; on: boolean },
+  ) =>
+    api.post(
+      `/cases/${caseId}/contributions/${contributionId}/not-applicable`,
+      body,
+    ),
 };
 
 // ── Providers ────────────────────────────────────────────

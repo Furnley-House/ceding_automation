@@ -30,6 +30,8 @@ import {
   ChevronUp,
   AlertTriangle,
   RotateCcw,
+  Ban,
+  Undo2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -39,7 +41,7 @@ import {
   type ContributionTransaction,
 } from "@/hooks/useContributions";
 import {
-  sumCellTotal,
+  cellState,
   shouldShowConflictMarker,
   type ContributionType,
 } from "@/lib/contributionsDerivation";
@@ -66,8 +68,14 @@ function formatCurrency(n: number): string {
 // ── Root ────────────────────────────────────────────────────────────────
 
 export function ContributionsTable({ caseId, readOnly = false }: Props) {
-  const { rows, loading, updateRow, resetRows, addManualTransaction } =
-    useContributions(caseId);
+  const {
+    rows,
+    loading,
+    updateRow,
+    resetRows,
+    addManualTransaction,
+    setNotApplicable,
+  } = useContributions(caseId);
   const [expanded, setExpanded] = useState<ExpandedCell | null>(null);
 
   const orderedRows = [...rows].sort((a, b) => a.position - b.position);
@@ -76,6 +84,25 @@ export function ContributionsTable({ caseId, readOnly = false }: Props) {
     setExpanded((cur) =>
       cur?.rowId === rowId && cur?.type === type ? null : { rowId, type },
     );
+  };
+
+  const handleSetNotApplicable = async (
+    rowId: string,
+    type: ContributionType,
+    on: boolean,
+  ) => {
+    try {
+      await setNotApplicable(rowId, type, on);
+    } catch (err) {
+      const raw =
+        (err as { response?: { data?: { error?: string } } })?.response?.data
+          ?.error ??
+        (err instanceof Error ? err.message : String(err));
+      toast.error(
+        on ? "Couldn't mark not applicable" : "Couldn't clear not applicable",
+        { description: raw },
+      );
+    }
   };
 
   const handleManualEntry = async (
@@ -164,6 +191,7 @@ export function ContributionsTable({ caseId, readOnly = false }: Props) {
             expanded={expanded}
             onToggleExpand={toggleExpand}
             onManualEntry={handleManualEntry}
+            onSetNotApplicable={handleSetNotApplicable}
             // Only the EMPLOYER grid exposes tax-year label editing to
             // avoid two edit affordances for the same underlying
             // parent field. Personal grid renders the labels read-only.
@@ -184,6 +212,7 @@ interface TypeGridProps {
   expanded: ExpandedCell | null;
   onToggleExpand: (rowId: string, type: ContributionType) => void;
   onManualEntry: (rowId: string, type: ContributionType, amount: string) => Promise<void>;
+  onSetNotApplicable: (rowId: string, type: ContributionType, on: boolean) => Promise<void>;
   onUpdateLabel?: (rowId: string, patch: { taxYearLabel: string }) => Promise<void>;
 }
 
@@ -194,6 +223,7 @@ function TypeGrid({
   expanded,
   onToggleExpand,
   onManualEntry,
+  onSetNotApplicable,
   onUpdateLabel,
 }: TypeGridProps) {
   const label = type === "EMPLOYER" ? "Employer" : "Personal";
@@ -221,6 +251,7 @@ function TypeGrid({
             }
             onToggleExpand={() => onToggleExpand(row.id, type)}
             onManualEntry={(amount) => onManualEntry(row.id, type, amount)}
+            onSetNotApplicable={(on) => onSetNotApplicable(row.id, type, on)}
             onUpdateLabel={
               onUpdateLabel
                 ? (v) => onUpdateLabel(row.id, { taxYearLabel: v })
@@ -245,6 +276,7 @@ interface ContributionCellProps {
   isExpanded: boolean;
   onToggleExpand: () => void;
   onManualEntry: (amount: string) => Promise<void>;
+  onSetNotApplicable: (on: boolean) => Promise<void>;
   onUpdateLabel?: (nextLabel: string) => Promise<void>;
 }
 
@@ -255,19 +287,30 @@ function ContributionCell({
   isExpanded,
   onToggleExpand,
   onManualEntry,
+  onSetNotApplicable,
   onUpdateLabel,
 }: ContributionCellProps) {
   const [editing, setEditing] = useState(false);
 
+  // H33-followup PR5: resolve the cell to its four-state shape up
+  // front. Rendering, conflict-marker suppression, and the N/A toggle
+  // affordance all key off this — one source of truth per render.
+  const state = cellState(row, type);
+  const isNA = state.kind === "notApplicable";
+  const hasTransactions = state.kind === "amount" || state.kind === "zero";
+
+  const aiTotal =
+    type === "EMPLOYER" ? row.employerAiTotal : row.personalAiTotal;
+  const showMarker = shouldShowConflictMarker(
+    aiTotal,
+    row.transactions,
+    type,
+    isNA,
+  );
+
   const cellTxns = row.transactions.filter(
     (t) => t.type === type && t.supersededAt === null,
   );
-  const hasTransactions = cellTxns.length > 0;
-  const sum = sumCellTotal(row.transactions, type);
-  const aiTotal =
-    type === "EMPLOYER" ? row.employerAiTotal : row.personalAiTotal;
-  const showMarker = shouldShowConflictMarker(aiTotal, row.transactions, type);
-
   const aiChildren = cellTxns.filter((t) => t.source === "AI");
   const aiSum = aiChildren.reduce((acc, t) => acc + parseFloat(t.amount), 0);
   const markerMessage = aiTotal
@@ -308,7 +351,7 @@ function ContributionCell({
         onCommit={onUpdateLabel}
       />
 
-      {/* Row 2: total + chevron + optional conflict marker */}
+      {/* Row 2: total + chevron + N/A toggle + optional conflict marker */}
       <div className="relative min-h-[42px] px-2 py-2 text-center text-sm">
         {editing ? (
           <input
@@ -330,28 +373,47 @@ function ContributionCell({
           />
         ) : (
           <div className="flex items-center justify-center gap-1">
+            {/* Main amount/state button. Tab-focus enters edit mode on
+                non-N/A cells; N/A cells stay unfocusable so Tab moves
+                past them — matches the "N/A means done" semantics
+                (revisit only via the toggle affordance to the right). */}
             <button
               type="button"
-              onClick={startEdit}
-              // Auto-enter edit mode on focus (Tab or click) so the
-              // Tab-Type-Tab-Type flow across 8 cells works in one pass
-              // without pressing Space/Enter per cell. Idempotent: if
-              // already editing, setEditing(true) is a no-op.
-              onFocus={startEdit}
-              disabled={readOnly}
+              onClick={isNA ? undefined : startEdit}
+              onFocus={isNA ? undefined : startEdit}
+              disabled={readOnly || isNA}
               className={`flex-1 text-center ${
-                readOnly ? "cursor-default" : "cursor-text hover:bg-muted/40 rounded px-1"
+                readOnly || isNA
+                  ? "cursor-default"
+                  : "cursor-text hover:bg-muted/40 rounded px-1"
               }`}
-              title={readOnly ? undefined : "Click to type a value"}
+              title={
+                readOnly
+                  ? undefined
+                  : isNA
+                    ? "Not applicable — use the ↺ button to clear"
+                    : "Click to type a value"
+              }
             >
-              {hasTransactions ? (
+              {state.kind === "amount" ? (
                 <span className="text-foreground font-medium">
-                  {formatCurrency(sum)}
+                  {formatCurrency(state.total)}
+                </span>
+              ) : state.kind === "zero" ? (
+                <span className="text-foreground font-medium">
+                  {formatCurrency(0)}
+                </span>
+              ) : state.kind === "notApplicable" ? (
+                <span className="text-muted-foreground/60 italic text-xs">
+                  Not applicable
                 </span>
               ) : (
-                <span className="text-muted-foreground italic text-xs">
-                  None found
-                </span>
+                // Empty. PR5 copy tweak: em-dash reads as "not yet
+                // filled in", not "we looked and found nothing"
+                // (which "None found" implied). Matters most at Stage
+                // 6 where a paraplanner is deciding whether to sign
+                // off — "None found" sounds like a conclusion.
+                <span className="text-muted-foreground text-xs">—</span>
               )}
             </button>
             {hasTransactions && (
@@ -370,6 +432,32 @@ function ContributionCell({
                   <ChevronUp className="h-3 w-3" />
                 ) : (
                   <ChevronDown className="h-3 w-3" />
+                )}
+              </button>
+            )}
+            {/* PR5: N/A toggle. Mouse-only (tabIndex=-1) so it stays
+                off the Tab-Type-Tab-Type keyboard flow that CAs use
+                across the 8 amount cells. When the cell is N/A, this
+                becomes a "clear N/A" affordance. Hidden entirely in
+                readOnly mode — Stage 6/8 paraplanners see the N/A
+                state via the label alone. */}
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => onSetNotApplicable(!isNA)}
+                tabIndex={-1}
+                title={
+                  isNA
+                    ? "Clear not applicable — cell becomes empty (superseded AI transactions do not return; re-extract to recover)"
+                    : "Mark not applicable — replaces any current transactions"
+                }
+                aria-label={isNA ? "Clear not applicable" : "Mark not applicable"}
+                className="p-0.5 rounded hover:bg-muted flex-shrink-0 text-muted-foreground hover:text-foreground"
+              >
+                {isNA ? (
+                  <Undo2 className="h-3 w-3" />
+                ) : (
+                  <Ban className="h-3 w-3" />
                 )}
               </button>
             )}

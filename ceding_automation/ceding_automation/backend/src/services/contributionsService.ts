@@ -166,3 +166,154 @@ export async function createManualContributionTransaction(
     };
   });
 }
+
+// ── Per-cell "not applicable" flip ─────────────────────────────────────
+// H33-followup PR5. When a CA marks a (contributionId, type) cell as
+// N/A, we atomically supersede any non-superseded transactions in that
+// cell (mirrors createManualContributionTransaction's supersede-ALL
+// pattern) and set the paired *NotApplicableAt / *NotApplicableById
+// on the parent row. The drill-down still shows the superseded rows
+// with their sourcePage, so the paraplanner can see what the AI read
+// before the human declared the cell not applicable — no information
+// lost.
+//
+// Clearing N/A only nulls the parent flags; superseded rows stay
+// superseded (unsuperseding is not baked in — a mis-click costs a
+// re-extraction to recover the AI transactions; recorded in KI-05).
+// This is the deliberate trade-off, not an oversight; keeping "clear"
+// as a no-touch operation on the transaction table means N/A can be
+// undone without introducing an inverse-of-supersede code path that
+// would need its own audit story.
+//
+// MANUAL ONLY. No AI helper writes this flag.
+
+export interface SetNotApplicableResult {
+  contributionId: string;
+  type: "EMPLOYER" | "PERSONAL";
+  on: boolean;
+  notApplicableAt: Date | null;
+  supersededCount: number;
+}
+
+export async function setContributionNotApplicable(
+  db: ContributionsPrismaLike,
+  args: {
+    caseId: string;
+    contributionId: string;
+    type: "EMPLOYER" | "PERSONAL";
+    on: boolean;
+    userId: string;
+  },
+): Promise<SetNotApplicableResult> {
+  return db.$transaction(async (tx) => {
+    // Cross-case protection — same shape as createManualContributionTransaction.
+    const contribution = await tx.checklistContribution.findFirst({
+      where: { id: args.contributionId, caseId: args.caseId },
+      select: {
+        id: true,
+        position: true,
+        taxYearLabel: true,
+        employerNotApplicableAt: true,
+        personalNotApplicableAt: true,
+      },
+    });
+    if (!contribution) {
+      throw new ContributionNotFoundError();
+    }
+
+    const now = new Date();
+    let supersededCount = 0;
+    let supersededDetails: Array<{
+      id: string;
+      source: string;
+      amount: string;
+      description: string;
+      date: string | null;
+    }> = [];
+
+    if (args.on) {
+      // Capture-then-supersede in the same shape as the manual-entry path.
+      const willBeSuperseded = await tx.contributionTransaction.findMany({
+        where: {
+          contributionId: args.contributionId,
+          type: args.type,
+          supersededAt: null,
+        },
+        select: {
+          id: true,
+          source: true,
+          amount: true,
+          description: true,
+          date: true,
+        },
+      });
+      supersededCount = willBeSuperseded.length;
+      supersededDetails = willBeSuperseded.map((s) => ({
+        id: s.id,
+        source: s.source,
+        amount: s.amount.toString(),
+        description: s.description,
+        date: s.date ? s.date.toISOString().slice(0, 10) : null,
+      }));
+
+      if (supersededCount > 0) {
+        await tx.contributionTransaction.updateMany({
+          where: {
+            contributionId: args.contributionId,
+            type: args.type,
+            supersededAt: null,
+          },
+          data: { supersededAt: now },
+        });
+      }
+    }
+
+    // Set or clear the paired flags on the parent row. Both timestamp
+    // and by-id move together so a null timestamp always coincides with
+    // a null user id.
+    const patch =
+      args.type === "EMPLOYER"
+        ? {
+            employerNotApplicableAt: args.on ? now : null,
+            employerNotApplicableById: args.on ? args.userId : null,
+          }
+        : {
+            personalNotApplicableAt: args.on ? now : null,
+            personalNotApplicableById: args.on ? args.userId : null,
+          };
+
+    await tx.checklistContribution.update({
+      where: { id: args.contributionId },
+      data: patch,
+    });
+
+    await tx.auditLog.create({
+      data: {
+        caseId: args.caseId,
+        userId: args.userId,
+        action: "CONTRIBUTION_MARKED_NA",
+        source: "MANUAL",
+        // newValue is a short summary label so the plain audit-log
+        // export reads sensibly without needing to parse metadata.
+        newValue: args.on ? "N/A set" : "N/A cleared",
+        metadata: {
+          contributionId: args.contributionId,
+          type: args.type,
+          position: contribution.position,
+          taxYearLabel: contribution.taxYearLabel,
+          flag: args.on ? "set" : "cleared",
+          supersededCount,
+          supersededDetails,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    return {
+      contributionId: args.contributionId,
+      type: args.type,
+      on: args.on,
+      notApplicableAt: args.on ? now : null,
+      supersededCount,
+    };
+  });
+}
