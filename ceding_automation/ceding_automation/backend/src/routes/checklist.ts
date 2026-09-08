@@ -7,6 +7,7 @@ import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { requireInternalKey } from "../middleware/internalKey";
 import { applyFieldExtraction } from "../services/aiBffApply";
 import { mirrorChecklistToCase } from "../services/caseFieldMirror";
+import { canMarkMissingAsNA } from "../utils/checklistReadiness";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -380,18 +381,35 @@ router.post(
     const NA_VALUE = "N/A";
     const caseRecord = await prisma.case.findUnique({
       where: { id: req.params.caseId },
-      select: { id: true, planType: true, extractionSubmittedAt: true },
+      select: {
+        id: true,
+        planType: true,
+        _count: { select: { checklistFields: true } },
+      },
     });
     if (!caseRecord) return res.status(404).json({ error: "Case not found" });
 
-    // H23 (Nishant's design): under seed-at-submit, checklist_fields are
-    // created at extract-submit time (documents.ts
-    // ensureCaseSeededForExtraction). Before that, this endpoint would
-    // create rows fresh AS N/A — wrong behaviour: a case in stages 1-3
-    // has no committed planType yet, and marking the whole checklist
-    // N/A before extraction has been submitted is meaningless. Refuse
-    // with 409 until submit has happened.
-    if (caseRecord.extractionSubmittedAt === null) {
+    // H23 (Nishant's seed-at-submit design) originally gated this on
+    // `extractionSubmittedAt IS NOT NULL` as a proxy for "seeded". But
+    // that column postdates the H23 deploy — 205 of 216 prod cases
+    // (2026-09-08 count) had it null, including cases with 71 seeded
+    // fields and a completed extraction (e.g. FH-2026-000124). The
+    // timestamp gate therefore refused Mark-as-N/A on 95% of prod
+    // cases, blocking the CA team on every pre-H23 case since Friday.
+    //
+    // The invariant the guard actually protects is: real planType +
+    // seeded checklist_fields. Check that directly. See
+    // utils/checklistReadiness.ts for the predicate and the unit
+    // tests covering the FH-2026-000124 shape. The response code
+    // stays EXTRACTION_NOT_SUBMITTED so the frontend toast and any
+    // analytics keyed on it continue to work — the code name is now
+    // a historical label, not a description of the check.
+    if (
+      !canMarkMissingAsNA({
+        planType: caseRecord.planType,
+        checklistFieldCount: caseRecord._count.checklistFields,
+      })
+    ) {
       return res.status(409).json({
         error:
           "Cannot mark missing as N/A before extraction has been submitted for this case. Submit at least one document for extraction first (Stage 4).",

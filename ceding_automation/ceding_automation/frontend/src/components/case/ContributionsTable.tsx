@@ -86,9 +86,21 @@ export function ContributionsTable({ caseId, readOnly = false }: Props) {
     try {
       await addManualTransaction(rowId, type, amount);
     } catch (err) {
-      toast.error("Couldn't save contribution", {
-        description: err instanceof Error ? err.message : String(err),
-      });
+      // Pre-fix Carmel saw "Couldn't save contribution · Request failed
+      // with status code 400" — axios's generic err.message rather than
+      // the server's actual error field. Prefer response.data.error so
+      // the toast surfaces the useful text the backend already sends
+      // (e.g. "Amount is not a valid decimal"). Rewrite the developer-
+      // language backend messages to CA-language on the way through so
+      // Carmel gets guidance, not a stack-trace-flavoured error.
+      const raw =
+        (err as { response?: { data?: { error?: string } } })?.response?.data
+          ?.error ??
+        (err instanceof Error ? err.message : String(err));
+      const description = /decimal|number/i.test(raw)
+        ? "Enter a number (e.g. 500 or 500.00), or leave the cell empty for no contribution."
+        : raw;
+      toast.error("Couldn't save contribution", { description });
     }
   };
 
@@ -272,6 +284,18 @@ function ContributionCell({
     setEditing(false);
     const clean = raw.trim().replace(/[£,\s]/g, "");
     if (!clean) return;
+    // Client-side check: catch non-numeric input before the round-trip
+    // so the CA gets feedback in <100ms and doesn't wait on the 400.
+    // Server-side validation is still authoritative (Prisma.Decimal
+    // throws in backend/src/routes/contributions.ts:151); this just
+    // shortens the feedback loop for the obvious case.
+    if (!/^-?\d+(\.\d+)?$/.test(clean)) {
+      toast.error("Couldn't save contribution", {
+        description:
+          "Enter a number (e.g. 500 or 500.00), or leave the cell empty for no contribution.",
+      });
+      return;
+    }
     await onManualEntry(clean);
   };
 
