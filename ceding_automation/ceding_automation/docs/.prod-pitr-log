@@ -11,3 +11,4 @@
 2026-09-06T15:15:42Z  pg-cedingai-prod  3e0c515 — 20260812120000_add_case_adviser + 20260904120000_add_ai_extraction_notes
 2026-09-06T21:52:20Z  pg-cedingai-staging  2846553 — 20260907120000_add_contribution_transactions + 20260907130000_add_contribution_transaction_added_audit_action (H33-followup PR1+PR2 schema)
 2026-09-07T17:13:25Z  pg-cedingai-prod  d163b0a — 20260907120000_add_contribution_transactions + 20260907130000_add_contribution_transaction_added_audit_action (H33-followup PR1+PR2 schema)
+2026-09-08T14:56:11Z  pg-cedingai-prod  0e6a1ad — 20260908120000_add_contribution_not_applicable + 20260908130000_add_contribution_marked_na_audit_action (H33-followup PR5 schema)
