@@ -824,3 +824,45 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
     ownerZohoId,
   };
 }
+
+// ── Tasks owned by a given CRM user ─────────────────────────
+// Answers "which tasks does this person own?" in one call, which is the
+// inverse of asking "who owns this task?" once per case. Used at sign-in to
+// reconcile Case.assignedToId for everything the user owns, so their case
+// list is correct before they look at it (the list is scoped by the same
+// columns the access guard reads, so a stale row is invisible rather than
+// merely unopenable).
+//
+// COQL rather than /search: the criteria syntax for user-lookup fields is
+// fiddly and version-dependent, whereas COQL takes the owner id directly.
+// Capped at 200 (COQL's per-page maximum) — a CA with more open ceding tasks
+// than that is well outside normal, and the page-open sync still covers the
+// remainder.
+export async function findTaskIdsByOwner(
+  zohoUserId: string | null | undefined,
+): Promise<string[]> {
+  if (!zohoUserId) return [];
+  const token = await getAccessToken();
+  const res = await fetch(`${apiBase()}/coql`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      select_query: `select id from Tasks where Owner = '${zohoUserId}' limit 200`,
+    }),
+  });
+
+  // COQL answers 204 with an empty body when nothing matches — not an error.
+  if (res.status === 204) return [];
+  if (!res.ok) {
+    throw new Error(`Zoho COQL returned ${res.status}: ${await res.text()}`);
+  }
+
+  const body = (await res.json()) as { data?: Array<{ id?: unknown }> };
+  if (!Array.isArray(body.data)) return [];
+  return body.data
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+}

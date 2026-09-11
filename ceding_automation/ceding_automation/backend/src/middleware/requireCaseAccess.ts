@@ -22,6 +22,7 @@
 
 import { Request, Response, NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
+import { repairCaseOwnerFromZoho } from "../services/caseOwnerSync";
 
 const prisma = new PrismaClient();
 
@@ -65,9 +66,23 @@ export async function requireCaseAccess(
   });
 
   if (!row) {
-    // Same 403 body shape as requireRole at auth.ts:71,:83 — the
-    // frontend's existing 403 toast handles it unchanged.
-    return res.status(403).json({ error: "Insufficient permissions" });
+    // The relationship columns are a cached mirror of the Zoho task owner,
+    // refreshed only as a side-effect of someone opening the case page. A
+    // user the case was reassigned to in Zoho therefore fails this check
+    // through no fault of their own - and cannot open the page whose sync
+    // would have fixed it. Give Zoho the final word before refusing: the
+    // repair grants only when Zoho names this very user as the task owner,
+    // and writes only that same user into assignedToId. See
+    // services/caseOwnerSync.ts for the limits and the failure policy.
+    const repaired = await repairCaseOwnerFromZoho(caseId, {
+      id: req.user.id,
+      email: req.user.email,
+    });
+    if (!repaired) {
+      // Same 403 body shape as requireRole at auth.ts:71,:83 - the
+      // frontend's existing 403 toast handles it unchanged.
+      return res.status(403).json({ error: "Insufficient permissions" });
+    }
   }
   next();
 }
