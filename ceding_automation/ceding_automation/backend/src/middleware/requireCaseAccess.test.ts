@@ -6,21 +6,11 @@ import type { UserRole } from "@prisma/client";
 // instantiates a PrismaClient at import time. vi.mock is hoisted above
 // this file's top-level statements, so the shared mock fn needs
 // vi.hoisted() to also be available before the mock factory runs.
-const { findFirstMock, repairMock } = vi.hoisted(() => ({
-  findFirstMock: vi.fn(),
-  repairMock: vi.fn(),
-}));
+const { findFirstMock } = vi.hoisted(() => ({ findFirstMock: vi.fn() }));
 vi.mock("@prisma/client", () => ({
   PrismaClient: vi.fn(() => ({
     case: { findFirst: findFirstMock },
   })),
-}));
-
-// The on-deny Zoho repair is exercised in services/caseOwnerSync.test.ts.
-// Here it is stubbed so these tests cover the guard decision alone, and so a
-// denial is a real denial rather than the repair happening to throw.
-vi.mock("../services/caseOwnerSync", () => ({
-  repairCaseOwnerFromZoho: repairMock,
 }));
 
 import { requireCaseAccess } from "./requireCaseAccess";
@@ -64,8 +54,6 @@ const USER = (role: UserRole = "CA_TEAM", id = "user-1"): MockUser => ({
 
 beforeEach(() => {
   findFirstMock.mockReset();
-  repairMock.mockReset();
-  repairMock.mockResolvedValue(false); // default: Zoho does not vouch for the user
 });
 
 describe("requireCaseAccess", () => {
@@ -171,59 +159,5 @@ describe("requireCaseAccess", () => {
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(500);
     expect(findFirstMock).not.toHaveBeenCalled();
-  });
-
-  // -- On-deny Zoho repair ---------------------------------------------
-  // assignedToId is a cached mirror of the Zoho task owner, refreshed only
-  // when someone opens the case page. Reassign a task in Zoho and the new
-  // owner fails the check above, then cannot open the page whose sync would
-  // have corrected it. The repair breaks that deadlock by letting Zoho have
-  // the final word before the refusal stands.
-  it("grants access when the DB says no but Zoho names the user as the owner", async () => {
-    findFirstMock.mockResolvedValueOnce(null);
-    repairMock.mockResolvedValueOnce(true);
-    const req = makeReq({ user: USER("CA_TEAM"), id: "case-1" });
-    const res = makeRes();
-    const next = vi.fn() as NextFunction;
-    await requireCaseAccess(req, res, next);
-    expect(repairMock).toHaveBeenCalledWith("case-1", {
-      id: "user-1",
-      email: "user-1@test",
-    });
-    expect(next).toHaveBeenCalledOnce();
-    expect(res.status).not.toHaveBeenCalled();
-  });
-
-  it("keeps the 403 when Zoho does not name the user as the owner", async () => {
-    findFirstMock.mockResolvedValueOnce(null);
-    repairMock.mockResolvedValueOnce(false);
-    const req = makeReq({ user: USER("CA_TEAM"), id: "case-1" });
-    const res = makeRes();
-    const next = vi.fn() as NextFunction;
-    await requireCaseAccess(req, res, next);
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(403);
-    expect(res.json).toHaveBeenCalledWith({
-      error: "Insufficient permissions",
-    });
-  });
-
-  it("does not consult Zoho when the DB already grants access (no cost on the happy path)", async () => {
-    findFirstMock.mockResolvedValueOnce({ id: "case-1" });
-    const req = makeReq({ user: USER("CA_TEAM"), id: "case-1" });
-    const res = makeRes();
-    const next = vi.fn() as NextFunction;
-    await requireCaseAccess(req, res, next);
-    expect(next).toHaveBeenCalledOnce();
-    expect(repairMock).not.toHaveBeenCalled();
-  });
-
-  it("does not consult Zoho for ADMIN (short-circuits before any lookup)", async () => {
-    const req = makeReq({ user: USER("ADMIN"), id: "case-1" });
-    const res = makeRes();
-    const next = vi.fn() as NextFunction;
-    await requireCaseAccess(req, res, next);
-    expect(next).toHaveBeenCalledOnce();
-    expect(repairMock).not.toHaveBeenCalled();
   });
 });

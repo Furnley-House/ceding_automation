@@ -2,7 +2,6 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import jwt from "jsonwebtoken";
-import { reconcileOwnedCasesAtLogin } from "../services/caseOwnerSync";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -248,26 +247,6 @@ router.get("/azure/callback", async (req: Request, res: Response) => {
     const appToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, {
       expiresIn: (process.env.JWT_EXPIRES_IN ?? "8h") as jwt.SignOptions["expiresIn"],
     });
-
-    // Bring this user's case ownership in line with Zoho before they land on
-    // their case list. Case.assignedToId is a cached mirror of the Zoho task
-    // owner that is otherwise refreshed only when someone opens the case
-    // page - so a task reassigned in Zoho leaves the new owner unable to see
-    // it in their list at all, and unable to open the page that would have
-    // corrected it. See services/caseOwnerSync.ts.
-    //
-    // Deliberately not awaited: sign-in must not wait on Zoho, nor fail if
-    // Zoho is down. The function swallows its own errors.
-    void reconcileOwnedCasesAtLogin({ id: user.id, email: user.email }).then(
-      (corrected) => {
-        if (corrected > 0) {
-          // eslint-disable-next-line no-console
-          console.log(
-            `[auth] reconciled ${corrected} case(s) to ${user!.email} from Zoho at sign-in`,
-          );
-        }
-      },
-    );
 
     // Redirect to frontend callback page with all the info it needs
     const cbParams = new URLSearchParams({
