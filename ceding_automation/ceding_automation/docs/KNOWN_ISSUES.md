@@ -5,6 +5,73 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-06 — Multi-document extraction has no cross-document deduplication
+
+**Filed:** 2026-09-17
+**Owner:** unassigned
+**Severity:** MEDIUM — silent doubling of totals when two docs describe the same
+payments. Not a data-loss bug (every row is preserved and drillable), but the
+year totals a CA sees can read double with no signal that either row was a
+duplicate.
+
+### The shape
+
+A case commonly has multiple documents that overlap in time — e.g. a benefit
+statement (12 months of contributions) and a transaction schedule (raw
+per-payment list). Each document extracts independently into Cosmos, and each
+call to `applyContributionTransactions` supersedes only its OWN prior AI rows
+(scoped to `documentId`). Rows from other documents on the same case are
+preserved by design (that is what protects the two-independent-docs case).
+
+There is no deduplication step. If both documents list the same
+`(taxYearLabel, type, date, amount)` payment, both rows land in Postgres, both
+are non-superseded, and the parent's year total (which the UI computes as
+`sum(non-superseded children)`) reads DOUBLE what the source documents said.
+The CA sees a plausible-looking sum with no conflict badge.
+
+### The corresponding fund-lines gap
+
+`applyFundLines` uses the same per-`sourceDocumentId` delete-and-reinsert
+discipline. Two statements listing the same fund holding produce two rows in
+the drill-down. Cosmetically visible; less of a silent-numeric hazard than the
+contributions case.
+
+### What we considered and deferred
+
+Two approaches were sized on 2026-09-17. Notes in
+`docs/design/multi-doc-deduplication-2026-09-17.md` when written:
+
+- **A — deterministic backend match** on `(contribution.id, type, date,
+  amount)`. Cheap, testable, 0 latency; misfires only on identical triples;
+  supersede-not-delete preserves the losing row. Wrong on two genuinely-
+  separate same-day same-amount payments (e.g. a correction run + regular
+  contribution) — merges them.
+
+- **Hybrid — case-level LLM reconciliation triggered by the Extract click.**
+  Reads all `case-extractions` for the case, LLM decides
+  same-real-world-payment via language and page context, code handles
+  arithmetic / tax-year bucketing / rollups. Fallback for ambiguous or LLM
+  error keeps both rows and flags. Preservation via
+  `supersededByReconciliationRunId` (new column). Ships as one whole-case
+  answer instead of per-doc append. ~£0.15/case, 20–40s per click, ~1 month
+  build.
+
+Nishant's direction as of 2026-09-17 is the hybrid. **Deferred until a
+signal-carrying volume of doubling shows up in prod audits** — until then the
+per-doc apply chain (with the 2026-09-16 label-truth rewrite) is what runs.
+
+### The current defensive posture
+
+- Every row is preserved and drillable via `contribution_transactions.source =
+  'AI'` filtered by `contribution.caseId`.
+- `sourceDocumentId` on each transaction and fund-line row lets a CA trace
+  where a given entry came from.
+- A CA who spots a doubled total can manually supersede the duplicate row via
+  the contribution-cell popover (H33-followup PR2 flow). Data is recoverable
+  either way.
+
+---
+
 ## KI-05 — Clearing per-cell N/A does not restore superseded AI transactions
 
 **Filed:** 2026-09-08

@@ -162,6 +162,15 @@ enum AuditAction {
   // AuditTimeline's description helper can reuse the metadata parser
   // with minor branching.
   CONTRIBUTION_MARKED_NA
+  // Label-truth rewrite of applyContributionTransactions (2026-09-16):
+  // fire when a document carries a taxYearLabel the case does not have
+  // as a parent row. The AI data is dropped (parent set is NOT extended
+  // silently). Metadata: jobId, documentId, orphaned list with label +
+  // amount/count, parentLabelsInDb for reviewer context. Rendered via
+  // the existing AuditTimeline at stage 7 so a CA can decide whether
+  // to add a parent row for that year manually.
+  CONTRIBUTION_TOTAL_ORPHANED
+  CONTRIBUTION_TX_ORPHANED
 }
 
 enum ContactMethod {
