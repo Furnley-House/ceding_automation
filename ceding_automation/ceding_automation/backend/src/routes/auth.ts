@@ -255,11 +255,6 @@ router.get("/me", async (req: Request, res: Response) => {
   const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { userId: string };
-    // `status` is included for consistency with the /login response and the
-    // requireAuth middleware — NOT as a security fix: requireAuth already
-    // rejects INACTIVE on every request including /me. `canAccessAiTraining`
-    // carries the AI Training Hub grant flag the frontend needs for gating.
-    //
     // `hasPassword` is a NON-secret boolean derived from `passwordHash IS
     // NOT NULL`. The hash itself is never on the wire (userSelects test
     // enforces that). The flag exists so /change-password can bounce
@@ -279,10 +274,20 @@ router.get("/me", async (req: Request, res: Response) => {
         passwordHash: true,
       },
     });
-    if (!user) {
-      return res.status(401).json({ error: "User not found" });
+    // INACTIVE kill-switch — must match requireAuth (auth.ts middleware
+    // line 70-73) and the /auth/refresh check. /auth/me previously
+    // omitted this and returned 200 for INACTIVE users; every data
+    // endpoint via requireAuth still rejected them, but the frontend's
+    // `useAuth` hook (which calls /auth/me on mount) then hydrated an
+    // authenticated shell over an account that could do nothing — a
+    // half-signed-in UI state that the invariant "INACTIVE is the single
+    // kill switch across both auth routes" was written to prevent.
+    // Caught by an end-to-end test 2026-09-18 against a throwaway user.
+    const activeCheck = checkUserActive(user);
+    if (!activeCheck.active) {
+      return res.status(401).json({ error: activeCheck.message });
     }
-    const { passwordHash, ...safeUser } = user;
+    const { passwordHash, ...safeUser } = activeCheck.user;
     res.json({ ...safeUser, hasPassword: passwordHash !== null });
   } catch {
     res.status(401).json({ error: "Invalid token" });
