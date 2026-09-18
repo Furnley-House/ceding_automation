@@ -41,7 +41,7 @@ const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:3001/api";
 
 const Login = () => {
   const { setAuth, user, token } = useAuthStore();
-  const { setRole } = useRole();
+  const { setRole, role } = useRole();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [email, setEmail] = useState("");
@@ -57,13 +57,18 @@ const Login = () => {
   const rawReturnTo = searchParams.get("returnTo") ?? "/dashboard";
   const returnTo = rawReturnTo.startsWith("/change-password") ? "/dashboard" : rawReturnTo;
 
-  // Already signed in? Send them where they were going. Prevents the
-  // "authenticated user opens /login and their old token silently
-  // re-authenticates the next request" foot-gun. If the user genuinely
-  // wants to switch accounts they must sign out first — the AppHeader's
-  // sign-out control is the only entry-point that clears both stores.
+  // Already signed in? Send them where they were going. BOTH stores must
+  // agree — user+token in useAuthStore AND role in useRole — because
+  // RoleGuard reads useRole and will bounce the arriving user back here
+  // if role is null. Redirecting on user+token alone produces a tight
+  // Login → RoleGuard → Login → RoleGuard loop that Chrome throttles
+  // with "Throttling navigation to prevent the browser from hanging."
+  // See KI-07 in KNOWN_ISSUES.md — the two-store drift is architectural;
+  // aligning here is the choke point that prevents the loop from ever
+  // being reachable. If the two stores drift, the user just sees the
+  // form and re-authenticates, which resets both stores atomically.
   useEffect(() => {
-    if (user && token) {
+    if (user && token && role) {
       navigate(returnTo, { replace: true });
     }
     // Run once on mount — subsequent state changes during the form
