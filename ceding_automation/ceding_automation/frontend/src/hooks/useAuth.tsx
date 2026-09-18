@@ -2,6 +2,15 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { useAuthStore } from "@/lib/store";
 import { api } from "@/lib/api";
 
+// useRole is a separate store (React Context + localStorage key "fh_role").
+// signOut must clear BOTH stores or role state leaks: RoleGuard reads
+// useRole, and a stale role in localStorage lets a new tab appear
+// "signed in" even after logout. Importing the raw localStorage key
+// rather than pulling the useRole hook here — this file is imported by
+// AuthProvider which is above RoleProvider in the tree, so calling the
+// hook would break the provider ordering.
+const ROLE_STORAGE_KEY = "fh_role";
+
 interface Profile {
   full_name: string | null;
   role: string;
@@ -90,7 +99,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [storeUser, token]);
 
   const signOut = async () => {
-    logout();
+    logout();                              // clear useAuthStore (user + token)
+    localStorage.removeItem(ROLE_STORAGE_KEY); // clear useRole's localStorage twin
+    // Note: RoleProvider's in-memory state only re-reads localStorage on
+    // mount, so the AppHeader handler still calls clearRole() to reset
+    // the in-memory value in the current tab. Clearing localStorage here
+    // ensures a NEW tab / hard refresh doesn't rehydrate the stale role.
     setProfile(null);
   };
 

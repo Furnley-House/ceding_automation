@@ -259,6 +259,14 @@ router.get("/me", async (req: Request, res: Response) => {
     // requireAuth middleware — NOT as a security fix: requireAuth already
     // rejects INACTIVE on every request including /me. `canAccessAiTraining`
     // carries the AI Training Hub grant flag the frontend needs for gating.
+    //
+    // `hasPassword` is a NON-secret boolean derived from `passwordHash IS
+    // NOT NULL`. The hash itself is never on the wire (userSelects test
+    // enforces that). The flag exists so /change-password can bounce
+    // SSO-only users who arrive at that URL via a stale returnTo, a
+    // bookmark, or a typed URL. Without it, an FH user whose SSO returnTo
+    // was somehow poisoned with `/change-password` gets stuck on a screen
+    // designed for a password they don't have.
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
       select: {
@@ -268,9 +276,14 @@ router.get("/me", async (req: Request, res: Response) => {
         role: true,
         status: true,
         canAccessAiTraining: true,
+        passwordHash: true,
       },
     });
-    res.json(user);
+    if (!user) {
+      return res.status(401).json({ error: "User not found" });
+    }
+    const { passwordHash, ...safeUser } = user;
+    res.json({ ...safeUser, hasPassword: passwordHash !== null });
   } catch {
     res.status(401).json({ error: "Invalid token" });
   }

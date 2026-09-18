@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { useAuthStore } from "@/lib/store";
@@ -24,14 +24,53 @@ import logo from "@/assets/logo-dark.png";
 const ChangePassword = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { user } = useAuthStore();
+  const { user, token } = useAuthStore();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [gateChecked, setGateChecked] = useState(false);
 
   const returnTo = searchParams.get("returnTo") ?? "/dashboard";
+
+  // Gate: only users who actually HAVE a password may see this screen.
+  // An SSO-only user arriving here via a stale returnTo, a bookmark, or
+  // a typed URL is a dead-end — they have nothing to change. Bounce them
+  // to their intended destination. GET /auth/me returns `hasPassword`
+  // (see routes/auth.ts) — the flag is a boolean derived server-side
+  // from `passwordHash IS NOT NULL`; the hash itself is never on the wire.
+  useEffect(() => {
+    if (!token) {
+      // No auth at all → login page. Preserve returnTo so we come back
+      // to /change-password once authenticated (though the /auth/me
+      // check below will bounce SSO-only users anyway).
+      navigate(`/?returnTo=${encodeURIComponent(returnTo)}`, { replace: true });
+      return;
+    }
+    let cancelled = false;
+    api
+      .get("/auth/me")
+      .then((res) => {
+        if (cancelled) return;
+        const me = res.data as { hasPassword?: boolean };
+        if (!me.hasPassword) {
+          // SSO-only user. Send them where they were going.
+          navigate(returnTo, { replace: true });
+          return;
+        }
+        setGateChecked(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        navigate(`/?returnTo=${encodeURIComponent(returnTo)}`, { replace: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Run once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -78,6 +117,17 @@ const ChangePassword = () => {
     }
   };
 
+  // Don't flash the form for the ~200ms while the gate check runs — an
+  // SSO-only user would see the "Set a new password" heading and inputs
+  // for a beat before being bounced away.
+  if (!gateChecked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-background flex flex-col">
       <header className="app-header h-16 flex items-center px-8 border-b border-border bg-card">
@@ -104,9 +154,19 @@ const ChangePassword = () => {
             </p>
           </div>
 
+          {/* Field pattern matches the rest of the app — see Login.tsx and
+              UserManagementPanel for the same shape. Plain wrapper, Label
+              with the uppercase-kicker styling, Input with mt-1. Any hint
+              text after the input keeps its own `mt-1.5` so it sits below
+              the field rather than reflowing into the wrapper's spacing. */}
           <form onSubmit={submit} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="current-password">Temporary password</Label>
+            <div>
+              <Label
+                htmlFor="current-password"
+                className="text-xs uppercase tracking-wider text-muted-foreground font-semibold"
+              >
+                Temporary password
+              </Label>
               <Input
                 id="current-password"
                 type="password"
@@ -115,10 +175,17 @@ const ChangePassword = () => {
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 disabled={submitting}
+                className="mt-1"
+                autoFocus
               />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="new-password">New password</Label>
+            <div>
+              <Label
+                htmlFor="new-password"
+                className="text-xs uppercase tracking-wider text-muted-foreground font-semibold"
+              >
+                New password
+              </Label>
               <Input
                 id="new-password"
                 type="password"
@@ -127,13 +194,19 @@ const ChangePassword = () => {
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 disabled={submitting}
+                className="mt-1"
               />
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-[11px] text-muted-foreground mt-1.5">
                 At least 12 characters. A pass-phrase of three or four words works well.
               </p>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="confirm-password">Confirm new password</Label>
+            <div>
+              <Label
+                htmlFor="confirm-password"
+                className="text-xs uppercase tracking-wider text-muted-foreground font-semibold"
+              >
+                Confirm new password
+              </Label>
               <Input
                 id="confirm-password"
                 type="password"
@@ -142,6 +215,7 @@ const ChangePassword = () => {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 disabled={submitting}
+                className="mt-1"
               />
             </div>
 

@@ -1,13 +1,24 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { useAuthStore } from "@/lib/store";
+import { useRole, type Role } from "@/hooks/useRole";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import logo from "@/assets/logo-dark.png";
+
+// Backend UserRole → frontend Role. Must match the map in AuthCallback.tsx
+// so the two sign-in paths produce identical state. RoleGuard reads useRole,
+// not useAuthStore, so this mapping is load-bearing for post-login routing.
+const ROLE_MAP: Record<string, Role> = {
+  CA_TEAM: "ca_team",
+  ADVISER: "adviser",
+  PARAPLANNER: "paraplanner",
+  ADMIN: "admin",
+};
 
 // Phase 1 login. Replaces the pre-2026-09-17 RolePicker which posted to
 // POST /api/auth/login with just an email and no password — a server-side
@@ -29,7 +40,8 @@ import logo from "@/assets/logo-dark.png";
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:3001/api";
 
 const Login = () => {
-  const { setAuth } = useAuthStore();
+  const { setAuth, user, token } = useAuthStore();
+  const { setRole } = useRole();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [email, setEmail] = useState("");
@@ -38,7 +50,26 @@ const Login = () => {
   const [error, setError] = useState<string | null>(null);
 
   // Preserve deep-links across sign-in (e.g. /cases/abc?zohoTaskId=xxx).
-  const returnTo = searchParams.get("returnTo") ?? "/dashboard";
+  // Refuse `/change-password` as a returnTo — that URL is only valid
+  // during the forced-rotation window on first sign-in, not as a
+  // destination for anyone else. Otherwise a stale tab or a bookmark
+  // pointing at /change-password can hijack the SSO returnTo chain.
+  const rawReturnTo = searchParams.get("returnTo") ?? "/dashboard";
+  const returnTo = rawReturnTo.startsWith("/change-password") ? "/dashboard" : rawReturnTo;
+
+  // Already signed in? Send them where they were going. Prevents the
+  // "authenticated user opens /login and their old token silently
+  // re-authenticates the next request" foot-gun. If the user genuinely
+  // wants to switch accounts they must sign out first — the AppHeader's
+  // sign-out control is the only entry-point that clears both stores.
+  useEffect(() => {
+    if (user && token) {
+      navigate(returnTo, { replace: true });
+    }
+    // Run once on mount — subsequent state changes during the form
+    // submission handle their own navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const ssoLogin = () => {
     window.location.href = `${API_BASE}/auth/azure?returnTo=${encodeURIComponent(returnTo)}`;
@@ -71,6 +102,12 @@ const Login = () => {
         },
         data.token,
       );
+      // BOTH stores must be set or RoleGuard bounces back to /. AuthCallback
+      // does the equivalent at hooks/useAuth.tsx:64-65 for SSO; the password
+      // path was missing this call and produced 200 responses that never
+      // rendered a signed-in view.
+      const frontendRole = ROLE_MAP[data.user.role] ?? "ca_team";
+      setRole(frontendRole);
       if (data.mustChangePassword) {
         // Forced rotation. The change-password screen submits, then
         // navigates to returnTo — so the redirect target survives.
@@ -140,9 +177,20 @@ const Login = () => {
           </div>
 
           {/* ── Email + password — Anchor Wealth staff, phase 1 ──── */}
+          {/* Field pattern matches UserManagementPanel + AssignParaplannerDialog:
+              plain <div> wrapper (no space-y-*), Label with the uppercase-kicker
+              styling the rest of the app uses, Input with mt-1 for its margin
+              from the label above. Do NOT reintroduce space-y-* here — an
+              earlier attempt did, and interacted badly with the browser's
+              autofill overlay positioning on this page. */}
           <form onSubmit={passwordLogin} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="email">Email</Label>
+            <div>
+              <Label
+                htmlFor="email"
+                className="text-xs uppercase tracking-wider text-muted-foreground font-semibold"
+              >
+                Email
+              </Label>
               <Input
                 id="email"
                 type="email"
@@ -151,10 +199,17 @@ const Login = () => {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 disabled={submitting}
+                className="mt-1"
+                autoFocus
               />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="password">Password</Label>
+            <div>
+              <Label
+                htmlFor="password"
+                className="text-xs uppercase tracking-wider text-muted-foreground font-semibold"
+              >
+                Password
+              </Label>
               <Input
                 id="password"
                 type="password"
@@ -163,6 +218,7 @@ const Login = () => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 disabled={submitting}
+                className="mt-1"
               />
             </div>
 
