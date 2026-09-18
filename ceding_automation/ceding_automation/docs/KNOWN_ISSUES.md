@@ -5,6 +5,104 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-07 — Two-store drift between `useAuthStore` and `useRole`
+
+**Filed:** 2026-09-18
+**Owner:** unassigned
+**Severity:** LOW at rest, HIGH under change — every auth bug shipped during
+the H36 phase 1 password-login work traced back to this pattern. Not a live
+defect today (all four instances have been patched), but the shape keeps
+re-manifesting whenever an auth-adjacent code path is added.
+
+### The shape
+
+The frontend keeps auth state in two independent stores:
+
+| Store | What it holds | Persistence | Cleared by |
+|---|---|---|---|
+| `useAuthStore` | `user`, `token` | Zustand `persist` middleware, localStorage key `ceding-auth` | `logout()` action on the store |
+| `useRole` | `role` (frontend enum) | React Context + manual `localStorage.setItem`, key `fh_role` | `clearRole()` on the Context |
+
+`RoleGuard` reads from `useRole`. Every case-detail / dashboard / admin route
+sits behind it. So `useRole.role` is the *load-bearing* signal for
+"user is signed in"; `useAuthStore.user` alone is not enough to render
+protected UI.
+
+The two stores' populate + clear semantics are separate, and every entry /
+exit path has to touch both or one side leaks. The H36 phase 1 ship broke on
+this four times:
+
+- **SSO → /change-password trap.** ChangePassword.tsx had no guard against
+  an SSO-only user (no `passwordHash`) arriving via a stale `returnTo`
+  chain — because there was no single mount-time check tied to "am I a
+  legitimate destination for this user's auth state." Fixed by adding a
+  `hasPassword` gate.
+- **Password login 200 but no session.** `Login.tsx` set `useAuthStore`
+  via `setAuth(...)` but not `useRole` via `setRole(...)`. `AuthCallback.tsx`
+  (the SSO path) sets both — the password path was missing the `setRole`
+  call. RoleGuard bounced the arriving user back to `/`, symptom looked
+  like "logged out immediately."
+- **/dashboard bounce after /change-password.** Downstream cascade of the
+  above — user completes password change, arrives at /dashboard, RoleGuard
+  still sees no role, bounces to /, looks like a logout.
+- **Sign-out leaves role behind.** `useAuth.signOut()` cleared
+  `useAuthStore` but not the `fh_role` localStorage key. Any code path
+  calling `signOut()` without also calling `clearRole()` left a stale
+  role in localStorage; Zustand's `persist` re-hydrating on the next
+  tab load produced the "admin token appeared during a test-user login
+  attempt" symptom.
+
+### Why it recurs
+
+`useRole` predates `useAuthStore`. It was originally a role-picker artefact
+from the pre-2026-09-17 demo login (see the RolePicker deletion in commit
+`b27f044`). When SSO landed it kept the role separate for backwards
+compatibility. Neither store is aware of the other, and there's no CI signal
+that pairs "populate one" with "populate both." A future developer wiring
+a new auth path will forget one side of the pair.
+
+### The fix
+
+Fold `role` into `useAuthStore`. `role` is derivable from `user.role`
+(with the existing `ROLE_MAP` transform) — it's not independent state, it's
+a projection of the auth store's `user` object. One store, one populate,
+one clear. `RoleGuard` reads from `useAuthStore` via a derived selector.
+`clearRole` and the `fh_role` localStorage key disappear. `useRole` becomes
+a thin `useAuthStore` selector for backwards-compat.
+
+Rough shape:
+
+```ts
+// store.ts
+export const useAuthStore = create<AuthState>()(
+  persist(
+    (set) => ({
+      user: null, token: null,
+      role: null,   // ← derived, populated by setAuth
+      setAuth: (user, token) => set({
+        user, token,
+        role: user ? ROLE_MAP[user.role] : null,
+      }),
+      logout: () => set({ user: null, token: null, role: null }),
+    }),
+    { name: "ceding-auth" }
+  )
+);
+```
+
+### Not now, but written down
+
+Estimate: 3–4 hours including the migration for existing sessions
+(everyone on `fh_role`-only would need to be re-authenticated on next
+load; acceptable given `fh_role` never survives a JWT invalidation
+anyway). Doesn't ship with the H36 phase 1 because the layered fixes
+covered every observed path and this is architectural clean-up, not a
+live bug. But every future auth-adjacent change is a fresh chance for
+this drift to bite, and the fix removes the class rather than another
+patch.
+
+---
+
 ## KI-06 — Multi-document extraction has no cross-document deduplication
 
 **Filed:** 2026-09-17
