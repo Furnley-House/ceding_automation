@@ -24,6 +24,29 @@ declare global {
 // is a compile-time error.
 export type UserPermission = "canAccessAiTraining";
 
+// Kill-switch shape used by BOTH requireAuth (JWT verification path) and
+// the /auth/login endpoint (password verification path). Phase 1 password
+// login deliberately does NOT enforce SSO-or-password mutual exclusion —
+// a user can hold both — so `status = 'INACTIVE'` is the single control
+// that must block every login route. Extracted so the two callers cannot
+// diverge; if a future change adds a third auth route (e.g. API key), it
+// must call this too.
+//
+// Return shape is a discriminated union so the caller can narrow to the
+// non-null user branch after the check without a redundant guard. The
+// generic parameter preserves the caller's field selection.
+export function checkUserActive<T extends { status: string }>(
+  user: T | null | undefined,
+):
+  | { active: true; user: T }
+  | { active: false; message: string } {
+  if (!user) return { active: false, message: "Invalid or inactive user" };
+  if (user.status === "INACTIVE") {
+    return { active: false, message: "Invalid or inactive user" };
+  }
+  return { active: true, user };
+}
+
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
@@ -48,16 +71,17 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       },
     });
 
-    if (!user || user.status === "INACTIVE") {
-      return res.status(401).json({ error: "Invalid or inactive user" });
+    const activeCheck = checkUserActive(user);
+    if (!activeCheck.active) {
+      return res.status(401).json({ error: activeCheck.message });
     }
 
     req.user = {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      canAccessAiTraining: user.canAccessAiTraining,
+      id: activeCheck.user.id,
+      email: activeCheck.user.email,
+      name: activeCheck.user.name,
+      role: activeCheck.user.role,
+      canAccessAiTraining: activeCheck.user.canAccessAiTraining,
     };
     next();
   } catch {

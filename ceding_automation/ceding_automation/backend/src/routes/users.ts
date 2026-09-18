@@ -4,6 +4,7 @@ import { PrismaClient, UserRole, UserStatus, UserAuditAction } from "@prisma/cli
 import { requireAuth, requireRole } from "../middleware/auth";
 import { z } from "zod";
 import { diffUserFields } from "../utils/diffUserFields";
+import { generateTemporaryPassword, hashPassword } from "../utils/password";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -17,6 +18,13 @@ const CreateUserSchema = z.object({
   email: z.string().trim().toLowerCase().email("Valid email required"),
   role: z.nativeEnum(UserRole),
   status: z.nativeEnum(UserStatus).optional(),
+  // Phase 1 password login (2026-09-17): admin ticks a box in
+  // UserManagementPanel to give the new account a password on creation.
+  // Anchor Wealth users get true; Furnley House users stay false and
+  // authenticate via SSO. Server generates the temp; admin does NOT
+  // supply one, both to keep the entropy floor consistent and so no
+  // password material comes over the wire before hashing.
+  withPassword: z.boolean().optional(),
 });
 
 const UpdateUserSchema = z
@@ -58,7 +66,7 @@ router.post(
       return res.status(400).json({ error: parsed.error.flatten() });
     }
 
-    const { email, name, role, status } = parsed.data;
+    const { email, name, role, status, withPassword } = parsed.data;
 
     // Friendly-error for the most common admin mis-step: trying to create a
     // user who's already in the table.
@@ -70,22 +78,72 @@ router.post(
       });
     }
 
+    // Phase 1: when withPassword=true, generate a 16-char temp, hash it,
+    // set mustChangePassword. Response body carries the plaintext temp
+    // ONCE — admin must copy it out-of-band to the user (Teams DM, phone).
+    // Not logged, not persisted anywhere except as its argon2id hash on
+    // the row we're about to create. Until the ceding mailbox lands in
+    // phase 2 this is the only handoff channel.
+    let tempPassword: string | null = null;
+    let passwordHash: string | null = null;
+    if (withPassword) {
+      tempPassword = generateTemporaryPassword();
+      passwordHash = await hashPassword(tempPassword);
+    }
+
     try {
-      const user = await prisma.user.create({
-        data: { email, name, role, status: status ?? UserStatus.ACTIVE },
-        select: {
-          id: true,
-          email: true,
-          name: true,
-          role: true,
-          status: true,
-          canAccessAiTraining: true,
-          ssoId: true,
-          createdAt: true,
-          updatedAt: true,
-        },
+      const user = await prisma.$transaction(async (tx) => {
+        const u = await tx.user.create({
+          data: {
+            email,
+            name,
+            role,
+            status: status ?? UserStatus.ACTIVE,
+            ...(passwordHash
+              ? {
+                  passwordHash,
+                  mustChangePassword: true,
+                  passwordUpdatedAt: new Date(),
+                }
+              : {}),
+          },
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            role: true,
+            status: true,
+            canAccessAiTraining: true,
+            ssoId: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+        if (passwordHash) {
+          await tx.userAuditLog.create({
+            data: {
+              actorUserId: req.user!.id,
+              targetUserId: u.id,
+              action: UserAuditAction.USER_PASSWORD_SET,
+              field: "passwordHash",
+              oldValue: null,
+              newValue: "***",
+              metadata: {
+                targetUserEmail: u.email,
+                actorEmail: req.user!.email,
+                initialSet: true,
+              },
+            },
+          });
+        }
+        return u;
       });
-      res.status(201).json(user);
+      // Return the temp password to the admin ONCE. Frontend must show it
+      // in a "copy this now" modal — it will never be retrievable again.
+      res.status(201).json({
+        ...user,
+        ...(tempPassword ? { temporaryPassword: tempPassword } : {}),
+      });
     } catch (err) {
       const e = err as { code?: string; message?: string };
       if (e.code === "P2002") {
@@ -182,6 +240,82 @@ router.patch(
       if (e.code === "P2025") return res.status(404).json({ error: "User not found" });
       res.status(500).json({ error: e.message ?? "Update failed" });
     }
+  },
+);
+
+// POST /users/:id/set-password — admin resets a user's password.
+// Phase 1 self-service reset is out of scope (no mailbox yet); this
+// endpoint is the ONLY way a forgotten password becomes usable again.
+// Server generates a 16-char temp; admin must convey it out-of-band.
+//
+// The action is idempotent-safe: calling it on a user who already has a
+// passwordHash overwrites with a new temp and re-flags mustChangePassword,
+// which is the correct behaviour for "user forgot their password, reset
+// them so they can rotate again on next sign-in." It also clears
+// failedLoginAttempts and lockedUntil so a locked-out user is immediately
+// unblocked once they receive the new temp.
+//
+// Does NOT enforce ssoId-null — a user can have both an ssoId and a
+// passwordHash (see the migration for the intent). Admin discretion
+// governs whether an FH user needs a password; the runbook item is that
+// they must set INACTIVE when the user departs regardless.
+router.post(
+  "/:id/set-password",
+  requireAuth,
+  requireRole(["ADMIN"]),
+  async (req: Request, res: Response) => {
+    const targetId = req.params.id;
+
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      select: { id: true, email: true, status: true },
+    });
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (target.status === UserStatus.INACTIVE) {
+      // Setting a password on a deactivated user does no harm functionally
+      // (they still can't log in because the login endpoint refuses
+      // INACTIVE), but it is a confusing admin action — either the admin
+      // meant to reactivate first, or they are about to reactivate and
+      // forgot the intended order. Refuse and prompt the correct sequence.
+      return res.status(400).json({
+        error: "Reactivate the user before setting a password. Deactivated users cannot log in regardless.",
+      });
+    }
+
+    const tempPassword = generateTemporaryPassword();
+    const passwordHash = await hashPassword(tempPassword);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: targetId },
+        data: {
+          passwordHash,
+          mustChangePassword: true,
+          passwordUpdatedAt: new Date(),
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
+      await tx.userAuditLog.create({
+        data: {
+          actorUserId: req.user!.id,
+          targetUserId: targetId,
+          action: UserAuditAction.USER_PASSWORD_SET,
+          field: "passwordHash",
+          oldValue: null,
+          newValue: "***",
+          metadata: {
+            targetUserEmail: target.email,
+            actorEmail: req.user!.email,
+            initialSet: false,
+          },
+        },
+      });
+    });
+
+    // Same "show once" contract as the create path: response body is the
+    // only chance the admin has to see the plaintext.
+    res.json({ temporaryPassword: tempPassword, mustChangePassword: true });
   },
 );
 

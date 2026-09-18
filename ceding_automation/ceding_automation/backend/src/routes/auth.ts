@@ -1,10 +1,38 @@
 // backend/src/routes/auth.ts
 import { Router, Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, UserAuditAction } from "@prisma/client";
 import jwt from "jsonwebtoken";
+import rateLimit from "express-rate-limit";
+import { z } from "zod";
+import { checkUserActive, requireAuth } from "../middleware/auth";
+import {
+  hashPassword,
+  isPasswordAcceptable,
+  verifyPassword,
+} from "../utils/password";
 
 const router = Router();
 const prisma = new PrismaClient();
+
+// Phase 1 password login lockout policy — 5 failed attempts trip a
+// 15-minute lockout via `users.lockedUntil`. Applied per-user, not
+// per-IP (per-IP lives on the express-rate-limit below), so an attacker
+// hammering one account cannot lock every account by rotating IPs and a
+// legitimate user is not locked out by someone else's failed guess.
+const LOCKOUT_THRESHOLD = 5;
+const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
+
+// Per-IP rate limit specifically on /auth/login. The global limiter in
+// index.ts covers steady-state traffic; this one is tighter and dedicated
+// so a login-flood does not consume the global budget every legitimate
+// user shares.
+const loginRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 10, // 10 attempts per IP per minute — human retry speed, not a bot's
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many login attempts. Please try again shortly." },
+});
 
 const frontendUrl = () => process.env.FRONTEND_URL ?? "http://localhost:5173";
 const azureTenant = () => process.env.AZURE_TENANT_ID ?? "";
@@ -13,11 +41,36 @@ const azureClientSecret = () => process.env.AZURE_CLIENT_SECRET ?? "";
 const azureRedirectUri = () =>
   process.env.AZURE_REDIRECT_URI ?? "http://localhost:3001/api/auth/azure/callback";
 
-// Demo login (no password – role-selector for prototype, SSO in prod)
-router.post("/login", async (req: Request, res: Response) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: "Email required" });
+// POST /auth/login — email + password. Replaces the pre-2026-09-17 demo
+// endpoint that issued a JWT off email alone; the demo left the door open
+// for any authenticated party who knew an admin's email address to mint
+// a token, and had no place in a production surface. Phase 1 Anchor
+// Wealth users authenticate here; FH staff continue via /auth/azure.
+//
+// Response shape matches the SSO callback's redirect payload so the
+// frontend's `/callback` handler can process both without branching:
+// { token, user, mustChangePassword } — the third field is a phase 1
+// flag that redirects to /change-password before the app loads.
+//
+// Failure modes all return the same generic 401 "invalid credentials"
+// (never distinguishing wrong-email from wrong-password from no-hash-set)
+// so the endpoint does not leak user existence. Lockout state IS
+// distinguished (429 with retry-after) because a legitimate user hitting
+// their own lockout needs to know why they cannot log in.
+const LoginSchema = z.object({
+  email: z.string().trim().toLowerCase().email(),
+  password: z.string().min(1).max(128),
+});
 
+router.post("/login", loginRateLimiter, async (req: Request, res: Response) => {
+  const parsed = LoginSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Email and password required" });
+  }
+  const { email, password } = parsed.data;
+
+  // Look up by email. `findUnique` because email is @unique on the model —
+  // ensures at most one row.
   const user = await prisma.user.findUnique({
     where: { email },
     select: {
@@ -27,19 +80,174 @@ router.post("/login", async (req: Request, res: Response) => {
       role: true,
       status: true,
       canAccessAiTraining: true,
+      passwordHash: true,
+      mustChangePassword: true,
+      failedLoginAttempts: true,
+      lockedUntil: true,
     },
   });
 
-  if (!user || user.status === "INACTIVE") {
-    return res.status(401).json({ error: "User not found or inactive" });
+  // No user, or SSO-only user with no passwordHash. Same generic 401 so a
+  // caller cannot enumerate which emails have password login enabled.
+  // Deliberately verify a decoy hash even on the no-user path so response
+  // time does not distinguish "user exists but no password" from
+  // "user does not exist" — cheap timing-attack mitigation.
+  if (!user || !user.passwordHash) {
+    // Timing-attack mitigation: verify against a fixed decoy bcrypt hash
+    // so the response time for "no such email" or "email exists but has
+    // no password" matches the wall-time of a real bcrypt.compare on the
+    // happy path. The decoy hash is cost=12 (same as production hashes)
+    // so it burns ~250ms — the same order of magnitude the caller sees
+    // when the row does have a hash.
+    await verifyPassword(
+      "$2b$12$aaaaaaaaaaaaaaaaaaaaaOZbHDBK4qN0KLxIu9j9O2fEXP5PbXYX2",
+      password,
+    ).catch(() => false);
+    return res.status(401).json({ error: "Invalid credentials" });
   }
 
+  // Same INACTIVE check requireAuth uses. Extracted so the two callers
+  // cannot diverge — see middleware/auth.ts:checkUserActive for context.
+  const activeCheck = checkUserActive(user);
+  if (!activeCheck.active) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  // Locked out. 429 (not 401) so the frontend can surface a specific
+  // "locked until HH:MM, contact your admin" message without further
+  // guessing consuming attempts against a hash that will not be verified.
+  const now = new Date();
+  if (user.lockedUntil && user.lockedUntil > now) {
+    return res
+      .status(429)
+      .set("Retry-After", String(Math.ceil((user.lockedUntil.getTime() - now.getTime()) / 1000)))
+      .json({ error: "Account temporarily locked. Try again later." });
+  }
+
+  const ok = await verifyPassword(user.passwordHash, password);
+  if (!ok) {
+    // Increment failure counter; on the Nth failure set lockedUntil.
+    // Uses `update` (not `upsert`) so a concurrent row-delete surfaces as
+    // an error rather than silently creating an unauthenticated row.
+    const nextFailed = user.failedLoginAttempts + 1;
+    const shouldLock = nextFailed >= LOCKOUT_THRESHOLD;
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedLoginAttempts: nextFailed,
+        lockedUntil: shouldLock ? new Date(now.getTime() + LOCKOUT_WINDOW_MS) : user.lockedUntil,
+      },
+    });
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  // Success. Reset counter + lockout. Deliberately does NOT touch
+  // passwordUpdatedAt (that only changes on set/change).
+  if (user.failedLoginAttempts > 0 || user.lockedUntil) {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { failedLoginAttempts: 0, lockedUntil: null },
+    });
+  }
+
+  // Same JWT shape as the SSO callback (auth.ts:247, :370). Downstream
+  // consumers must not care how the token was minted.
   const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, {
     expiresIn: (process.env.JWT_EXPIRES_IN || "8h") as jwt.SignOptions["expiresIn"],
   });
 
-  res.json({ token, user });
+  res.json({
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      status: user.status,
+      canAccessAiTraining: user.canAccessAiTraining,
+    },
+    mustChangePassword: user.mustChangePassword,
+  });
 });
+
+// POST /auth/change-password — authenticated user rotates their own
+// password. Used by (a) forced first-sign-in rotation when
+// mustChangePassword=true, (b) any future user-initiated change from a
+// settings screen. Requires the current password (so a stolen JWT can't
+// change the password without also knowing the current one).
+const ChangePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string().min(1).max(128),
+});
+
+router.post(
+  "/change-password",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const parsed = ChangePasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "currentPassword and newPassword required" });
+    }
+    const { currentPassword, newPassword } = parsed.data;
+
+    const strength = isPasswordAcceptable(newPassword);
+    if (!strength.ok) {
+      return res.status(400).json({ error: strength.reason });
+    }
+
+    // Refuse re-use of the current password. Not a full history — phase 1.
+    if (newPassword === currentPassword) {
+      return res.status(400).json({ error: "New password must differ from current" });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user!.id },
+      select: { id: true, email: true, passwordHash: true },
+    });
+    if (!user || !user.passwordHash) {
+      // SSO-only user shouldn't be here; a UI that lets them try produces
+      // a clear-not-supported error rather than silently succeeding.
+      return res.status(400).json({ error: "No password is set on this account" });
+    }
+
+    const ok = await verifyPassword(user.passwordHash, currentPassword);
+    if (!ok) {
+      return res.status(401).json({ error: "Current password incorrect" });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash: newHash,
+          mustChangePassword: false,
+          passwordUpdatedAt: new Date(),
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
+      await tx.userAuditLog.create({
+        data: {
+          actorUserId: user.id,
+          targetUserId: user.id,
+          action: UserAuditAction.USER_PASSWORD_CHANGED,
+          field: "passwordHash",
+          // Never log old/new value for password fields — the audit row
+          // records THAT a rotation occurred, not the material.
+          oldValue: null,
+          newValue: "***",
+          metadata: {
+            targetUserEmail: user.email,
+            actorEmail: req.user!.email,
+          },
+        },
+      });
+    });
+
+    res.json({ ok: true });
+  },
+);
 
 router.get("/me", async (req: Request, res: Response) => {
   const authHeader = req.headers.authorization;
@@ -308,14 +516,43 @@ router.post("/refresh", async (req: Request, res: Response) => {
       role: true,
       status: true,
       ssoRefreshToken: true,
+      passwordHash: true,
       canAccessAiTraining: true,
     },
   });
   if (!user) return res.status(401).json({ error: "User not found" });
   if (user.status === "INACTIVE") return res.status(401).json({ error: "User inactive" });
+
+  // Phase 1 password login: password-only users have no Microsoft
+  // refresh_token to rotate, but their session must still refresh
+  // silently or Anchor Wealth staff would be forced to re-enter their
+  // password every 8 hours. Skip the Microsoft round-trip and issue a
+  // fresh app JWT directly — the signature check above proved the
+  // caller holds a JWT we issued, and the INACTIVE check above is the
+  // revocation control (same defence SSO users get: an admin who sets
+  // status=INACTIVE stops both refresh paths on the next tick).
+  //
+  // Users with BOTH a passwordHash AND an ssoRefreshToken take the SSO
+  // branch below — Microsoft is the stronger revocation signal when
+  // available, so prefer it. A user with NEITHER is a Zoho-synced stub
+  // that has never authenticated via any path; refuse cleanly.
   if (!user.ssoRefreshToken) {
-    // Pre-offline_access users have no stored refresh_token; they need to
-    // do a full SSO round-trip to bootstrap one.
+    if (user.passwordHash) {
+      const appToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, {
+        expiresIn: (process.env.JWT_EXPIRES_IN ?? "8h") as jwt.SignOptions["expiresIn"],
+      });
+      return res.json({
+        token: appToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          status: user.status,
+          canAccessAiTraining: user.canAccessAiTraining,
+        },
+      });
+    }
     return res.status(401).json({ error: "No refresh token on record — sign in again" });
   }
 

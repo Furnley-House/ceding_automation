@@ -1,4 +1,4 @@
-import { Search, ChevronDown, LogOut, RefreshCw, Settings, BarChart3, Contrast } from "lucide-react";
+import { Search, ChevronDown, LogOut, Settings, BarChart3, Contrast } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -7,10 +7,6 @@ import { useRole, ROLE_LABELS } from "@/hooks/useRole";
 import { useHighContrast } from "@/hooks/useHighContrast";
 import { useAuth } from "@/hooks/useAuth";
 
-// Hide the "Switch role" back-door menu item in prod so users can't bypass
-// the SSO-only flow. Same flag the RolePicker / RoleGuard use.
-const DEMO_LOGIN_DISABLED =
-  String(import.meta.env.VITE_DISABLE_DEMO_LOGIN).toLowerCase() === "true";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -189,11 +185,9 @@ export function AppHeader() {
             <DropdownMenuItem onClick={() => navigate("/admin")} disabled={role !== "admin"}>
               <Settings className="mr-2 h-4 w-4" /> Admin Panel
             </DropdownMenuItem>
-            {!DEMO_LOGIN_DISABLED && (
-              <DropdownMenuItem onClick={clearRole}>
-                <RefreshCw className="mr-2 h-4 w-4" /> Switch role
-              </DropdownMenuItem>
-            )}
+            {/* "Switch role" removed 2026-09-17 alongside the RolePicker.
+                The picker was the only place `clearRole` sent users; now
+                sign-out is the single exit from an authenticated session. */}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={handleSignOut}>
               <LogOut className="mr-2 h-4 w-4" /> Sign out

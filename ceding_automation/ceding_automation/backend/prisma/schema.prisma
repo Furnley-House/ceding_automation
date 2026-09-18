@@ -220,6 +220,29 @@ model User {
   // UserAuditLog row so the grant history is reconstructable.
   canAccessAiTraining Boolean @default(false)
 
+  // Phase 1 password login (2026-09-17). Populated by admin-only actions —
+  // POST /users/:id/set-password and the withPassword branch of POST /users.
+  // Nullable so SSO-only rows carry NULL and refuse password login cleanly.
+  // A user CAN have both passwordHash AND ssoId — see the migration
+  // 20260917130000_add_password_login for the intent notes; the single
+  // kill switch across both routes is `status = 'INACTIVE'`.
+  passwordHash        String?
+  // "Temporary password set by admin, user must rotate on next sign-in."
+  // Narrow semantics — do NOT overload with a general reset-token signal
+  // in phase 2; that will be a separate field. Login endpoint returns the
+  // flag in its response so the frontend can redirect to /change-password.
+  mustChangePassword  Boolean   @default(false)
+  // Counter + timestamp implement lockout on repeated failures. Threshold
+  // and window (currently 5 attempts × 15 minutes) live in the login
+  // endpoint. Both reset on any successful login. Increments do NOT write
+  // an audit row per attempt — the counter itself is the record; a lockout
+  // is inferable from `lockedUntil > now()`.
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  // When the passwordHash was last written. Used by admin displays ("last
+  // rotated 3 months ago") and by any future age-based rotation policy.
+  passwordUpdatedAt   DateTime?
+
   // RingCentral per-user OAuth — each user connects their own RC account
   rcRefreshToken         String?
   rcAccessToken          String?
@@ -667,6 +690,13 @@ enum UserAuditAction {
   USER_PERMISSION_CHANGED
   USER_ROLE_CHANGED
   USER_STATUS_CHANGED
+  // Phase 1 password login (2026-09-17). Fires when an admin creates or
+  // resets another user's password via POST /users (withPassword=true)
+  // or POST /users/:id/set-password. Not emitted for SSO auto-provision.
+  USER_PASSWORD_SET
+  // Fires when a user changes their OWN password (target=actor) via
+  // POST /auth/change-password. Distinguishes admin resets from self-service.
+  USER_PASSWORD_CHANGED
 }
 
 model UserAuditLog {
