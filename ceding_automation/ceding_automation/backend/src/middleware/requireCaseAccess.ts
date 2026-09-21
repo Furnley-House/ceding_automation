@@ -195,6 +195,10 @@ export async function requireCaseAccess(
       caseRef: true,
       zohoTaskId: true,
       zohoSyncedAt: true,
+      // Passed to the retry helper so it can skip the write+audit
+      // when Zoho's owner already matches — see caseAccessRetry.ts
+      // for the "spurious assignedTo audit" reasoning.
+      assignedToId: true,
     },
   });
   // Unknown caseId → 403 as before (do not sync). This matches the
@@ -286,6 +290,7 @@ export async function requireCaseAccess(
     caseId,
     actorUserId: userId,
     actorEmail: userEmail,
+    currentAssignedToId: caseMeta.assignedToId,
     timeoutMs: ZOHO_FETCH_TIMEOUT_MS,
   });
 

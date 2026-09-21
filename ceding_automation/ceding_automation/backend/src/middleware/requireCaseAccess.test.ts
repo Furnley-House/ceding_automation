@@ -140,6 +140,7 @@ describe("requireCaseAccess", () => {
       caseRef: "FH-2026-000001",
       zohoTaskId: null,
       zohoSyncedAt: null,
+      assignedToId: "someone-else",
     });
     const req = makeReq({ user: USER("ADVISER"), caseId: "case-1" });
     const res = makeRes();
@@ -171,6 +172,7 @@ describe("requireCaseAccess", () => {
       zohoTaskId: "zoho-task-2",
       // Synced 60 seconds ago — well inside the 5-minute window.
       zohoSyncedAt: new Date(Date.now() - 60_000),
+      assignedToId: "someone-else",
     });
     const req = makeReq({ user: USER("ADVISER"), caseId: "case-2" });
     const res = makeRes();
@@ -192,6 +194,7 @@ describe("requireCaseAccess", () => {
       caseRef: "FH-2026-000003",
       zohoTaskId: "zoho-task-3",
       zohoSyncedAt: null, // never synced
+      assignedToId: "someone-else",
     });
     syncRetryMock.mockResolvedValueOnce({
       outcome: "granted",
@@ -205,11 +208,13 @@ describe("requireCaseAccess", () => {
     await requireCaseAccess(req, res, next);
     expect(next).toHaveBeenCalledOnce();
     expect(res.status).not.toHaveBeenCalled();
-    // Helper was called with the actor's identity + timeout.
+    // Helper was called with the actor's identity + timeout, and the
+    // case's current assignedToId so it can guard-the-write.
     expect(syncRetryMock).toHaveBeenCalledWith({
       caseId: "case-3",
       actorUserId: "user-1",
       actorEmail: "user-1@test",
+      currentAssignedToId: "someone-else",
       timeoutMs: 3000,
     });
     expect(retryLogs()[0]).toMatchObject({
@@ -231,6 +236,7 @@ describe("requireCaseAccess", () => {
       caseRef: "FH-2026-000004",
       zohoTaskId: "zoho-task-4",
       zohoSyncedAt: null,
+      assignedToId: "someone-else",
     });
     syncRetryMock.mockResolvedValueOnce({
       outcome: "still-refused",
@@ -268,6 +274,7 @@ describe("requireCaseAccess", () => {
       caseRef: "FH-2026-000005",
       zohoTaskId: "zoho-task-5",
       zohoSyncedAt: null,
+      assignedToId: "someone-else",
     });
     syncRetryMock.mockResolvedValueOnce({
       outcome: "timeout",
@@ -292,6 +299,7 @@ describe("requireCaseAccess", () => {
       caseRef: "FH-2026-000006",
       zohoTaskId: "zoho-task-6",
       zohoSyncedAt: null,
+      assignedToId: "someone-else",
     });
     syncRetryMock.mockResolvedValueOnce({
       outcome: "still-refused",
@@ -310,6 +318,7 @@ describe("requireCaseAccess", () => {
       caseRef: "FH-2026-000006",
       zohoTaskId: "zoho-task-6",
       zohoSyncedAt: null,
+      assignedToId: "someone-else",
     });
     const req2 = makeReq({ user: USER("ADVISER"), caseId: "case-6" });
     const res2 = makeRes();
@@ -338,6 +347,7 @@ describe("requireCaseAccess", () => {
         caseRef: `FH-2026-RL${i}`,
         zohoTaskId: `zoho-task-rl-${i}`,
         zohoSyncedAt: null,
+        assignedToId: "someone-else",
       });
       await requireCaseAccess(
         makeReq({ user: USER("ADVISER"), caseId: `case-rl-${i}` }),
@@ -354,6 +364,7 @@ describe("requireCaseAccess", () => {
       caseRef: "FH-2026-RL11",
       zohoTaskId: "zoho-task-rl-11",
       zohoSyncedAt: null,
+      assignedToId: "someone-else",
     });
     const res11 = makeRes();
     await requireCaseAccess(
@@ -390,6 +401,7 @@ describe("requireCaseAccess", () => {
       caseRef: null,
       zohoTaskId: null,
       zohoSyncedAt: null,
+      assignedToId: "someone-else",
     });
     const req = makeReq({ user: USER("CA_TEAM"), caseId: "case-1" });
     const res = makeRes();

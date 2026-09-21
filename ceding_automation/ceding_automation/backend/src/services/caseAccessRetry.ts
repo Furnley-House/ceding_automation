@@ -63,6 +63,15 @@ interface RetryInput {
   caseId: string;
   actorUserId: string;
   actorEmail: string | null;
+  /** Case's current assignedToId at the moment of the retry, as read
+   *  by the middleware from its own metadata query. Passed in so the
+   *  helper can skip the write+audit when Zoho's owner already
+   *  matches what we have on record — every drive-by 403 on a case
+   *  whose owner is unchanged would otherwise produce a spurious
+   *  "assignedTo changed" audit row. Null when the case had no
+   *  assignee (rare — happens on brand-new imports before the first
+   *  full sync). */
+  currentAssignedToId: string | null;
   /** Milliseconds to wait for Zoho before giving up. Caller (the
    *  middleware) enforces the total budget; the helper races the
    *  Zoho fetch against this deadline. */
@@ -132,8 +141,19 @@ export async function syncAssignmentForAccessRetry(
     // this narrow retry does not. If the owner isn't a known user,
     // report `owner-unknown` and let the middleware 403 with an
     // audit — an admin can then decide whether to onboard.
+    //
+    // Email match is case-INSENSITIVE. Auth login writes lowercased
+    // emails at User.create time (routes/auth.ts:61), but pre-H36
+    // rows in the users table (SSO-provisioned, Zoho-imported, or
+    // seeded) may carry mixed case. A single legacy MixedCase@... row
+    // would otherwise silently fall through to owner-unknown here,
+    // stranding a CA on a case they own — the exact catch-22 this
+    // feature exists to unstick.
     const zohoUser = await prisma.user.findFirst({
-      where: { email: zohoOwnerEmail, status: "ACTIVE" },
+      where: {
+        email: { equals: zohoOwnerEmail, mode: "insensitive" },
+        status: "ACTIVE",
+      },
       select: { id: true, email: true },
     });
     if (!zohoUser) {
@@ -145,12 +165,21 @@ export async function syncAssignmentForAccessRetry(
       };
     }
 
-    // (3) Update assignedToId. We update unconditionally to keep the
-    // DB in step with Zoho even if the Zoho owner is a THIRD person
-    // (not the caller) — the caller will still 403, but the case's
-    // assignedToId now reflects reality and the next legitimate
-    // click-through by the actual Zoho owner won't need another
-    // Zoho round-trip.
+    // (3) Update assignedToId IFF Zoho's owner actually differs from
+    // what we have on record. If the Zoho owner matches the current
+    // assignedToId (which is the common drive-by-403 case — someone
+    // opened a case whose assigned CA IS the Zoho task owner, but the
+    // caller is neither), skip both the write and the audit. Writing
+    // "assignedTo: X → X" produces a false CASE_UPDATED audit row on
+    // every drive-by 403 and pollutes the timeline reviewers rely on.
+    //
+    // When they do differ (Zoho reassigned since our last sync), the
+    // write brings assignedToId back into step and the audit records
+    // the real change. If the Zoho owner is the caller, granted=true
+    // and the middleware lets them through. If the Zoho owner is a
+    // third party (not the caller), the case's assignedToId is now
+    // correct in DB but the caller still 403s — same "still-refused"
+    // outcome as before, just with the DB no longer stale.
     //
     // We do NOT run the H18 locked-field guard here (assignedToId is
     // not a locked field). If Zoho has drifted on planType /
@@ -158,42 +187,47 @@ export async function syncAssignmentForAccessRetry(
     // Refresh-from-Zoho button will surface with its own audit
     // trail; we don't want the middleware to silently ignore locked
     // field disagreements it detected while syncing an assignment.
-    const now = new Date();
-    await prisma.case.update({
-      where: { id: input.caseId },
-      data: {
-        assignedToId: zohoUser.id,
-        zohoSyncedAt: now,
-      },
-    });
+    const assignmentChanged = zohoUser.id !== input.currentAssignedToId;
+    if (assignmentChanged) {
+      const now = new Date();
+      await prisma.case.update({
+        where: { id: input.caseId },
+        data: {
+          assignedToId: zohoUser.id,
+          zohoSyncedAt: now,
+        },
+      });
 
-    // (4) Audit. Piggyback on the existing sync audit shape so
-    // AuditTimeline renders it consistently; the `trigger` metadata
-    // field distinguishes middleware-triggered syncs from
-    // button-triggered ones.
-    await prisma.auditLog.create({
-      data: {
-        caseId: input.caseId,
-        userId: input.actorUserId,
-        action: "CASE_UPDATED",
-        source: "SYSTEM",
-        newValue: "Assignee synced from Zoho on access-retry",
-        metadata: {
-          sync: "zoho",
-          trigger: "access-retry",
-          actorAttemptedFirst: input.actorUserId,
-          actorEmail: input.actorEmail,
-          zohoOwnerEmail,
-          assignedTo: zohoUser.id,
-          changes: [
-            {
-              field: "assignedTo",
-              trigger: "access-retry",
-            },
-          ],
-        } as Prisma.InputJsonValue,
-      },
-    });
+      // (4) Audit. Piggyback on the existing sync audit shape so
+      // AuditTimeline renders it consistently; the `trigger` metadata
+      // field distinguishes middleware-triggered syncs from
+      // button-triggered ones.
+      await prisma.auditLog.create({
+        data: {
+          caseId: input.caseId,
+          userId: input.actorUserId,
+          action: "CASE_UPDATED",
+          source: "SYSTEM",
+          newValue: "Assignee synced from Zoho on access-retry",
+          metadata: {
+            sync: "zoho",
+            trigger: "access-retry",
+            actorAttemptedFirst: input.actorUserId,
+            actorEmail: input.actorEmail,
+            zohoOwnerEmail,
+            assignedTo: zohoUser.id,
+            changes: [
+              {
+                field: "assignedTo",
+                from: input.currentAssignedToId,
+                to: zohoUser.id,
+                trigger: "access-retry",
+              },
+            ],
+          } as Prisma.InputJsonValue,
+        },
+      });
+    }
 
     const granted = zohoUser.id === input.actorUserId;
     return {
