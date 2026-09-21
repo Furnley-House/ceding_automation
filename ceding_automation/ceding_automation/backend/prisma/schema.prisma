@@ -171,6 +171,13 @@ enum AuditAction {
   // to add a parent row for that year manually.
   CONTRIBUTION_TOTAL_ORPHANED
   CONTRIBUTION_TX_ORPHANED
+  // 2026-09-19: sync-on-403 recovery path in requireCaseAccess. Fires
+  // when the middleware's fallback resync ran but the caller STILL
+  // doesn't qualify — Zoho didn't back them up either. metadata:
+  // { userId, userEmail, caseRef, zohoTaskId, syncOutcome, zohoOwnerEmail }.
+  // Distinct action (not a CASE_UPDATED flag) so ops queries and
+  // alerts can key on it directly.
+  CASE_ACCESS_RETRY_DENIED
 }
 
 enum ContactMethod {
