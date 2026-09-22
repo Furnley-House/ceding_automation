@@ -26,7 +26,7 @@
 | **ACR** | `crcedingaistaging` | `crcedingaiprod` |
 | **Postgres** | `pg-cedingai-staging` (B1ms, no HA) | `pg-cedingai-prod` (D2s_v3, HA, 35d backup, GZRS) |
 | **Key Vault** | `kv-cedingai-staging` | `kv-cedingai-prod` |
-| **BFF / AI pipeline** | `ca-cedingai-api-staging` + 4 stages + DLQ | (reuses staging BFF — Nishant cuts over later) |
+| **BFF / AI pipeline** | `ca-cedingai-api-staging` + 4 stages + DLQ in `rg-ceding-ai-staging` | `ca-cedingai-api-prodai` in `rg-ceding-ai-prodai` (separate RG, separate Cosmos) |
 | **Deploys from** | `develop` | `main` |
 | **GDPR / TR-09** | not gated | **signed off — required for live data** |
 
@@ -41,7 +41,7 @@ The same code runs in both environments. Behavior differs purely via env vars:
 | **Role picker** | Shown | Hidden (auto-SSO) | `VITE_DISABLE_DEMO_LOGIN` — frontend build-time |
 | **WorkDrive folder** | Env-var fallback (shared folder) | Per-client from `Contact.Client_Record_Folder_ID` (hard-fail if empty) | `WORKDRIVE_REQUIRE_PER_CLIENT_FOLDER` — backend runtime |
 | **Backend URL the SPA calls** | Staging FQDN | Prod FQDN | `VITE_API_URL` — frontend build-time |
-| **BFF URL the backend calls** | Staging BFF | Staging BFF *(until Nishant ships BFF prod)* | `BFF_BASE_URL` — backend runtime |
+| **BFF URL the backend calls** | Staging BFF (`ca-cedingai-api-staging.delightfulpond-8e29b388.uksouth.azurecontainerapps.io`) | Prod-AI BFF (`ca-cedingai-api-prodai.livelyflower-07874036.uksouth.azurecontainerapps.io`, in `rg-ceding-ai-prodai`) | `BFF_BASE_URL` — backend runtime. Verify with `az containerapp show -n ca-cedingai-backend-prod -g rg-ceding-ai-prod --query "properties.template.containers[0].env[?name=='BFF_BASE_URL']"` — the docs go stale, Azure doesn't |
 | **JWT issuer secret, DB URL, Zoho creds, RC creds, etc.** | Staging values | Prod values | Container App secret refs into KV |
 
 **Never** put environment-specific values in code. Every difference between

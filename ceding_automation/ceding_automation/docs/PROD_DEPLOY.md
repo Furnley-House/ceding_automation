@@ -1,6 +1,6 @@
 # Production Deploy Runbook
 
-**Environment:** `rg-ceding-ai-prod` (UK South). Backend + frontend only. AI extraction routes via the **staging** BFF (`ca-cedingai-api-staging`) until Nishant ships BFF prod.
+**Environment:** `rg-ceding-ai-prod` (UK South). Backend + frontend only. AI extraction routes via the **prod-AI** BFF `ca-cedingai-api-prodai.livelyflower-07874036.uksouth.azurecontainerapps.io` in `rg-ceding-ai-prodai` — a separate resource group with its own Cosmos (`cosmos-cedingai-prodai`) and secrets. Confirm at deploy time with `az containerapp show -n ca-cedingai-backend-prod -g rg-ceding-ai-prod --query "properties.template.containers[0].env[?name=='BFF_BASE_URL']"`. Prior versions of this doc claimed prod reused the staging BFF — that was true earlier, is no longer, and misled two separate analyses in 2026-09; trust Azure, not this line.
 
 **Migrations ALWAYS apply BEFORE the image rolls.** This is the same rule as `DEPLOY_CHECKLIST.md` — three staging incidents have been traced to violating it (2026-06-15 P2022, 2026-06-16 morning P2022, 2026-06-16 rollback P2022). On production it is a non-negotiable.
 
@@ -53,7 +53,9 @@ az keyvault secret set --vault-name $KV --name DATABASE-URL --value "$DATABASE_U
 az keyvault secret set --vault-name $KV --name JWT-SECRET \
   --value "$(openssl rand -hex 48)" -o none
 
-# BFF-SHARED-SECRET + INTERNAL-BFF-KEY — copied from staging (prod backend → staging BFF)
+# BFF-SHARED-SECRET + INTERNAL-BFF-KEY — must match the prod-AI BFF (rg-ceding-ai-prodai).
+# Historically these were copied from staging (when prod backend used staging BFF). Since the
+# prod-AI cutover they are prod-AI values; sourcing from staging KV would silently break auth.
 for s in BFF-SHARED-SECRET INTERNAL-BFF-KEY; do
   val=$(az keyvault secret show --vault-name kv-cedingai-staging --name $s --query value -o tsv)
   az keyvault secret set --vault-name $KV --name $s --value "$val" -o none
@@ -105,7 +107,7 @@ az containerapp update -g rg-ceding-ai-prod -n ca-cedingai-backend-prod \
     "FRONTEND_URL=https://stcedingaiprod.z33.web.core.windows.net" \
     JWT_EXPIRES_IN=24h \
     AI_VIA_BFF=true \
-    "BFF_BASE_URL=https://ca-cedingai-api-staging.delightfulpond-8e29b388.uksouth.azurecontainerapps.io" \
+    "BFF_BASE_URL=https://ca-cedingai-api-prodai.livelyflower-07874036.uksouth.azurecontainerapps.io" \
     AZURE_STORAGE_ACCOUNT_NAME=stcedingaiprod \
     AZURE_STORAGE_CONTAINER_NAME=ceding-documents \
     AZURE_TENANT_ID=154b2b57-b0c8-49e8-8de9-3b252f5e7e27 \
@@ -339,35 +341,22 @@ Same shape as `DEPLOY_HANDOFF_TO_NISHANT.md` §6, adapted for prod (Megan Dohert
 | 8 | Open the downloaded .xlsx | 4 sheets: Summary / Checklist / Fund Details / Audit Trail | Excel |
 | 9 | All cases for a contact complete → Dashboard | Purple "All ceding done · Prepare SR" badge | UI |
 | 10 | Refresh-from-Zoho on case header | Pulls paraplanner from Contact module | UI + DevTools |
-| 11 | AI extraction request | Backend logs show outbound `BFF_BASE_URL` = staging FQDN, response 200 | Container App logs |
+| 11 | AI extraction request | Backend logs show outbound `BFF_BASE_URL` = `ca-cedingai-api-prodai.livelyflower-07874036.uksouth.azurecontainerapps.io`, response 200 | Container App logs |
 
-Item 11 confirms the cross-RG BFF path. If it fails, the most likely causes are wrong `BFF_SHARED_SECRET` (didn't copy from staging KV) or wrong `INTERNAL_BFF_KEY`.
+Item 11 confirms the cross-RG BFF path. If it fails, the most likely causes are wrong `BFF_SHARED_SECRET` or wrong `INTERNAL_BFF_KEY` in `kv-cedingai-prod` (they must match the prod-AI BFF's expectations, not staging's).
 
 ---
 
-## 6. BFF-prod cutover (future)
+## 6. BFF-prod cutover — DONE
 
-When Nishant ships BFF prod:
+Prod backend has been cut over to the prod-AI BFF `ca-cedingai-api-prodai.livelyflower-07874036.uksouth.azurecontainerapps.io` in resource group `rg-ceding-ai-prodai`. That RG has its own Cosmos (`cosmos-cedingai-prodai`) and secrets independent of staging. Verify at any point with:
 
 ```bash
-# 1. Read the new values
-PROD_BFF_URL="https://ca-cedingai-api-prod.<prod-env-domain>.azurecontainerapps.io"
-
-# 2. Update the two shared secrets in KV (provided by Nishant)
-az keyvault secret set --vault-name kv-cedingai-prod --name BFF-SHARED-SECRET --value "$NEW_SHARED" -o none
-az keyvault secret set --vault-name kv-cedingai-prod --name INTERNAL-BFF-KEY  --value "$NEW_INTERNAL" -o none
-
-# 3. Update the URL on the Container App
-az containerapp update -g rg-ceding-ai-prod -n ca-cedingai-backend-prod \
-  --set-env-vars "BFF_BASE_URL=$PROD_BFF_URL"
-
-# 4. Restart the revision so the new secrets are picked up
-az containerapp revision restart -g rg-ceding-ai-prod -n ca-cedingai-backend-prod \
-  --revision $(az containerapp revision list -g rg-ceding-ai-prod -n ca-cedingai-backend-prod \
-    --query "[?properties.active].name" -o tsv | head -1)
+az containerapp show -n ca-cedingai-backend-prod -g rg-ceding-ai-prod \
+  --query "properties.template.containers[0].env[?name=='BFF_BASE_URL'].value" -o tsv
 ```
 
-**Rotate the staging copies of `BFF-SHARED-SECRET` / `INTERNAL-BFF-KEY` too** once prod has its own — staging shouldn't keep credentials that were ever shared with prod.
+If a further BFF migration is ever needed the shape is the same — update `BFF_BASE_URL` env var, rotate `BFF-SHARED-SECRET`/`INTERNAL-BFF-KEY` in KV, restart the backend revision.
 
 ---
 
