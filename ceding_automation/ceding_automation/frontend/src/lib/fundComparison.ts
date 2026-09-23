@@ -86,15 +86,17 @@ export function chargesAgree(a: number, b: number): boolean {
 /**
  * Does this difference look like a unit problem rather than a real one?
  *
- * UK funds are quoted in pounds or in pence depending on the provider, and FE
- * reports both with Currency "GBP" — GB00B3ZHN960 comes back as 233.4637 for
- * a fund worth about £2.33 — so the currency field cannot tell them apart.
- * The CA reads whichever unit their statement uses.
+ * Most UK funds are quoted to the investor in PENCE — 30,450 of the 33,500 GB
+ * share classes in the fund master carry listing currency GBX against 3,020
+ * GBP — so that is what a provider statement shows and what a CA copying it
+ * types. FE reports the major unit: GB0000011444 is a GBX listing and comes
+ * back as 13.767774, with the pence figure 1376.7774 under a separate field
+ * code. The Zoho Unit Price field is pounds (confirmed with the CA team,
+ * Sept 2026), so the reference figure is already in the right unit and the
+ * checklist figure is the one to question.
  *
  * Returns the factor the CHECKLIST figure would need for the two to agree, or
- * null if the difference is not a clean 100x. This does not decide anything —
- * it just names the difference, so the CA is not left comparing 2.33 with
- * 233.46 and wondering which of them is wrong.
+ * null if the difference is not a clean 100x.
  */
 export function scaleFactorBetween(
   ceding: number,
@@ -109,13 +111,16 @@ export function scaleFactorBetween(
 
 function scaleNote(factor: 100 | 0.01 | null, unit: "price" | "charge"): string | undefined {
   if (factor === null) return undefined;
-  const direction =
-    factor === 100
-      ? "the checklist figure is 100x smaller"
-      : "the checklist figure is 100x larger";
-  return unit === "price"
-    ? `These are the same price in different units — ${direction}. One side is in pence, the other in pounds.`
-    : `Same figure at a different scale — ${direction}. One side is a percentage, the other a decimal fraction.`;
+  if (unit === "price") {
+    // The usual case: the statement quoted pence, the CA typed it as read.
+    // CRM wants pounds, so the reference figure is the one to keep.
+    return factor === 0.01
+      ? "Same price, different units — the checklist figure looks like pence. CRM expects pounds, so the reference figure is the one to push."
+      : "The checklist figure is 100x smaller than the reference — check for a misplaced decimal point.";
+  }
+  return factor === 0.01
+    ? "Same charge at a different scale — the checklist figure looks like a percentage where the reference is a decimal fraction."
+    : "Same charge at a different scale — the checklist figure looks like a decimal fraction where CRM expects a percentage.";
 }
 
 // -- Formatting -----------------------------------------------------------

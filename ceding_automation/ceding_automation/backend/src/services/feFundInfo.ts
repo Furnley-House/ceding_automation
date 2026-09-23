@@ -131,11 +131,15 @@ async function fetchBatch(isins: string[], token: string): Promise<unknown[]> {
 // Reading only OFDY908005, as the proxy does, leaves more than half of these
 // unpriced and therefore RED.
 //
-// UNIT IS AMBIGUOUS: FE reports Currency "GBP" whether the fund is quoted in
-// pounds or in pence — GB00B3ZHN960 comes back as 233.4637 for a fund worth
-// about £2.33. Nothing in the payload distinguishes them, so this is left as
-// FE states it and the stage-6 comparison flags a 100x gap against the CA's
-// figure for them to settle.
+// UNIT: pounds, which is what the Zoho Unit Price field expects (confirmed
+// with the CA team, Sept 2026). FE reports the major unit even for funds
+// quoted to investors in pence: GB0000011444 is a GBX listing in the fund
+// master and comes back here as 13.767774, with the pence figure
+// 1376.7774875783 carried separately under OFDY900143. So no conversion is
+// applied. Note that 30,450 of the 33,500 GB share classes in the fund master
+// are GBX listings, so a provider STATEMENT usually quotes pence — the
+// stage-6 comparison flags a clean 100x gap against the CA's entry for
+// exactly that reason.
 const PRICE_FIELDS = ["OFDY908102", "OFDY000020", "OFDY908005"] as const;
 const DATE_FIELD = "OFDY000021";
 

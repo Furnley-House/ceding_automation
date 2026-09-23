@@ -196,23 +196,26 @@ describe("evaluateGate", () => {
   });
 });
 
-// UK funds are quoted in pounds or pence depending on the provider and FE
-// reports both as "GBP", so a 100x gap is a unit difference far more often
-// than it is a wrong figure. Naming it saves the CA from comparing 2.33 with
-// 233.46 and guessing.
+// Most UK funds are quoted to the investor in pence (30,450 of 33,500 GB
+// share classes in the fund master are GBX listings), so that is what a
+// provider statement shows and what a CA copying it types. FE reports the
+// major unit and CRM expects pounds, so a clean 100x gap is a unit problem on
+// the checklist side far more often than it is a wrong figure.
 describe("scale differences", () => {
   const priceNote = (row: FundLine) => field(row, "price").note;
 
-  it("names a pence-against-pounds price difference", () => {
-    const row = line({ pricePerUnit: "2.334637", resolvedUnitPrice: "233.4637" });
+  // The realistic direction: the statement quoted pence, the CA typed it as
+  // read, and CRM wants pounds.
+  it("spots a checklist price typed in pence", () => {
+    const row = line({ pricePerUnit: "1376.7774", resolvedUnitPrice: "13.767774" });
     expect(field(row, "price").status).toBe("differs");
     expect(priceNote(row)).toMatch(/pence/i);
-    expect(priceNote(row)).toMatch(/100x smaller/i);
+    expect(priceNote(row)).toMatch(/reference figure is the one to push/i);
   });
 
-  it("names the difference the other way round too", () => {
-    const row = line({ pricePerUnit: "233.4637", resolvedUnitPrice: "2.334637" });
-    expect(priceNote(row)).toMatch(/100x larger/i);
+  it("calls out a misplaced decimal point the other way", () => {
+    const row = line({ pricePerUnit: "0.13767774", resolvedUnitPrice: "13.767774" });
+    expect(priceNote(row)).toMatch(/decimal point/i);
   });
 
   it("says nothing when a difference is not a clean 100x", () => {
