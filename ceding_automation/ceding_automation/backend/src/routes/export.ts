@@ -16,10 +16,18 @@ import { uploadToWorkDrive, resolveCaseFolderId, WorkDriveFolderResolutionError 
 import {
   updatePlanRecord,
   findPlanRecordByPolicyRef,
+  findPlanRecordById,
   findProviderRecordByName,
   mapPlanTypeToZoho,
   planProviderField,
 } from "../services/zohoCrm";
+import {
+  buildHoldingRow,
+  mergeHoldings,
+  readExistingHoldings,
+  HOLDINGS_SUBFORM,
+  type HoldingRow,
+} from "../services/holdingsSubform";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -241,6 +249,21 @@ router.post(
     } = { ok: false, fieldsUpdated: 0 };
     let zohoError: string | null = null;
 
+    // ── Holdings subform ──────────────────────────────────
+    // The figures the CA approved at stage 6, never a fresh lookup: CRM has
+    // to carry the numbers somebody signed off, and a price fetched now would
+    // also contradict the plan-level Valuation, which comes from the
+    // checklist. Unverified holdings are still exported — stage 6 gates the
+    // hand-off, so by here they have either been checked or deliberately let
+    // through on an environment where verification could not run.
+    const fundLines = await prisma.checklistFundLine.findMany({
+      where: { caseId },
+      orderBy: [{ isWithProfits: "asc" }, { displayOrder: "asc" }, { createdAt: "asc" }],
+    });
+    const holdingRows: HoldingRow[] = fundLines.map(buildHoldingRow);
+    let holdingsResult: { added: number; kept: number; skipped: string[] } | null = null;
+    let holdingsError: string | null = null;
+
     // 2a. Resolve which Plans record to update.
     //   Fast path: case.zohoCaseId (captured from Zoho Task.What_Id at import).
     //   Fallback: search the Plans module by Policy_Ref. Cache the result
@@ -338,7 +361,38 @@ router.post(
         // re-resolving via Plans-search-by-Policy_Ref and retrying once.
         // Also updates case.zohoCaseId so future exports skip this dance.
         const tryUpdate = async (id: string) => {
-          const resp = await updatePlanRecord(id, fields);
+          // Holdings are merged against the record we are ABOUT TO WRITE, not
+          // the one we first resolved — the auto-heal below can change the id
+          // underneath us, and echoing another Plan's subform rows back would
+          // move somebody else's holdings onto this one.
+          //
+          // A PUT REPLACES THE SUBFORM: rows left out of the payload are
+          // deleted. So the existing rows are read first and echoed back with
+          // their ids. If that read fails, the holdings are left out of the
+          // payload entirely rather than sent as a bare list — losing the
+          // append is recoverable, deleting a CA's rows in CRM is not.
+          const payload: Record<string, unknown> = { ...fields };
+          try {
+            const plan = await findPlanRecordById(id);
+            const existing = plan ? readExistingHoldings(plan.record) : [];
+            const merged = mergeHoldings(existing, holdingRows);
+            if (merged.added > 0 || merged.kept > 0) {
+              payload[HOLDINGS_SUBFORM] = merged.rows;
+            }
+            holdingsResult = {
+              added: merged.added,
+              kept: merged.kept,
+              skipped: merged.skipped,
+            };
+          } catch (err) {
+            holdingsError = err instanceof Error ? err.message : String(err);
+            console.warn(
+              "[holdings] could not read existing subform for case=%s record=%s: %s — holdings not sent",
+              caseId, id, holdingsError,
+            );
+          }
+
+          const resp = await updatePlanRecord(id, payload);
           console.log(
             "[plan-provider] updatePlanRecord ok case=%s record=%s respKeys=%s",
             caseId,
@@ -347,11 +401,11 @@ router.post(
           );
           zohoUpdate = {
             ok: true,
-            fieldsUpdated: Object.keys(fields).length,
+            fieldsUpdated: Object.keys(payload).length,
             recordId: id,
             planName: planRecordName,
             resolvedVia: resolvedVia ?? undefined,
-            fields,
+            fields: payload,
           };
         };
 
@@ -421,6 +475,8 @@ router.post(
           workdriveError,
           zohoUpdate,
           zohoError,
+          holdings: holdingsResult,
+          holdingsError,
           cacheWarning,
           cachedZohoIds: {
             zohoOwnerId: caseRecord.zohoOwnerId,
@@ -439,6 +495,8 @@ router.post(
       workdriveError,
       zohoUpdate,
       zohoError,
+      holdings: holdingsResult,
+      holdingsError,
       cacheWarning,
       cachedZohoIds: {
         zohoOwnerId: caseRecord.zohoOwnerId,
