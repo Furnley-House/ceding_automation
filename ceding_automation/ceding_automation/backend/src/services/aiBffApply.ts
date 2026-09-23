@@ -277,7 +277,18 @@ export async function applyFieldExtraction(args: {
   });
   // Propagate this field's value to the Case row (provider, policy_ref,
   // plan_start_date). Fail-soft — checklist write already succeeded.
-  await mirrorChecklistToCase(args.caseId, field.template.fieldKey, newValueStr);
+  //
+  // Team rule 2026-09-23: the AI never writes to Case.policyRef.
+  // Case.policyRef is source-of-truth from Zoho, owned by the CA. The
+  // mirror function is preserved (see caseFieldMirror.ts) for CA-initiated
+  // paths — manual checklist PATCH, seed with value, N/A bulk-fill — so
+  // that a CA who spots a wrong Case.policyRef can still correct it by
+  // typing the right value into the checklist "Plan number" row. Only
+  // this single AI call site is blocked. See the reasoning in
+  // caseFieldMirror.ts's plan_number branch comment.
+  if (field.template.fieldKey !== "plan_number") {
+    await mirrorChecklistToCase(args.caseId, field.template.fieldKey, newValueStr);
+  }
   console.log(
     "[merge-outcome] outcome=applied case=%s field=%s job=%s doc=%s existingLen=%s incomingLen=%s",
     args.caseId,
