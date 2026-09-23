@@ -357,8 +357,8 @@ export function FundVerificationPanel({
             <strong>
               {disagreeing} holding{disagreeing === 1 ? "" : "s"}
             </strong>{" "}
-            disagree with the reference data. Pick which figure goes to CRM on each — the choice
-            you make here is what gets exported.
+            {disagreeing === 1 ? "disagrees" : "disagree"} with the reference data. Pick which
+            figure goes to CRM on each — the choice you make here is what gets exported.
           </p>
         </div>
       )}
