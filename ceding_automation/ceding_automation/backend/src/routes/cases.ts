@@ -489,8 +489,9 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
 // derive them from the first 200 rows of GET /cases, which silently capped
 // "total" at 200.
 //
-// "Completed" = STAGE_10_COMPLETE or legacy APPROVED, dated by completedAt
-// (stamped on completion). CANCELLED is neither active nor completed.
+// "Completed" = STAGE_10_COMPLETE, dated by completedAt (stamped on
+// completion). APPROVED is still active — it awaits Stage 9 Export.
+// CANCELLED is neither active nor completed.
 //
 // Query params (optional, ISO timestamps from the browser so week/month
 // boundaries follow the user's local time rather than the server's UTC):
@@ -803,9 +804,14 @@ router.patch(
       // If the UI sent the canonical Prisma enum, accept it directly.
       if ((Object.values(CaseStatus) as string[]).includes(upper)) {
         data.status = upper as CaseStatus;
-        if (upper === "STAGE_10_COMPLETE" || upper === "APPROVED") {
+        // APPROVED is not the end of the workflow — Stage 9 (Export &
+        // WorkDrive) still runs — so only STAGE_10_COMPLETE stamps
+        // completedAt. Stamping it on APPROVED made an approved case count
+        // as "done" on the dashboard depending on which route approved it.
+        if (upper === "STAGE_10_COMPLETE") {
           data.completedAt = data.completedAt ?? new Date();
         }
+        if (upper === "APPROVED") data.approvedAt = new Date();
       } else if (UI_STATUS_TO_PRISMA[body.status]) {
         data.status = UI_STATUS_TO_PRISMA[body.status];
         if (body.status === "complete") data.completedAt = new Date();

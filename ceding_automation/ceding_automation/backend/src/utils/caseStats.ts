@@ -4,7 +4,9 @@ import { CaseStatus } from "@prisma/client";
 // counting rules (what's active / done / in review) and the median maths
 // can be unit-tested without a database.
 
-export const CLOSED_STATUSES: CaseStatus[] = [CaseStatus.STAGE_10_COMPLETE, CaseStatus.APPROVED];
+// Only STAGE_10_COMPLETE is done. APPROVED means the checklist is signed off
+// but Stage 9 (Export & WorkDrive) hasn't run yet, so it's still active.
+export const CLOSED_STATUSES: CaseStatus[] = [CaseStatus.STAGE_10_COMPLETE];
 export const REVIEW_STATUSES: CaseStatus[] = [CaseStatus.STAGE_9_ADVISER_REVIEW, CaseStatus.IN_REVIEW];
 
 const DAY_MS = 86_400_000;

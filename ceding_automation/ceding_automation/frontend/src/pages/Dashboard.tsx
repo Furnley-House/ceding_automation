@@ -36,6 +36,13 @@ function initials(name?: string | null): string {
     .join("");
 }
 
+// A case is closed once ceding is complete or it's been cancelled — both map
+// to UI status "complete" in flattenCase. APPROVED is NOT closed: the
+// checklist is signed off but Stage 9 (Export & WorkDrive) still has to run.
+function isClosed(c: { status?: string }): boolean {
+  return (c.status ?? "").toLowerCase() === "complete";
+}
+
 function timeAgo(iso: string | Date | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -220,10 +227,7 @@ const Dashboard = () => {
         );
         // Represent the client by their most recently updated *open* case, so
         // a finished case doesn't mask outstanding work on another plan.
-        const top =
-          sorted.find(
-            (it) => !["complete", "approved"].includes((it.status ?? "").toLowerCase()),
-          ) ?? sorted[0]!;
+        const top = sorted.find((it) => !isClosed(it)) ?? sorted[0]!;
         const totalStages = 10;
         const completed = Array.isArray(top.stages_completed)
           ? top.stages_completed.length
@@ -240,8 +244,7 @@ const Dashboard = () => {
         // So when `completed === 8` (stages 1-8 done) AND the case isn't
         // yet closed AND SR hasn't already been prepared, the next action
         // is to assemble the SR pack — that's when we surface the button.
-        const status = (top.status ?? "").toLowerCase();
-        const caseClosed = ["complete", "approved"].includes(status);
+        const caseClosed = isClosed(top);
         const alreadyPrepared = Boolean(top.sr_prepared_at);
         const srReady =
           !caseClosed && !alreadyPrepared && completed === 8;
@@ -253,11 +256,12 @@ const Dashboard = () => {
         // adviser will draft the SR). The CRM URL template is derived from
         // any case's zoho_deep_link by swapping the path to /tab/Contacts;
         // the exact CRM page can be tweaked later by the user.
+        // At least one must be genuinely complete — a client whose cases
+        // were all cancelled has nothing to hand to the adviser.
         const allClientCasesComplete =
           items.length > 0 &&
-          items.every((it) =>
-            ["complete", "approved"].includes((it.status ?? "").toLowerCase()),
-          );
+          items.every(isClosed) &&
+          items.some((it) => it.backend_status === "STAGE_10_COMPLETE");
 
         let srCrmUrl: string | null = null;
         if (allClientCasesComplete) {
@@ -296,9 +300,8 @@ const Dashboard = () => {
   // clients only surface (as the Prepare-SR prompt) when nothing is open —
   // otherwise they'd sit at 100% and pin the hero permanently.
   const topCase =
-    allClientRows.find(
-      (r) => !["complete", "approved"].includes((r.top.status ?? "").toLowerCase()),
-    ) ?? allClientRows.find((r) => r.allClientCasesComplete);
+    allClientRows.find((r) => !isClosed(r.top)) ??
+    allClientRows.find((r) => r.allClientCasesComplete);
   const today = new Date();
   const heroDate = today.toLocaleDateString("en-GB", {
     weekday: "long",
@@ -322,7 +325,7 @@ const Dashboard = () => {
     for (const c of allCases) {
       const k = c.owner_name?.trim();
       if (!k) continue;
-      const active = !["complete", "approved"].includes((c.status ?? "").toLowerCase());
+      const active = !isClosed(c);
       const entry = tally.get(k) ?? { active: 0 };
       if (active) entry.active += 1;
       const ownerRole = (c.assigned_to as { role?: string } | undefined)?.role;
@@ -405,12 +408,15 @@ const Dashboard = () => {
                       <strong className="text-white/85 font-semibold">{topCase.name}</strong>'s
                       {topCase.top.provider_name ? ` ${topCase.top.provider_name}` : ""}
                       {topCase.top.plan_type ? ` ${topCase.top.plan_type}` : ""} case is one task
-                      away from being report-ready. Worth a focused 30 minutes this morning.
+                      away from being report-ready.
                     </>
                   ) : (
                     <>
-                      You have <strong className="text-white/85 font-semibold">{stats?.active ?? "…"}</strong> active
-                      cases. Top priority is{" "}
+                      {/* Admin sees the whole team's caseload, not cases
+                          assigned to them — word it accordingly. */}
+                      {role === "admin" ? "The team has" : "You have"}{" "}
+                      <strong className="text-white/85 font-semibold">{stats?.active ?? "…"}</strong> active
+                      {stats?.active === 1 ? " case" : " cases"}. Top priority is{" "}
                       <strong className="text-white/85 font-semibold">{topCase.name}</strong> at{" "}
                       {topCase.progressPct}% complete.
                     </>
@@ -460,7 +466,7 @@ const Dashboard = () => {
             ) : null}
             <Button
               variant="outline"
-              onClick={() => navigate("/cases")}
+              onClick={() => navigate("/cases?new=1")}
               className="gap-2 rounded-full h-10 px-4 bg-transparent text-white border-white/20 hover:bg-white/10 hover:text-white hover:border-white/40"
             >
               <Plus className="h-4 w-4" /> New case
@@ -504,7 +510,7 @@ const Dashboard = () => {
               : undefined
           }
           icon={<CheckCircle2 className="h-4 w-4" />}
-          onClick={() => navigate("/cases?status=complete")}
+          onClick={() => navigate("/cases?status=complete&completed=week")}
           index={1}
         />
         <KpiTile
@@ -946,6 +952,7 @@ interface CaseLite {
   plan_type?: string;
   plan_number?: string;
   status?: string;
+  backend_status?: string;
   owner_name?: string;
   created_at?: string;
   updated_at?: string;
@@ -1337,10 +1344,21 @@ function AccordionCard({
   };
   return (
     <div className="rounded-2xl border border-border bg-card overflow-hidden">
-      <button
+      {/* div[role=button], not <button>: the header hosts its own buttons
+          (View all, Show older) and a <button> can't contain another. */}
+      <div
         onClick={handle}
-        type="button"
-        className="w-full flex items-center gap-3.5 px-5 py-3.5 hover:bg-muted/30 transition-colors text-left"
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handle();
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        className="w-full flex items-center gap-3.5 px-5 py-3.5 hover:bg-muted/30 transition-colors text-left cursor-pointer"
       >
         <span
           className="w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0 transition-transform hover:scale-110"
@@ -1362,7 +1380,7 @@ function AccordionCard({
         <ChevronDown
           className={`h-5 w-5 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
         />
-      </button>
+      </div>
       <div
         className={`overflow-hidden transition-[max-height] duration-500 ease-out ${
           open ? "max-h-[2000px]" : "max-h-0"

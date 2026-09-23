@@ -30,6 +30,8 @@ export interface CaseRow {
   zoho_ceding_status?: string | null;
   sr_prepared_at?: string | null;
   ceding_complete_date?: string | null;
+  backend_status?: string;          // raw Prisma CaseStatus (flattenCase)
+  completed_at?: string | null;     // stamped on STAGE_10_COMPLETE
   [key: string]: unknown;
 }
 

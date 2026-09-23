@@ -14,12 +14,12 @@ describe("summariseStatusCounts", () => {
     expect(s).toMatchObject({ total: 9, active: 4, completed: 3, cancelled: 2 });
   });
 
-  it("counts legacy APPROVED as completed", () => {
+  it("keeps APPROVED active — it still awaits Stage 9 Export", () => {
     const s = summariseStatusCounts([
       { status: CaseStatus.APPROVED, count: 1 },
       { status: CaseStatus.STAGE_10_COMPLETE, count: 1 },
     ]);
-    expect(s).toMatchObject({ completed: 2, active: 0 });
+    expect(s).toMatchObject({ completed: 1, active: 1 });
   });
 
   it("counts Stage 9 and legacy IN_REVIEW as in review, and keeps them active", () => {
