@@ -7,9 +7,13 @@
 // are just cached projections we keep in sync.
 //
 // Currently mirrored:
-//   provider_name → Case.providerId  (creates a Provider record if needed)
-//   plan_number   → Case.policyRef
-//   start_date    → Case.planStartDate
+//   provider_name → Case.providerId    (fill-when-empty, sticky operator pick)
+//   start_date    → Case.planStartDate (always overwrite on difference)
+//
+// NOT mirrored (deliberately, as of 2026-09-23):
+//   plan_number   → Case.policyRef — REMOVED. The case's policy ref is
+//     source-of-truth from Zoho, owned by the CA. See the explanatory
+//     comment inline in the switch below (search for "REMOVED 2026-09-23").
 //
 // Called from:
 //   - applyFieldExtraction (AI write-back, both poller + PATCH path)
@@ -105,15 +109,37 @@ export async function mirrorChecklistToCase(
         return { changed: true, column: "providerId" };
       }
 
-      case "plan_number": {
-        const trimmed = value.trim();
-        if (caseRow.policyRef === trimmed) return { changed: false };
-        await prisma.case.update({
-          where: { id: caseId },
-          data: { policyRef: trimmed },
-        });
-        return { changed: true, column: "policyRef" };
-      }
+      // plan_number → Case.policyRef mirror REMOVED 2026-09-23.
+      //
+      // Prior behaviour (until 2026-09-23): AI-extracted plan_number
+      // silently overwrote Case.policyRef whenever they differed.
+      // This bypassed the locked-field guard in cases.ts, which lives
+      // on the Express route middleware and does not intercept
+      // service-level prisma calls. 15 confirmed prod cases had their
+      // CA-sourced Zoho value silently replaced by the AI's reading
+      // via this path; separate review pack tracks the review of
+      // those cases (held outside the repo — contains client PII).
+      //
+      // Team rule (2026-09-23): the case's policyRef comes from the
+      // Zoho task; the CA owns getting it right. The AI never writes
+      // back to Case.policyRef. On mismatch, extraction still records
+      // the disagreement on the checklist_field row for plan_number
+      // (existing hasConflict + conflictValues path in aiBffApply),
+      // and checklist_fields.value continues to record "what the doc
+      // said" so a reviewer can compare against Case.policyRef by
+      // hand. A prominent case-level mismatch banner is a separate
+      // future change; not part of this deploy.
+      //
+      // The switch falls through to default ({changed: false}) when
+      // fieldKey === "plan_number" — the correct outcome under the
+      // new rule.
+      //
+      // NOTE: the Ship #1 locked-field guard in routes/cases.ts still
+      // includes policyRef in its LOCKED_FIELDS set. That decision is
+      // independent of this mirror change and is being tracked
+      // separately. This change on its own STOPS new silent overwrites
+      // going forward without altering the guard's current behaviour
+      // on Zoho re-sync or manual PATCH.
 
       case "start_date": {
         const parsed = parseDate(value);
