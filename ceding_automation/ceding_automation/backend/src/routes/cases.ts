@@ -24,6 +24,7 @@ import {
   inferPlanType,
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
+import { CLOSED_STATUSES, medianCycleDays, summariseStatusCounts } from "../utils/caseStats";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -495,8 +496,6 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
 // boundaries follow the user's local time rather than the server's UTC):
 //   weekStart  — Monday 00:00 of the current week
 //   monthStart — 1st of the current month 00:00
-const CLOSED_STATUSES: CaseStatus[] = [CaseStatus.STAGE_10_COMPLETE, CaseStatus.APPROVED];
-const REVIEW_STATUSES: CaseStatus[] = [CaseStatus.STAGE_9_ADVISER_REVIEW, CaseStatus.IN_REVIEW];
 const CYCLE_WINDOW_DAYS = 90;
 const CASEFLOW_WEEKS = 5;
 const DAY_MS = 86_400_000;
@@ -574,39 +573,16 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
       ),
     ]);
 
-  const countOf = (statuses: CaseStatus[]) =>
-    byStatus
-      .filter((r) => statuses.includes(r.status))
-      .reduce((sum, r) => sum + r._count._all, 0);
-  const total = byStatus.reduce((sum, r) => sum + r._count._all, 0);
-  const completed = countOf(CLOSED_STATUSES);
-  const cancelled = countOf([CaseStatus.CANCELLED]);
-
-  // Median elapsed days from case creation to ceding complete. Elapsed time
-  // includes provider waits — it is a cycle-time measure, not hands-on effort.
-  const durations = cycleRows
-    .map((r) => (r.completedAt!.getTime() - r.createdAt.getTime()) / DAY_MS)
-    .filter((d) => d >= 0)
-    .sort((a, b) => a - b);
-  let medianDays: number | null = null;
-  if (durations.length > 0) {
-    const mid = Math.floor(durations.length / 2);
-    const m = durations.length % 2 ? durations[mid] : (durations[mid - 1] + durations[mid]) / 2;
-    medianDays = Math.round(m * 10) / 10;
-  }
+  // Elapsed time includes provider waits — cycle time, not hands-on effort.
+  const cycle = medianCycleDays(cycleRows);
 
   res.json({
-    total,
-    active: total - completed - cancelled,
-    completed,
-    cancelled,
-    inReview: countOf(REVIEW_STATUSES),
-    onHold: countOf([CaseStatus.ON_HOLD]),
+    ...summariseStatusCounts(byStatus.map((r) => ({ status: r.status, count: r._count._all }))),
     doneWeek,
     doneLastWeek,
     doneMonth,
     adviserCreated,
-    cycleTime: { medianDays, sampleSize: durations.length, windowDays: CYCLE_WINDOW_DAYS },
+    cycleTime: { ...cycle, windowDays: CYCLE_WINDOW_DAYS },
     caseflow: flow,
   });
 });
