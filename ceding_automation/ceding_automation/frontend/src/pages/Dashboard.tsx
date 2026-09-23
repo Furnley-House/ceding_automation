@@ -128,12 +128,16 @@ const Dashboard = () => {
   });
 
   // Auditlog feed — guarded by RBAC server-side, so this just returns 403 for
-  // CA team (we catch it and render a quieter empty state).
+  // CA team (we catch it and render a quieter empty state). Limited to the
+  // last 24 hours and refreshed every minute, matching the "Live · last 24
+  // hours" labels on the card.
   const { data: auditPayload } = useQuery({
     queryKey: ["audit", "global", "dashboard"],
+    refetchInterval: 60_000,
     queryFn: async () => {
       try {
-        const r = await auditApi.list({ limit: 10 });
+        const from = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const r = await auditApi.list({ limit: 10, from });
         return r.data as { logs: AuditRow[]; total: number } | AuditRow[];
       } catch {
         return null;
@@ -302,7 +306,13 @@ const Dashboard = () => {
   const topCase =
     allClientRows.find((r) => !isClosed(r.top)) ??
     allClientRows.find((r) => r.allClientCasesComplete);
-  const today = new Date();
+  // Ticks every 30s so the Today card's clock (and the date, past midnight)
+  // stays current instead of freezing at page-load time.
+  const [today, setToday] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setToday(new Date()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
   const heroDate = today.toLocaleDateString("en-GB", {
     weekday: "long",
     day: "numeric",
@@ -317,31 +327,34 @@ const Dashboard = () => {
   })();
 
   // ────────────────────────────────────────────────────────
-  // Team load — approx (no users API for CA role)
+  // Team load — open cases per owner across the whole team, counted
+  // server-side (GET /cases/stats) so every role sees the full team, not
+  // just the cases they can open. Bars are relative to the busiest person;
+  // there's no capacity figure to measure "overloaded" against.
   // ────────────────────────────────────────────────────────
   const teamLoad = useMemo(() => {
-    const allCases = (rawCases as CaseLite[]) ?? [];
-    const tally = new Map<string, { active: number; role?: string }>();
-    for (const c of allCases) {
-      const k = c.owner_name?.trim();
-      if (!k) continue;
-      const active = !isClosed(c);
-      const entry = tally.get(k) ?? { active: 0 };
-      if (active) entry.active += 1;
-      const ownerRole = (c.assigned_to as { role?: string } | undefined)?.role;
-      if (ownerRole) entry.role = ownerRole;
-      tally.set(k, entry);
-    }
-    const arr = Array.from(tally.entries())
-      .map(([name, v]) => ({ name, active: v.active, role: v.role ?? "—" }))
-      .sort((a, b) => b.active - a.active)
-      .slice(0, 4);
-    const max = Math.max(...arr.map((a) => a.active), 6);
-    return arr.map((a) => {
-      const pct = Math.round((a.active / max) * 100);
-      return { ...a, pct, over: pct > 85 };
-    });
-  }, [rawCases]);
+    const arr = (stats?.teamLoad ?? []).slice(0, 6);
+    const max = Math.max(1, ...arr.map((a) => a.active));
+    return arr.map((a) => ({ ...a, pct: Math.round((a.active / max) * 100) }));
+  }, [stats]);
+
+  // ────────────────────────────────────────────────────────
+  // Today — real to-do list from the viewer's caseload. Each bucket matches
+  // a Cases-page status filter so the item opens exactly those cases.
+  // ────────────────────────────────────────────────────────
+  const todayItems = useMemo(() => {
+    const n = (statuses: string[]) =>
+      statuses.reduce((sum, st) => sum + (stats?.statusCounts?.[st] ?? 0), 0);
+    const reviewer = role === "paraplanner" || role === "adviser";
+    return [
+      { key: "pending_loa", label: "Send LOAs", count: n(["DRAFT", "STAGE_1_LOA_PREP", "STAGE_2_COLLECT_DETAILS", "STAGE_3_CRM_SETUP"]) },
+      { key: "awaiting_documents", label: "Chase provider documents", count: n(["STAGE_4_PROVIDER_REQUEST", "STAGE_5_CHASING", "STAGE_6_DOCUMENT_UPLOAD"]) },
+      { key: "extraction_complete", label: "Verify extracted checklists", count: n(["STAGE_7_MISSING_INFO", "STAGE_8_VERIFY_CHECKLIST"]) },
+      { key: "in_review", label: reviewer ? "Sign off reviews" : "Awaiting sign-off", count: n(["STAGE_9_ADVISER_REVIEW", "IN_REVIEW"]) },
+      { key: "approved", label: "Export approved cases to WorkDrive", count: n(["APPROVED"]) },
+      { key: "on_hold", label: "Cases on hold", count: n(["ON_HOLD"]) },
+    ].filter((i) => i.count > 0);
+  }, [stats, role]);
 
   // ────────────────────────────────────────────────────────
   // Activity → audit log mapping
@@ -824,21 +837,28 @@ const Dashboard = () => {
               </div>
             </div>
             <ul className="mt-5 space-y-0">
-              <TodayItem done label="Sync with Zoho CRM" pill="auto" />
-              {topCase ? (
+              {topCase && !topCase.allClientCasesComplete ? (
                 <TodayItem
                   label={`Resume ${topCase.name.split(" ")[0]}'s case`}
                   pillTone="now"
-                  pill="Now"
+                  pill="Next"
+                  onClick={() => navigate(`/cases/${topCase.top.id}`)}
                 />
               ) : null}
-              <TodayItem label="Review approvals inbox" pill="11:30" />
-              <TodayItem label="Apply call findings" pill="13:00" />
-              <TodayItem
-                label="Hand off completed cases"
-                pillTone="due"
-                pill="14:30"
-              />
+              {todayItems.map((item) => (
+                <TodayItem
+                  key={item.key}
+                  label={item.label}
+                  pill={String(item.count)}
+                  pillTone={item.key === "approved" || item.key === "in_review" ? "due" : undefined}
+                  onClick={() => navigate(`/cases?status=${item.key}`)}
+                />
+              ))}
+              {stats && todayItems.length === 0 && !topCase ? (
+                <li className="py-2.5 text-sm text-muted-foreground italic">
+                  Nothing waiting — all clear.
+                </li>
+              ) : null}
             </ul>
           </div>
 
@@ -873,13 +893,13 @@ const Dashboard = () => {
           <AccordionCard
             iconTone="blue"
             icon={<Users className="h-4 w-4" />}
-            eyebrow="Today"
+            eyebrow="Workload"
             title="Team load"
-            titleMeta={`· ${teamLoad.length} people`}
+            titleMeta={`· ${teamLoad.length} ${teamLoad.length === 1 ? "person" : "people"}`}
             rightPill={
-              teamLoad.some((t) => t.over) ? (
+              stats && stats.unassigned > 0 ? (
                 <span className="text-[11px] font-semibold px-2 py-1 rounded-full bg-overdue/15 text-overdue">
-                  {teamLoad.filter((t) => t.over).length} over
+                  {stats.unassigned} unassigned
                 </span>
               ) : undefined
             }
@@ -888,12 +908,12 @@ const Dashboard = () => {
           >
             <div className="px-5 pb-4 pt-1 space-y-3">
               {teamLoad.length === 0 ? (
-                <p className="text-xs text-muted-foreground italic">No assignees on active cases yet.</p>
+                <p className="text-xs text-muted-foreground italic">No open cases assigned yet.</p>
               ) : (
                 teamLoad.map((t) => {
                   const me = (userName ?? "").trim() === t.name;
                   return (
-                    <div key={t.name} className="grid grid-cols-[32px_1fr_60px] gap-3 items-center">
+                    <div key={t.userId} className="grid grid-cols-[32px_1fr_60px] gap-3 items-center">
                       <div
                         className="h-8 w-8 rounded-full text-white text-[11px] font-bold flex items-center justify-center"
                         style={{
@@ -912,7 +932,7 @@ const Dashboard = () => {
                           ) : null}
                         </div>
                         <div className="text-xs text-muted-foreground mt-0.5">
-                          {t.role.replace(/_/g, " ").toLowerCase()} · {t.active} active
+                          {ROLE_LABEL[t.role] ?? t.role.replace(/_/g, " ").toLowerCase()} · {t.active} active
                         </div>
                       </div>
                       <div>
@@ -921,12 +941,9 @@ const Dashboard = () => {
                             className="h-full rounded-full transition-all duration-700"
                             style={{
                               width: `${Math.min(100, t.pct)}%`,
-                              background: t.over ? "#C28B1C" : "#5a6878",
+                              background: "#5a6878",
                             }}
                           />
-                        </div>
-                        <div className="text-[10px] text-muted-foreground text-right tabular-nums">
-                          {t.pct}%
                         </div>
                       </div>
                     </div>
@@ -982,6 +999,13 @@ interface AuditRow {
   new_value?: string | null;
   actor_name?: string | null;
 }
+
+const ROLE_LABEL: Record<string, string> = {
+  CA_TEAM: "CA team",
+  PARAPLANNER: "Paraplanner",
+  ADVISER: "Adviser",
+  ADMIN: "Admin",
+};
 
 const KPI_TONES: Record<string, { bg: string; text: string; iconBg: string }> = {
   teal: {
@@ -1397,17 +1421,28 @@ function TodayItem({
   done,
   pill,
   pillTone,
+  onClick,
 }: {
   label: string;
   done?: boolean;
   pill?: string;
   pillTone?: "now" | "due";
+  onClick?: () => void;
 }) {
   return (
     <li
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (onClick && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
       className={`grid grid-cols-[18px_1fr_auto] items-center gap-2.5 py-2.5 border-t border-dashed border-border first:border-t-0 text-sm ${
         done ? "text-muted-foreground line-through decoration-muted-foreground/30" : "text-foreground/85"
-      }`}
+      } ${onClick ? "cursor-pointer hover:text-foreground" : ""}`}
     >
       <span
         className={`w-4 h-4 rounded-full border-[1.5px] ${

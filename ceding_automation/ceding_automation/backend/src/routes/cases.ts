@@ -577,6 +577,51 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
   // Elapsed time includes provider waits — cycle time, not hands-on effort.
   const cycle = medianCycleDays(cycleRows);
 
+  // Team load — open cases per owner across the WHOLE team (not scoped to
+  // the viewer): it's a workload view, counts only, no case detail. Owner =
+  // assignee, falling back to creator when unassigned (same rule as the
+  // dashboard / Cases list). Cases owned by the AI system user count as
+  // unassigned.
+  const openWhere: Prisma.CaseWhereInput = {
+    status: { notIn: [...CLOSED_STATUSES, CaseStatus.CANCELLED] },
+  };
+  const [byAssignee, byCreator] = await Promise.all([
+    prisma.case.groupBy({
+      by: ["assignedToId"],
+      where: { ...openWhere, assignedToId: { not: null } },
+      _count: { _all: true },
+    }),
+    prisma.case.groupBy({
+      by: ["createdById"],
+      where: { ...openWhere, assignedToId: null },
+      _count: { _all: true },
+    }),
+  ]);
+  const loadByUser = new Map<string, number>();
+  for (const r of byAssignee) {
+    loadByUser.set(r.assignedToId!, (loadByUser.get(r.assignedToId!) ?? 0) + r._count._all);
+  }
+  for (const r of byCreator) {
+    loadByUser.set(r.createdById, (loadByUser.get(r.createdById) ?? 0) + r._count._all);
+  }
+  let unassigned = loadByUser.get(SYSTEM_USER_ID) ?? 0;
+  loadByUser.delete(SYSTEM_USER_ID);
+  const owners = await prisma.user.findMany({
+    where: { id: { in: [...loadByUser.keys()] } },
+    select: { id: true, name: true, role: true },
+  });
+  const ownerById = new Map(owners.map((u) => [u.id, u]));
+  const teamLoad = [...loadByUser.entries()]
+    .flatMap(([id, active]) => {
+      const u = ownerById.get(id);
+      if (!u) {
+        unassigned += active;
+        return [];
+      }
+      return [{ userId: id, name: u.name, role: u.role, active }];
+    })
+    .sort((a, b) => b.active - a.active);
+
   res.json({
     ...summariseStatusCounts(byStatus.map((r) => ({ status: r.status, count: r._count._all }))),
     doneWeek,
@@ -585,6 +630,11 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
     adviserCreated,
     cycleTime: { ...cycle, windowDays: CYCLE_WINDOW_DAYS },
     caseflow: flow,
+    // Raw per-status counts (viewer-scoped) — drives the dashboard's
+    // "Today" to-do list.
+    statusCounts: Object.fromEntries(byStatus.map((r) => [r.status, r._count._all])),
+    teamLoad,
+    unassigned,
   });
 });
 

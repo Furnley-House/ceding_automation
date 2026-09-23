@@ -171,12 +171,22 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
 
 // ==================== CASES ====================
 
+// Fetches every case the user can see, page by page. It used to take one
+// page of 200, which silently truncated the dashboard, Cases list and
+// header search once the caseload grew past 200.
+const CASES_PAGE_SIZE = 500;
 export async function getCases() {
-  const res = await api.get("/cases", { params: { limit: 200 } });
-  // Backend returns { cases: [...], total, page, limit }
-  const raw = res.data as { cases?: unknown[]; [k: string]: unknown };
-  const arr = raw.cases ?? (Array.isArray(raw) ? raw : []);
-  return (snakeKeys(arr) as Record<string, unknown>[]).map(flattenCase);
+  const all: unknown[] = [];
+  for (let page = 1; ; page++) {
+    const res = await api.get("/cases", { params: { limit: CASES_PAGE_SIZE, page } });
+    // Backend returns { cases: [...], total, page, limit }
+    const raw = res.data as { cases?: unknown[]; total?: number; [k: string]: unknown };
+    const arr = raw.cases ?? (Array.isArray(raw) ? raw : []);
+    all.push(...arr);
+    const total = typeof raw.total === "number" ? raw.total : all.length;
+    if (arr.length < CASES_PAGE_SIZE || all.length >= total) break;
+  }
+  return (snakeKeys(all) as Record<string, unknown>[]).map(flattenCase);
 }
 
 export interface CaseStats {
@@ -192,6 +202,11 @@ export interface CaseStats {
   adviserCreated: number;
   cycleTime: { medianDays: number | null; sampleSize: number; windowDays: number };
   caseflow: { weekStart: string; opened: number; completed: number }[];
+  // Prisma CaseStatus → count, scoped to the viewer.
+  statusCounts: Record<string, number>;
+  // Open cases per owner across the whole team.
+  teamLoad: { userId: string; name: string; role: string; active: number }[];
+  unassigned: number;
 }
 
 // Dashboard KPIs, aggregated server-side across the whole caseload. Week and
