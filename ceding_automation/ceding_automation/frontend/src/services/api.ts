@@ -179,6 +179,35 @@ export async function getCases() {
   return (snakeKeys(arr) as Record<string, unknown>[]).map(flattenCase);
 }
 
+export interface CaseStats {
+  total: number;
+  active: number;
+  completed: number;
+  cancelled: number;
+  inReview: number;
+  onHold: number;
+  doneWeek: number;
+  doneLastWeek: number;
+  doneMonth: number;
+  adviserCreated: number;
+  cycleTime: { medianDays: number | null; sampleSize: number; windowDays: number };
+  caseflow: { weekStart: string; opened: number; completed: number }[];
+}
+
+// Dashboard KPIs, aggregated server-side across the whole caseload. Week and
+// month boundaries are sent in the browser's local time.
+export async function getCaseStats(): Promise<CaseStats> {
+  const now = new Date();
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+  weekStart.setHours(0, 0, 0, 0);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const res = await api.get("/cases/stats", {
+    params: { weekStart: weekStart.toISOString(), monthStart: monthStart.toISOString() },
+  });
+  return res.data as CaseStats;
+}
+
 export async function getCaseById(id: string) {
   const res = await api.get(`/cases/${id}`);
   return flattenCase(snakeKeys(res.data) as Record<string, unknown>);

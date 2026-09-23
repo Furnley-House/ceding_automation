@@ -18,15 +18,10 @@ import {
   Users,
   Wand2,
 } from "lucide-react";
-import { getCases } from "@/services/api";
+import { getCases, getCaseStats, type CaseStats } from "@/services/api";
 import { auditApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
-
-// ────────────────────────────────────────────────────────────
-// Constants
-// ────────────────────────────────────────────────────────────
-const BASELINE_MIN_PER_CASE = 195; // FR-01 KPI: ~195 min baseline before automation
 
 // ────────────────────────────────────────────────────────────
 // Helpers
@@ -154,105 +149,32 @@ const Dashboard = () => {
   }, [rawCases, role, userName]);
 
   // ────────────────────────────────────────────────────────
-  // KPIs
+  // KPIs + caseflow — aggregated server-side (GET /cases/stats) so they
+  // cover the whole caseload, not just the 200 rows fetched above.
   // ────────────────────────────────────────────────────────
-  const stats = useMemo(() => {
-    const now = new Date();
-    const monday = new Date(now);
-    monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
-    monday.setHours(0, 0, 0, 0);
+  const { data: stats } = useQuery<CaseStats>({
+    queryKey: ["cases", "stats"],
+    queryFn: getCaseStats,
+  });
 
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const caseflow = useMemo(
+    () =>
+      (stats?.caseflow ?? []).map((b) => ({
+        label: new Date(b.weekStart).toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "short",
+        }),
+        opened: b.opened,
+        delivered: b.completed,
+      })),
+    [stats],
+  );
 
-    let active = 0,
-      doneWeek = 0,
-      inReview = 0,
-      doneMonth = 0,
-      adviserCreated = 0;
-
-    let totalCompletedMinutes = 0,
-      completedSamples = 0;
-
-    for (const c of cases) {
-      const status = (c.status ?? "").toLowerCase();
-      const updated = c.updated_at ? new Date(c.updated_at) : null;
-      if (!["complete", "approved"].includes(status)) active++;
-      if (status === "in_review") inReview++;
-      if (status === "complete" && updated && updated >= monday) doneWeek++;
-      if (status === "complete" && updated && updated >= startOfMonth) doneMonth++;
-
-      // case duration → time saved
-      if (c.created_at && (status === "complete" || status === "approved")) {
-        const created = new Date(c.created_at).getTime();
-        const end = c.ceding_complete_date
-          ? new Date(c.ceding_complete_date).getTime()
-          : updated?.getTime() ?? null;
-        if (end && end > created) {
-          const minutes = (end - created) / 60000;
-          // Only count cases that took <= 4h (240m) — otherwise the long
-          // tail (cases waiting weeks on providers) skews the metric and
-          // makes "time saved" look absurd. The KPI is about FH-side
-          // processing time, not provider response time.
-          if (minutes <= 240) {
-            totalCompletedMinutes += minutes;
-            completedSamples++;
-          }
-        }
-      }
-
-      const createdBy = c.created_by as { role?: string } | undefined;
-      if (createdBy?.role === "ADVISER") adviserCreated++;
-    }
-
-    const avgProcessingMin =
-      completedSamples > 0 ? totalCompletedMinutes / completedSamples : null;
-    const timeSavedMin =
-      avgProcessingMin !== null
-        ? Math.max(0, Math.round(BASELINE_MIN_PER_CASE - avgProcessingMin))
-        : null;
-
-    return {
-      active,
-      doneWeek,
-      inReview,
-      doneMonth,
-      adviserCreated,
-      timeSavedMin,
-      totalCases: cases.length,
-    };
-  }, [cases]);
-
-  // ────────────────────────────────────────────────────────
-  // Caseflow line chart — bucket created_at by week, last 30 days
-  // ────────────────────────────────────────────────────────
-  const caseflow = useMemo(() => {
-    const buckets: { label: string; opened: number; delivered: number }[] = [];
-    const now = new Date();
-    for (let i = 4; i >= 0; i--) {
-      const start = new Date(now);
-      start.setDate(now.getDate() - i * 7);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(start);
-      end.setDate(start.getDate() + 7);
-      const label = start.toLocaleDateString("en-GB", {
-        day: "numeric",
-        month: "short",
-      });
-      let opened = 0,
-        delivered = 0;
-      for (const c of cases) {
-        const created = c.created_at ? new Date(c.created_at) : null;
-        if (created && created >= start && created < end) opened++;
-        // "Delivered" = ceding workflow finished. We use ceding_complete_date
-        // (set when the case reaches Stage 10). sr_prepared_at was reserved
-        // for the adviser-side SR handoff but is not written today.
-        const done = c.ceding_complete_date ? new Date(c.ceding_complete_date) : null;
-        if (done && done >= start && done < end) delivered++;
-      }
-      buckets.push({ label, opened, delivered });
-    }
-    return buckets;
-  }, [cases]);
+  const weekDelta = stats ? stats.doneWeek - stats.doneLastWeek : 0;
+  const donePct =
+    stats && stats.total - stats.cancelled > 0
+      ? Math.round((stats.completed * 100) / (stats.total - stats.cancelled))
+      : 0;
 
   // ────────────────────────────────────────────────────────
   // Provider donut — top 3 + Other
@@ -282,7 +204,7 @@ const Dashboard = () => {
   // ────────────────────────────────────────────────────────
   // Cases by client — group + progress
   // ────────────────────────────────────────────────────────
-  const clientRows = useMemo(() => {
+  const allClientRows = useMemo(() => {
     const map = new Map<string, CaseLite[]>();
     for (const c of cases) {
       const k = c.client_name?.trim() || "Unknown client";
@@ -296,7 +218,12 @@ const Dashboard = () => {
             new Date(b.updated_at ?? b.created_at ?? 0).getTime() -
             new Date(a.updated_at ?? a.created_at ?? 0).getTime(),
         );
-        const top = sorted[0]!;
+        // Represent the client by their most recently updated *open* case, so
+        // a finished case doesn't mask outstanding work on another plan.
+        const top =
+          sorted.find(
+            (it) => !["complete", "approved"].includes((it.status ?? "").toLowerCase()),
+          ) ?? sorted[0]!;
         const totalStages = 10;
         const completed = Array.isArray(top.stages_completed)
           ? top.stages_completed.length
@@ -361,11 +288,17 @@ const Dashboard = () => {
           updatedRelative: timeAgo(top.updated_at ?? top.created_at),
         };
       })
-      .sort((a, b) => b.progressPct - a.progressPct)
-      .slice(0, 4);
+      .sort((a, b) => b.progressPct - a.progressPct);
   }, [cases]);
+  const clientRows = allClientRows.slice(0, 4);
 
-  const topCase = clientRows[0];
+  // Hero "top priority": the open case closest to done. Fully signed-off
+  // clients only surface (as the Prepare-SR prompt) when nothing is open —
+  // otherwise they'd sit at 100% and pin the hero permanently.
+  const topCase =
+    allClientRows.find(
+      (r) => !["complete", "approved"].includes((r.top.status ?? "").toLowerCase()),
+    ) ?? allClientRows.find((r) => r.allClientCasesComplete);
   const today = new Date();
   const heroDate = today.toLocaleDateString("en-GB", {
     weekday: "long",
@@ -476,7 +409,7 @@ const Dashboard = () => {
                     </>
                   ) : (
                     <>
-                      You have <strong className="text-white/85 font-semibold">{stats.active}</strong> active
+                      You have <strong className="text-white/85 font-semibold">{stats?.active ?? "…"}</strong> active
                       cases. Top priority is{" "}
                       <strong className="text-white/85 font-semibold">{topCase.name}</strong> at{" "}
                       {topCase.progressPct}% complete.
@@ -537,18 +470,21 @@ const Dashboard = () => {
       </section>
 
       {/* ── KPI TILES ──────────────────────────────────────────
+          No throughput target shown: the 75/week goal spans every plan type
+          and depends on the full app shipping, so "Done · week" compares
+          against last week instead.
           Removed:
           - "On hold"        — backend supports ON_HOLD, but no UI sets it
-          - "AI confidence"  — confidence_score is never written to the DB */}
+          - "AI confidence"  — confidence_score is never written to the DB
+          - "Time saved"     — needs hands-on effort time, which isn't
+                               recorded; replaced by median cycle time */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiTile
           tone="teal"
           label="Active"
-          value={stats.active}
-          sub={`of ${stats.totalCases} total`}
-          delta={
-            stats.active > 0 ? `${Math.round((stats.totalCases - stats.active) * 100 / Math.max(1, stats.totalCases))}% done` : "all clear"
-          }
+          value={stats?.active ?? "—"}
+          sub={stats ? `of ${stats.total} total` : "loading"}
+          delta={stats ? (stats.active > 0 ? `${donePct}% done` : "all clear") : undefined}
           icon={<Briefcase className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=active")}
           index={0}
@@ -556,9 +492,17 @@ const Dashboard = () => {
         <KpiTile
           tone="green"
           label="Done · week"
-          value={stats.doneWeek}
-          sub="primary KPI"
-          delta={stats.doneWeek >= 4 ? "▲ on target" : `target 4 · ${Math.max(0, 4 - stats.doneWeek)} to go`}
+          value={stats?.doneWeek ?? "—"}
+          sub="completed since Monday"
+          delta={
+            stats
+              ? weekDelta > 0
+                ? `▲ ${weekDelta} vs last week`
+                : weekDelta < 0
+                  ? `▼ ${-weekDelta} vs last week`
+                  : "same as last week"
+              : undefined
+          }
           icon={<CheckCircle2 className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=complete")}
           index={1}
@@ -566,19 +510,25 @@ const Dashboard = () => {
         <KpiTile
           tone="blue"
           label="In review"
-          value={stats.inReview}
-          sub="awaiting paraplanner"
+          value={stats?.inReview ?? "—"}
+          sub="awaiting sign-off"
           icon={<Clock className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=in_review")}
           index={2}
         />
         <KpiTile
           tone="navy"
-          label="Time saved"
-          value={stats.timeSavedMin ?? "—"}
-          suffix={stats.timeSavedMin !== null ? "m" : undefined}
-          sub="avg/case vs baseline"
-          delta={stats.timeSavedMin !== null ? `baseline ${BASELINE_MIN_PER_CASE}m` : "needs completed cases"}
+          label="Cycle time"
+          value={stats?.cycleTime.medianDays ?? "—"}
+          suffix={stats?.cycleTime.medianDays != null ? "d" : undefined}
+          sub="median, open → complete"
+          delta={
+            stats
+              ? stats.cycleTime.sampleSize > 0
+                ? `${stats.cycleTime.sampleSize} case${stats.cycleTime.sampleSize === 1 ? "" : "s"} · last ${stats.cycleTime.windowDays}d`
+                : `none completed in ${stats.cycleTime.windowDays}d`
+              : undefined
+          }
           icon={<Clock className="h-4 w-4" />}
           index={3}
         />
@@ -636,7 +586,7 @@ const Dashboard = () => {
             icon={<Briefcase className="h-4 w-4" />}
             eyebrow="Caseload"
             title="Cases by client"
-            titleMeta={`· ${stats.active} active`}
+            titleMeta={`· ${stats?.active ?? "…"} active`}
             rightPill={
               <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-teal/15 text-teal">
                 {clientRows.length} shown
@@ -900,13 +850,13 @@ const Dashboard = () => {
             <div className="px-5 pb-4 pt-1 space-y-3">
               <InsightRow
                 tone="blue"
-                num={stats.doneMonth}
+                num={stats?.doneMonth ?? 0}
                 label="Cases closed this month"
-                delta="target 16 by month-end"
+                delta="ceding complete"
               />
               <InsightRow
                 tone="gold"
-                num={stats.adviserCreated}
+                num={stats?.adviserCreated ?? 0}
                 label="Cases opened by advisers"
                 delta="adviser-led intros"
               />

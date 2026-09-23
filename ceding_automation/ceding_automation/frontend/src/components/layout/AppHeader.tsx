@@ -2,7 +2,7 @@ import { Search, ChevronDown, LogOut, RefreshCw, Settings, BarChart3, Contrast }
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getCases } from "@/services/api";
+import { getCases, getCaseStats } from "@/services/api";
 import { useRole, ROLE_LABELS } from "@/hooks/useRole";
 import { useHighContrast } from "@/hooks/useHighContrast";
 import { useAuth } from "@/hooks/useAuth";
@@ -47,14 +47,10 @@ export function AppHeader() {
   const { data: cases = [] } = useQuery({ queryKey: ["cases"], queryFn: getCases });
 
   // Weekly throughput: cases completed this calendar week
-  const weeklyThroughput = (() => {
-    const now = new Date();
-    const day = now.getDay();
-    const monday = new Date(now);
-    monday.setDate(now.getDate() - ((day + 6) % 7));
-    monday.setHours(0, 0, 0, 0);
-    return cases.filter((c) => c.status === "complete" && new Date(c.updated_at) >= monday).length;
-  })();
+  // Same source as the dashboard "Done · week" tile: completedAt this week,
+  // counted server-side across the whole caseload.
+  const { data: caseStats } = useQuery({ queryKey: ["cases", "stats"], queryFn: getCaseStats });
+  const weeklyThroughput = caseStats?.doneWeek ?? "—";
 
   const filtered =
     searchQuery.trim().length >= 2
