@@ -39,10 +39,40 @@ export interface HoldingRow {
   [field: string]: unknown;
 }
 
+/**
+ * What each numeric field will actually accept, from the same metadata read.
+ *
+ * Zoho rejects an over-precise number outright — a 400 naming the field and
+ * its maximum_decimal_place, not a silent truncation — so this has to match
+ * the module. FE returns unit prices to six decimals and the fund master
+ * returns charges to four, both of which the subform refuses.
+ */
+const DECIMALS: Record<string, number> = {
+  gbp_valuation: 2,
+  Holdings_Valuation: 2,
+  OCF: 2,
+  Transaction_Cost: 2,
+  Weighting: 2,
+  position: 9,
+};
+
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/** Round to the places the field allows, half away from zero. */
+export function toFieldScale(field: string, v: number | null): number | null {
+  if (v === null) return null;
+  const dp = DECIMALS[field];
+  if (dp === undefined) return v;
+  const factor = 10 ** dp;
+  // Math.round(-0.185 * 100) is -18, not -19, so sign is handled explicitly —
+  // transaction costs are routinely negative.
+  const scaled = v * factor;
+  const rounded = scaled < 0 ? -Math.round(-scaled) : Math.round(scaled);
+  return rounded / factor;
 }
 
 /**
@@ -95,12 +125,12 @@ export function buildHoldingRow(line: ChecklistFundLine): HoldingRow {
     // holding still carries its identifier across, which is what makes it
     // fixable in CRM.
     isin: line.resolvedIsin ?? line.isinSedolCiti ?? null,
-    position: num(line.numberOfUnits),
-    gbp_valuation: price,
-    Holdings_Valuation: num(line.value),
+    position: toFieldScale("position", num(line.numberOfUnits)),
+    gbp_valuation: toFieldScale("gbp_valuation", price),
+    Holdings_Valuation: toFieldScale("Holdings_Valuation", num(line.value)),
     valuation_date: isoDate(line.resolvedPriceDate),
-    OCF: ocf,
-    Transaction_Cost: txCost,
+    OCF: toFieldScale("OCF", ocf),
+    Transaction_Cost: toFieldScale("Transaction_Cost", txCost),
     RAG: ragLabel(line.holdingRag),
   };
 

@@ -372,6 +372,10 @@ router.post(
           // payload entirely rather than sent as a bare list — losing the
           // append is recoverable, deleting a CA's rows in CRM is not.
           const payload: Record<string, unknown> = { ...fields };
+          // Held until the PUT returns. Reporting "added: 2" for a write that
+          // then failed sends the CA to CRM looking for rows that were never
+          // created.
+          let pending: { added: number; kept: number; skipped: string[] } | null = null;
           try {
             const plan = await findPlanRecordById(id);
             const existing = plan ? readExistingHoldings(plan.record) : [];
@@ -379,7 +383,7 @@ router.post(
             if (merged.added > 0 || merged.kept > 0) {
               payload[HOLDINGS_SUBFORM] = merged.rows;
             }
-            holdingsResult = {
+            pending = {
               added: merged.added,
               kept: merged.kept,
               skipped: merged.skipped,
@@ -393,6 +397,8 @@ router.post(
           }
 
           const resp = await updatePlanRecord(id, payload);
+          // Only now did the rows actually land.
+          holdingsResult = pending;
           console.log(
             "[plan-provider] updatePlanRecord ok case=%s record=%s respKeys=%s",
             caseId,

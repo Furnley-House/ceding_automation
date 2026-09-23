@@ -6,6 +6,7 @@ import {
   holdingKey,
   ragLabel,
   readExistingHoldings,
+  toFieldScale,
   HOLDINGS_SUBFORM,
 } from "./holdingsSubform";
 
@@ -46,7 +47,7 @@ describe("buildHoldingRow", () => {
       security_name: "Phoenix AL International Pn",
       isin: "GB0000026087",
       position: 500,
-      gbp_valuation: 31.643,
+      gbp_valuation: 31.64, // rounded to the 2dp the currency field accepts
       Holdings_Valuation: 15821.5,
       valuation_date: "2026-09-22",
       OCF: 0.77,
@@ -250,5 +251,49 @@ describe("readExistingHoldings", () => {
 
   it("uses the subform name the module actually has", () => {
     expect(HOLDINGS_SUBFORM).toBe("Holdings_List");
+  });
+});
+
+// Zoho REJECTS an over-precise number — a 400 naming the field and its
+// maximum_decimal_place, not a silent truncation. FE returns prices to six
+// decimals and the fund master charges to four, so every numeric field has to
+// be brought down to what the subform accepts.
+describe("field precision", () => {
+  it("rounds a unit price to the two decimals the field allows", () => {
+    const row = buildHoldingRow(fundLine({ resolvedUnitPrice: dec("13.767774") }));
+    expect(row.gbp_valuation).toBe(13.77);
+  });
+
+  it("rounds the holdings valuation too", () => {
+    const row = buildHoldingRow(fundLine({ value: dec("15821.5049") }));
+    expect(row.Holdings_Valuation).toBe(15821.5);
+  });
+
+  it("rounds charges to two decimals", () => {
+    const row = buildHoldingRow(
+      fundLine({ resolvedOcf: dec("0.7699"), resolvedTxCost: dec("0.0486"), txCostSource: FundValueSource.LOOKUP }),
+    );
+    expect(row.OCF).toBe(0.77);
+    expect(row.Transaction_Cost).toBe(0.05);
+  });
+
+  // Ex-ante transaction costs are routinely negative, and Math.round rounds
+  // -0.185 towards zero, which would disagree with the positive case.
+  it("rounds a negative transaction cost away from zero", () => {
+    expect(toFieldScale("Transaction_Cost", -0.185)).toBe(-0.19);
+    expect(toFieldScale("Transaction_Cost", 0.185)).toBe(0.19);
+  });
+
+  it("keeps units at the nine decimals that field allows", () => {
+    const row = buildHoldingRow(fundLine({ numberOfUnits: dec("500.123456789") }));
+    expect(row.position).toBe(500.123456789);
+  });
+
+  it("leaves a field with no stated limit alone", () => {
+    expect(toFieldScale("security_name", 1.23456)).toBe(1.23456);
+  });
+
+  it("passes a null through untouched", () => {
+    expect(toFieldScale("gbp_valuation", null)).toBeNull();
   });
 });
