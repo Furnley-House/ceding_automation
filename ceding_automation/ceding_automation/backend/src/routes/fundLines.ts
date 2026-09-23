@@ -7,6 +7,10 @@ import { PrismaClient, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { requireCaseAccess } from "../middleware/requireCaseAccess";
+import {
+  verifyCaseFundLines,
+  isVerificationConfigured,
+} from "../services/fundVerification";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -220,6 +224,26 @@ router.patch(
       data: {
         ...(data.fundName !== undefined && { fundName: data.fundName }),
         ...(data.isinSedolCiti !== undefined && { isinSedolCiti: data.isinSedolCiti }),
+        // Editing the identifier invalidates everything the fund-master lookup
+        // resolved from it, so the row drops back to unverified and stage 6
+        // asks for it again. Deliberately NOT triggered by edits to units,
+        // price or name: export reads those from the row itself, so they
+        // cannot make the match wrong.
+        ...(data.isinSedolCiti !== undefined &&
+          data.isinSedolCiti !== existing.isinSedolCiti && {
+            resolvedIsin: null,
+            resolvedFundName: null,
+            resolvedUnitPrice: null,
+            resolvedPriceDate: null,
+            resolvedOcf: null,
+            resolvedTxCost: null,
+            holdingRag: null,
+            fundNameSource: null,
+            priceSource: null,
+            ocfSource: null,
+            txCostSource: null,
+            verifiedAt: null,
+          }),
         ...(data.numberOfUnits !== undefined && { numberOfUnits: toDecimal(data.numberOfUnits) }),
         ...(data.pricePerUnit !== undefined && { pricePerUnit: toDecimal(data.pricePerUnit) }),
         ...(data.value !== undefined && { value: toDecimal(data.value) }),
@@ -281,6 +305,109 @@ router.delete(
     });
 
     res.status(204).send();
+  },
+);
+
+
+// ── Verify holdings against the fund master + FE Fund Info ──
+// Stage 6. Resolves each holding's identifier, prices it, and records both the
+// CA's figures and the reference data, so any disagreement is visible before
+// the case is approved. Export reads what this writes and never re-runs the
+// lookup — CRM must carry the figures that were signed off.
+router.post(
+  "/:caseId/fund-lines/verify",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
+  async (req: Request, res: Response) => {
+    if (!isVerificationConfigured()) {
+      return res
+        .status(503)
+        .json({ error: "Fund verification is not configured on this environment." });
+    }
+
+    try {
+      const summary = await verifyCaseFundLines(req.params.caseId, req.user!.id);
+      const fundLines = await prisma.checklistFundLine.findMany({
+        where: { caseId: req.params.caseId },
+        orderBy: { displayOrder: "asc" },
+      });
+      return res.json({ summary, fundLines });
+    } catch (err) {
+      // The lookup failing is an upstream problem, not a bad request, and
+      // nothing was written — the CA can simply retry. Reported as 502 so the
+      // UI can say "could not reach the fund data" rather than implying the
+      // holdings were checked and found wanting.
+      // eslint-disable-next-line no-console
+      console.error("[fund-lines/verify] failed for case %s:", req.params.caseId, err);
+      return res.status(502).json({
+        error: "Could not reach the fund data service. Nothing was changed — please try again.",
+      });
+    }
+  },
+);
+
+// ── Choose which figure to carry forward ────────────────
+// Where the CA's entry and the reference data disagree, the CA decides per
+// field. Verification writes a default; this records an override.
+const sourceChoiceSchema = z.object({
+  fundNameSource: z.enum(["CEDING", "LOOKUP"]).optional(),
+  priceSource: z.enum(["CEDING", "LOOKUP"]).optional(),
+  ocfSource: z.enum(["CEDING", "LOOKUP"]).optional(),
+  txCostSource: z.enum(["CEDING", "LOOKUP"]).optional(),
+});
+
+router.patch(
+  "/:caseId/fund-lines/:lineId/source",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireCaseAccess,
+  async (req: Request, res: Response) => {
+    const parse = sourceChoiceSchema.safeParse(req.body);
+    if (!parse.success) {
+      return res.status(400).json({ error: "Invalid payload", details: parse.error.flatten() });
+    }
+    const data = parse.data;
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: "No choice supplied" });
+    }
+
+    const existing = await prisma.checklistFundLine.findUnique({
+      where: { id: req.params.lineId },
+    });
+    if (!existing || existing.caseId !== req.params.caseId) {
+      return res.status(404).json({ error: "Fund line not found" });
+    }
+    if (!existing.verifiedAt) {
+      // Choosing between two figures when only one exists is meaningless, and
+      // the choice would be overwritten by the next verification run anyway.
+      return res.status(409).json({ error: "This holding has not been verified yet." });
+    }
+
+    const updated = await prisma.checklistFundLine.update({
+      where: { id: req.params.lineId },
+      data: { ...data, editedById: req.user!.id },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.caseId,
+        userId: req.user!.id,
+        action: "FUND_LINE_UPDATED",
+        fieldKey: "fund_line:" + updated.fundName,
+        source: "MANUAL",
+        newValue: Object.entries(data)
+          .map(([k, v]) => k + "=" + v)
+          .join(", "),
+        metadata: {
+          reason: "verification-source-choice",
+          fundLineId: updated.id,
+          isin: updated.resolvedIsin ?? updated.isinSedolCiti,
+        },
+      },
+    });
+
+    res.json(updated);
   },
 );
 
