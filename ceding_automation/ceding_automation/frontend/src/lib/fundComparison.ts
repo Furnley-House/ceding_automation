@@ -39,6 +39,8 @@ export interface FieldComparison {
   needsChoice: boolean;
   /** Present only when a choice is meaningless — explains why it is locked. */
   lockedReason?: string;
+  /** Names the likely cause when a difference has a recognisable shape. */
+  note?: string;
 }
 
 // -- Tolerances -----------------------------------------------------------
@@ -79,6 +81,41 @@ export function pricesAgree(a: number, b: number): boolean {
 
 export function chargesAgree(a: number, b: number): boolean {
   return Math.abs(a - b) <= CHARGE_TOLERANCE;
+}
+
+/**
+ * Does this difference look like a unit problem rather than a real one?
+ *
+ * UK funds are quoted in pounds or in pence depending on the provider, and FE
+ * reports both with Currency "GBP" — GB00B3ZHN960 comes back as 233.4637 for
+ * a fund worth about £2.33 — so the currency field cannot tell them apart.
+ * The CA reads whichever unit their statement uses.
+ *
+ * Returns the factor the CHECKLIST figure would need for the two to agree, or
+ * null if the difference is not a clean 100x. This does not decide anything —
+ * it just names the difference, so the CA is not left comparing 2.33 with
+ * 233.46 and wondering which of them is wrong.
+ */
+export function scaleFactorBetween(
+  ceding: number,
+  lookup: number,
+  agree: (a: number, b: number) => boolean,
+): 100 | 0.01 | null {
+  if (ceding === 0 || lookup === 0) return null;
+  if (agree(ceding * 100, lookup)) return 100;
+  if (agree(ceding / 100, lookup)) return 0.01;
+  return null;
+}
+
+function scaleNote(factor: 100 | 0.01 | null, unit: "price" | "charge"): string | undefined {
+  if (factor === null) return undefined;
+  const direction =
+    factor === 100
+      ? "the checklist figure is 100x smaller"
+      : "the checklist figure is 100x larger";
+  return unit === "price"
+    ? `These are the same price in different units — ${direction}. One side is in pence, the other in pounds.`
+    : `Same figure at a different scale — ${direction}. One side is a percentage, the other a decimal fraction.`;
 }
 
 // -- Formatting -----------------------------------------------------------
@@ -187,6 +224,13 @@ export function compareFundLine(row: FundLine): RowComparison {
       cedingDisplay: fmtPrice(cedingPrice),
       lookupDisplay: fmtPrice(lookupPrice),
       ...resolveChoice(row.priceSource, priceStatus),
+      note:
+        priceStatus === "differs"
+          ? scaleNote(
+              scaleFactorBetween(cedingPrice as number, lookupPrice as number, pricesAgree),
+              "price",
+            )
+          : undefined,
     },
     {
       field: "ocf",
@@ -195,6 +239,13 @@ export function compareFundLine(row: FundLine): RowComparison {
       cedingDisplay: fmtPct(cedingOcf),
       lookupDisplay: fmtPct(lookupOcf),
       ...resolveChoice(row.ocfSource, ocfStatus),
+      note:
+        ocfStatus === "differs"
+          ? scaleNote(
+              scaleFactorBetween(cedingOcf as number, lookupOcf as number, chargesAgree),
+              "charge",
+            )
+          : undefined,
     },
     {
       field: "txCost",
@@ -203,6 +254,13 @@ export function compareFundLine(row: FundLine): RowComparison {
       cedingDisplay: fmtPct(cedingTx),
       lookupDisplay: fmtPct(lookupTx),
       ...resolveChoice(row.txCostSource, txStatus),
+      note:
+        txStatus === "differs"
+          ? scaleNote(
+              scaleFactorBetween(cedingTx as number, lookupTx as number, chargesAgree),
+              "charge",
+            )
+          : undefined,
     },
   ];
 

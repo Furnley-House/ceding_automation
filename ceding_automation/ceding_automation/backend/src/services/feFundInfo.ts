@@ -117,9 +117,25 @@ async function fetchBatch(isins: string[], token: string): Promise<unknown[]> {
 //   OFDY000020    8/10
 //   OFDY908005    2/10   <- the only code the Catalyst proxy reads
 //
-// Where more than one is present they carry the same value, so preferring the
-// most complete is safe. Reading only OFDY908005, as the proxy does, would
-// leave 80% of these holdings unpriced and therefore RED.
+// Re-measured against a random 41-fund sample from the fund master:
+//
+//   OFDY908102   41/41   present on every fund
+//   OFDY000020   23/41   agrees with 908102 in all 23
+//   OFDY000025   20/41   consistently ~5% higher — looks like an offer price
+//   OFDY908005   18/41
+//
+// So preferring 908102 is safe as well as the most complete. One counter-
+// example is known — GB0000011444 returns 908102=13.767774 against
+// 000020=9.896871 — so this is "agrees almost always", not "always"; if a
+// holding is ever priced oddly, that fund is the shape of the problem.
+// Reading only OFDY908005, as the proxy does, leaves more than half of these
+// unpriced and therefore RED.
+//
+// UNIT IS AMBIGUOUS: FE reports Currency "GBP" whether the fund is quoted in
+// pounds or in pence — GB00B3ZHN960 comes back as 233.4637 for a fund worth
+// about £2.33. Nothing in the payload distinguishes them, so this is left as
+// FE states it and the stage-6 comparison flags a 100x gap against the CA's
+// figure for them to settle.
 const PRICE_FIELDS = ["OFDY908102", "OFDY000020", "OFDY908005"] as const;
 const DATE_FIELD = "OFDY000021";
 

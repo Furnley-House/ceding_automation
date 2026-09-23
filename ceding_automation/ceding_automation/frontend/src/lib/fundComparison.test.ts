@@ -195,3 +195,44 @@ describe("evaluateGate", () => {
     expect(evaluateGate([red]).satisfied).toBe(true);
   });
 });
+
+// UK funds are quoted in pounds or pence depending on the provider and FE
+// reports both as "GBP", so a 100x gap is a unit difference far more often
+// than it is a wrong figure. Naming it saves the CA from comparing 2.33 with
+// 233.46 and guessing.
+describe("scale differences", () => {
+  const priceNote = (row: FundLine) => field(row, "price").note;
+
+  it("names a pence-against-pounds price difference", () => {
+    const row = line({ pricePerUnit: "2.334637", resolvedUnitPrice: "233.4637" });
+    expect(field(row, "price").status).toBe("differs");
+    expect(priceNote(row)).toMatch(/pence/i);
+    expect(priceNote(row)).toMatch(/100x smaller/i);
+  });
+
+  it("names the difference the other way round too", () => {
+    const row = line({ pricePerUnit: "233.4637", resolvedUnitPrice: "2.334637" });
+    expect(priceNote(row)).toMatch(/100x larger/i);
+  });
+
+  it("says nothing when a difference is not a clean 100x", () => {
+    const row = line({ pricePerUnit: "3.90", resolvedUnitPrice: "4.2237" });
+    expect(field(row, "price").status).toBe("differs");
+    expect(priceNote(row)).toBeUndefined();
+  });
+
+  it("does not claim a scale problem when the two agree", () => {
+    expect(priceNote(line())).toBeUndefined();
+  });
+
+  it("names a percent-against-fraction charge difference", () => {
+    const row = line({ ocf: "0.0075", resolvedOcf: "0.75" });
+    expect(field(row, "ocf").note).toMatch(/fraction/i);
+  });
+
+  it("does not divide by zero looking for a scale factor", () => {
+    const row = line({ pricePerUnit: "0", resolvedUnitPrice: "4.2237" });
+    expect(() => compareFundLine(row)).not.toThrow();
+    expect(priceNote(row)).toBeUndefined();
+  });
+});

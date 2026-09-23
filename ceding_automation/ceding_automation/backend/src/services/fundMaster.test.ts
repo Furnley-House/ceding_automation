@@ -20,8 +20,8 @@ const row = (over: Record<string, unknown> = {}) => ({
   isin: "GB00B4W9CK61",
   citi_code: "0SVM",
   fund_name: "Aviva Pen My Future Focus Growth Pn",
-  ongoing_charges: "0.7500",
-  tx_costs: "0.0900",
+  ongoing_charges: "0.007500", // fractions in the table; 0.75% in the world
+  tx_costs: "0.000900",
   ...over,
 });
 
@@ -187,5 +187,40 @@ describe("read-only enforcement", () => {
     expect(clientQuery).toHaveBeenCalledWith(
       "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
     );
+  });
+});
+
+// The fund master stores charges as decimal fractions; ceding and the Zoho
+// subform use percent. A missed conversion is a 100x error in a figure that
+// reaches CRM, so the scale is pinned here rather than trusted to a comment.
+describe("charge scale", () => {
+  it("converts a fraction to a percentage", async () => {
+    // Vanguard LifeStrategy publishes 0.22%; the table holds 0.002000.
+    queryMock.mockResolvedValueOnce({
+      rows: [row({ isin: "GB00B3ZHN960", ongoing_charges: "0.002000" })],
+    });
+    const index = await lookupFunds({ isins: ["GB00B3ZHN960"], sedols: [], citiCodes: [] });
+    expect(index.byIsin.get("GB00B3ZHN960")!.ocf).toBe(0.2);
+  });
+
+  it("does not leave binary floating-point dust in a charge", async () => {
+    // 0.0077 * 100 is 0.7699999999999999 unrounded.
+    queryMock.mockResolvedValueOnce({ rows: [row({ ongoing_charges: "0.007700" })] });
+    const index = await lookupFunds({ isins: ["GB00B4W9CK61"], sedols: [], citiCodes: [] });
+    expect(index.byIsin.get("GB00B4W9CK61")!.ocf).toBe(0.77);
+  });
+
+  // Negative ex-ante transaction costs are real — the EMT methodology nets
+  // slippage, and 1,344 rows in the table are below zero.
+  it("keeps a negative transaction cost", async () => {
+    queryMock.mockResolvedValueOnce({ rows: [row({ tx_costs: "-0.001841" })] });
+    const index = await lookupFunds({ isins: ["GB00B4W9CK61"], sedols: [], citiCodes: [] });
+    expect(index.byIsin.get("GB00B4W9CK61")!.transactionCosts).toBe(-0.1841);
+  });
+
+  it("leaves a zero charge as zero rather than dropping it", async () => {
+    queryMock.mockResolvedValueOnce({ rows: [row({ ongoing_charges: "0.000000" })] });
+    const index = await lookupFunds({ isins: ["GB00B4W9CK61"], sedols: [], citiCodes: [] });
+    expect(index.byIsin.get("GB00B4W9CK61")!.ocf).toBe(0);
   });
 });

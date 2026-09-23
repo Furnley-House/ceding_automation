@@ -142,11 +142,19 @@ function FieldRow({
   const differs = comparison.status === "differs";
   return (
     <tr className={differs ? "bg-warning/5" : ""}>
-      <td className="px-3 py-1.5 text-muted-foreground w-[150px]">
+      <td className="px-3 py-1.5 text-muted-foreground w-[150px] align-top">
         <span className="inline-flex items-center gap-1.5">
           {differs && <AlertTriangle className="h-3 w-3 text-warning shrink-0" />}
           {comparison.label}
         </span>
+        {/* A 100x gap is almost always pence-vs-pounds, not a wrong figure.
+            Saying so turns "2.33 against 233.46" into a decision the CA can
+            make in a second. */}
+        {comparison.note && (
+          <p className="text-[10px] text-muted-foreground italic mt-0.5 leading-snug">
+            {comparison.note}
+          </p>
+        )}
       </td>
       <td
         className={`px-3 py-1.5 ${

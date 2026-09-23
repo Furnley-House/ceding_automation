@@ -39,6 +39,19 @@ export interface FundMasterRow {
   transactionCosts: number | null;
 }
 
+// The fund master stores charges as DECIMAL FRACTIONS; ceding's checklist and
+// the Zoho subform both use PERCENT. Converted here, at the boundary, so
+// everything downstream speaks one scale.
+//
+// Evidence, not assumption: Vanguard LifeStrategy (GB00B3ZHN960) publishes an
+// OCF of 0.22% and the table holds 0.002000. Across all 65,348 populated rows
+// the maximum is 0.12 and not one value exceeds 1 — impossible for a column
+// of percentages, where a typical active fund would read 0.75 to 1.50.
+//
+// Getting this wrong is a 100x error in a figure that reaches CRM, so it is
+// covered by a test rather than left to this comment.
+const CHARGE_FRACTION_TO_PERCENT = 100;
+
 /**
  * The same row reachable by whichever identifier the CA happened to type.
  * Built once per case so a holding is matched in memory rather than by a
@@ -131,6 +144,23 @@ function toNumber(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Fraction -> percent, rounded to 4dp.
+ *
+ * The rounding is there because 0.0077 * 100 is 0.7699999999999999 in binary
+ * floating point, and a charge that renders as 0.77% on one screen and
+ * 0.7699999999999999% on another undermines the whole point of showing the CA
+ * two figures to compare. 4dp is well inside anything a charge is quoted to.
+ *
+ * Negative transaction costs are real — the EMT ex-ante methodology nets
+ * slippage and 1,344 rows in the table are below zero — so they are kept.
+ */
+function toPercent(v: unknown): number | null {
+  const n = toNumber(v);
+  if (n === null) return null;
+  return Math.round(n * CHARGE_FRACTION_TO_PERCENT * 10_000) / 10_000;
+}
+
 // One statement for a whole case, covering all three identifier types.
 //
 // The SEDOL arm exploits the construction of a GB ISIN: GB00 + the 7-char
@@ -183,8 +213,8 @@ export async function lookupFunds(keys: LookupKeys): Promise<FundMasterIndex> {
       isin,
       citiCode: raw.citi_code ? String(raw.citi_code).toUpperCase() : null,
       fundName: String(raw.fund_name ?? "").trim(),
-      ocf: toNumber(raw.ongoing_charges),
-      transactionCosts: toNumber(raw.tx_costs),
+      ocf: toPercent(raw.ongoing_charges),
+      transactionCosts: toPercent(raw.tx_costs),
     };
 
     empty.byIsin.set(isin, row);
