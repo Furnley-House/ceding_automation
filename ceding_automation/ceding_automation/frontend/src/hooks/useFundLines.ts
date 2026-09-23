@@ -22,6 +22,42 @@ export interface FundLine {
   confidence: string;
   createdAt: string;
   updatedAt: string;
+
+  // ── Stage-6 verification ────────────────────────────────────────────────
+  // Written by POST /fund-lines/verify. Null on every row until it has run,
+  // and cleared again if the CA edits the identifier, because a resolved
+  // fund that was matched from a different identifier is worse than none.
+  /** The ISIN the identifier resolved to — matched directly or via a GB SEDOL. */
+  resolvedIsin: string | null;
+  resolvedFundName: string | null;
+  resolvedUnitPrice: string | null;   // Decimal serialised as string
+  resolvedPriceDate: string | null;
+  resolvedOcf: string | null;
+  resolvedTxCost: string | null;
+  verifiedAt: string | null;
+  /** AMBER = name and price both resolved; RED = one or both did not. */
+  holdingRag: "RED" | "AMBER" | null;
+  fundNameSource: "CEDING" | "LOOKUP" | null;
+  priceSource: "CEDING" | "LOOKUP" | null;
+  ocfSource: "CEDING" | "LOOKUP" | null;
+  txCostSource: "CEDING" | "LOOKUP" | null;
+}
+
+export interface VerificationSummary {
+  caseId: string;
+  total: number;
+  checked: number;
+  amber: number;
+  red: number;
+  skipped: number;
+}
+
+/** Which figure gets pushed to CRM for each field of a holding. */
+export interface SourceChoice {
+  fundNameSource?: "CEDING" | "LOOKUP";
+  priceSource?: "CEDING" | "LOOKUP";
+  ocfSource?: "CEDING" | "LOOKUP";
+  txCostSource?: "CEDING" | "LOOKUP";
 }
 
 export interface FundLineSummary {
@@ -101,5 +137,36 @@ export function useFundLines(caseId: string) {
     await refresh();
   };
 
-  return { rows, summary, loading, error, refresh, addRow, updateRow, deleteRow };
+  // Resolve every holding against the fund master and FE Fund Info. The
+  // response already carries the refreshed rows, so this sets them directly
+  // rather than round-tripping the list again.
+  const verify = async (): Promise<VerificationSummary> => {
+    const res = await api.post(`/cases/${caseId}/fund-lines/verify`);
+    const data = res.data as { summary: VerificationSummary; fundLines?: FundLine[] };
+    if (data.fundLines) setRows(data.fundLines);
+    else await refresh();
+    return data.summary;
+  };
+
+  // Record which figure the CA wants carried into CRM for one field. Patches
+  // the single row in place — re-fetching the whole table would scroll the
+  // panel out from under them mid-decision.
+  const setSource = async (lineId: string, choice: SourceChoice) => {
+    const res = await api.patch(`/cases/${caseId}/fund-lines/${lineId}/source`, choice);
+    const updated = res.data as FundLine;
+    setRows((prev) => prev.map((r) => (r.id === lineId ? { ...r, ...updated } : r)));
+  };
+
+  return {
+    rows,
+    summary,
+    loading,
+    error,
+    refresh,
+    addRow,
+    updateRow,
+    deleteRow,
+    verify,
+    setSource,
+  };
 }

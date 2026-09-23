@@ -24,6 +24,8 @@ import { ApprovalWorkspace } from "./ApprovalWorkspace";
 import { ExportWorkspace } from "./ExportWorkspace";
 import { CompleteWorkspace } from "./CompleteWorkspace";
 import { FundDetailsTable } from "./FundDetailsTable";
+import { FundVerificationPanel } from "./FundVerificationPanel";
+import { evaluateGate } from "@/lib/fundComparison";
 import { useDocuments } from "@/hooks/useDocuments";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -303,8 +305,23 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
   // Fund Details rolls into the totals alongside the scalar fields so the
   // chip counters agree with Stage 4 and so an empty Fund Details table
   // doesn't read as "All filled".
-  const { rows: fundLines } = useFundLines(caseItem.id);
+  const {
+    rows: fundLines,
+    loading: fundLinesLoading,
+    verify: verifyFundLines,
+    setSource: setFundLineSource,
+  } = useFundLines(caseItem.id);
   const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
+
+  // Stage 6 is where the fund figures are signed off, so it is the last point
+  // at which they can be checked against the fund master and FE Fund Info —
+  // export pushes what is recorded here and never looks them up again. A case
+  // with no holdings has nothing to check and is never held up by this.
+  const fundGate = useMemo(() => evaluateGate(fundLines), [fundLines]);
+  // Set when the environment has no verification configured. A deployment
+  // problem must not strand a case, so the gate lifts rather than trapping it.
+  const [verificationUnavailable, setVerificationUnavailable] = useState(false);
+  const canSend = fundGate.satisfied || verificationUnavailable;
 
   const totals = useMemo(() => {
     const fieldTotal = visibleFields.length;
@@ -561,9 +578,52 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
             CA can still edit it back on Stage 4 if anything needs a tweak. */}
         <FundDetailsTable caseId={caseItem.id} readOnly />
 
-        {/* Send for approval — always visible, button enabled even when
-            incomplete so CA can hand off mid-flight (paraplanner will see
-            the gaps and either ask the CA to fill them or send them back). */}
+        {/* Check the holdings against the fund master + FE Fund Info, and
+            record which figure goes to CRM where the two disagree. */}
+        <FundVerificationPanel
+          rows={fundLines}
+          loading={fundLinesLoading}
+          onVerify={verifyFundLines}
+          onChooseSource={setFundLineSource}
+          canEdit={isCA || isAdmin}
+          onUnavailable={() => setVerificationUnavailable(true)}
+        />
+
+        {/* Send for approval — a missing checklist FIELD does not block the
+            hand-off (the paraplanner sees the gaps and can send them back),
+            but unverified fund figures do: those get pushed to CRM, and
+            nobody downstream re-checks them. */}
+        {!canSend && (
+          <div className="rounded-md border border-warning/40 bg-warning/10 p-3 flex items-start gap-3">
+            <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-foreground">
+                Verify the fund details before sending
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {fundGate.unverified} of {fundGate.total} holding
+                {fundGate.total === 1 ? "" : "s"} {fundGate.unverified === 1 ? "has" : "have"} not
+                been checked against the fund master and FE Fund Info. These figures go straight
+                to CRM on export and nobody checks them again — use{" "}
+                <strong className="text-foreground">Verify fund details</strong> above.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {canSend && fundGate.disagreements > 0 && (
+          <div className="rounded-md border border-border bg-muted/20 p-3 flex items-start gap-3">
+            <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+            <p className="text-xs text-muted-foreground">
+              <strong className="text-foreground">
+                {fundGate.disagreements} holding{fundGate.disagreements === 1 ? "" : "s"}
+              </strong>{" "}
+              still differ from the reference data. That is allowed — the figure you picked on
+              each is what will be exported.
+            </p>
+          </div>
+        )}
+
         <div className="rounded-md border border-border bg-muted/30 p-4">
           <div className="flex items-start gap-3">
             {totals.complete ? (
@@ -608,9 +668,14 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
             </div>
             <Button
               onClick={() => sendMutation.mutate()}
-              disabled={sendMutation.isPending}
+              disabled={sendMutation.isPending || !canSend}
               variant={totals.complete ? "default" : "outline"}
               className="gap-2 shrink-0"
+              title={
+                canSend
+                  ? undefined
+                  : `Verify the fund details first — ${fundGate.unverified} of ${fundGate.total} holdings have not been checked.`
+              }
             >
               <Send className="h-4 w-4" />
               {sendMutation.isPending
