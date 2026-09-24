@@ -31,6 +31,9 @@ export interface FieldComparison {
   status: ComparisonStatus;
   /** What the CA put on the checklist, formatted for display. */
   cedingDisplay: string;
+  /** The same value unformatted, so an edit box opens on what is stored
+   *  rather than on "£1,376.78". */
+  cedingRaw: string;
   /** What the reference data returned, formatted for display. */
   lookupDisplay: string;
   /** Which figure is currently set to be pushed to CRM. */
@@ -219,6 +222,7 @@ export function compareFundLine(row: FundLine): RowComparison {
       label: "Fund name",
       status: nameStatus,
       cedingDisplay: row.fundName || "—",
+      cedingRaw: row.fundName ?? "",
       lookupDisplay: row.resolvedFundName || "—",
       ...resolveChoice(row.fundNameSource, nameStatus),
     },
@@ -227,6 +231,7 @@ export function compareFundLine(row: FundLine): RowComparison {
       label: "Unit price",
       status: priceStatus,
       cedingDisplay: fmtPrice(cedingPrice),
+      cedingRaw: row.pricePerUnit ?? "",
       lookupDisplay: fmtPrice(lookupPrice),
       ...resolveChoice(row.priceSource, priceStatus),
       note:
@@ -242,6 +247,7 @@ export function compareFundLine(row: FundLine): RowComparison {
       label: "OCF",
       status: ocfStatus,
       cedingDisplay: fmtPct(cedingOcf),
+      cedingRaw: row.ocf ?? "",
       lookupDisplay: fmtPct(lookupOcf),
       ...resolveChoice(row.ocfSource, ocfStatus),
       note:
@@ -257,6 +263,7 @@ export function compareFundLine(row: FundLine): RowComparison {
       label: "Transaction costs",
       status: txStatus,
       cedingDisplay: fmtPct(cedingTx),
+      cedingRaw: row.transactionCosts ?? "",
       lookupDisplay: fmtPct(lookupTx),
       ...resolveChoice(row.txCostSource, txStatus),
       note:
@@ -275,6 +282,25 @@ export function compareFundLine(row: FundLine): RowComparison {
     verified: Boolean(row.verifiedAt),
   };
 }
+
+/**
+ * Maps a comparison field onto the fund-line column an inline edit writes to.
+ *
+ * Only these four are editable from stage 6. The identifier deliberately is
+ * not: changing it clears the row's verification server-side, which would
+ * silently re-block the send gate from a screen that looks like it is just
+ * correcting a typo. That edit belongs on stage 4, where the consequence is
+ * obvious.
+ */
+export const EDIT_FIELD_KEY: Record<
+  ComparisonField,
+  "fundName" | "pricePerUnit" | "ocf" | "transactionCosts"
+> = {
+  fundName: "fundName",
+  price: "pricePerUnit",
+  ocf: "ocf",
+  txCost: "transactionCosts",
+};
 
 /**
  * Maps a comparison field onto the PATCH body key the API expects. Typed

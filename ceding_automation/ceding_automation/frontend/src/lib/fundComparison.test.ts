@@ -6,6 +6,7 @@ import {
   normaliseName,
   pricesAgree,
   chargesAgree,
+  EDIT_FIELD_KEY,
 } from "./fundComparison";
 
 // Shaped from live rows (Sept 2026). Only the fields the comparison reads
@@ -237,5 +238,37 @@ describe("scale differences", () => {
     const row = line({ pricePerUnit: "0", resolvedUnitPrice: "4.2237" });
     expect(() => compareFundLine(row)).not.toThrow();
     expect(priceNote(row)).toBeUndefined();
+  });
+});
+
+// The checklist column is editable in place on stage 6. The edit box has to
+// open on what is stored, not on the formatted display, or a CA correcting
+// "£1,376.7774" would be typing over a currency symbol and a thousands comma.
+describe("inline editing", () => {
+  it("exposes the raw stored value alongside the formatted one", () => {
+    const row = line({ pricePerUnit: "1376.7774" });
+    const price = field(row, "price");
+    expect(price.cedingDisplay).toBe("£1,376.7774");
+    expect(price.cedingRaw).toBe("1376.7774");
+  });
+
+  it("gives an empty raw value for a field the CA left blank", () => {
+    expect(field(line({ ocf: null }), "ocf").cedingRaw).toBe("");
+  });
+
+  it("maps each editable field onto its fund-line column", () => {
+    expect(EDIT_FIELD_KEY.fundName).toBe("fundName");
+    expect(EDIT_FIELD_KEY.price).toBe("pricePerUnit");
+    expect(EDIT_FIELD_KEY.ocf).toBe("ocf");
+    expect(EDIT_FIELD_KEY.txCost).toBe("transactionCosts");
+  });
+
+  // Changing the identifier clears verification server-side. Offering that
+  // edit here would silently re-block the send gate from a screen that looks
+  // like it is just fixing a typo.
+  it("offers no edit for the identifier", () => {
+    const fields = compareFundLine(line()).fields.map((f) => f.field);
+    expect(fields).not.toContain("isinSedolCiti");
+    expect(Object.keys(EDIT_FIELD_KEY)).toHaveLength(4);
   });
 });

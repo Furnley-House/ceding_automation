@@ -310,6 +310,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
     loading: fundLinesLoading,
     verify: verifyFundLines,
     setSource: setFundLineSource,
+    updateRow: updateFundLine,
   } = useFundLines(caseItem.id);
   const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
 
@@ -585,6 +586,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
           loading={fundLinesLoading}
           onVerify={verifyFundLines}
           onChooseSource={setFundLineSource}
+          onEditValue={updateFundLine}
           canEdit={isCA || isAdmin}
           onUnavailable={() => setVerificationUnavailable(true)}
         />

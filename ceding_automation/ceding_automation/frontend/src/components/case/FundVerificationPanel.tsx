@@ -8,7 +8,7 @@
 // here and never looks the figures up again, because the CA signs these off
 // at stage 6 and CRM has to carry the numbers somebody actually approved.
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -20,11 +20,13 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import type { FundLine, SourceChoice, VerificationSummary } from "@/hooks/useFundLines";
 import {
   compareFundLine,
   SOURCE_FIELD_KEY,
+  EDIT_FIELD_KEY,
   type ComparisonField,
   type FieldComparison,
   type ValueSource,
@@ -37,6 +39,8 @@ interface Props {
   onVerify: () => Promise<VerificationSummary>;
   /** Records which figure to carry forward for one field of one holding. */
   onChooseSource: (lineId: string, choice: SourceChoice) => Promise<void>;
+  /** Corrects a checklist value in place, without leaving stage 6. */
+  onEditValue: (lineId: string, patch: Record<string, string | null>) => Promise<void>;
   /** CA / admin can act; everyone else sees the result read-only. */
   canEdit: boolean;
   /**
@@ -130,14 +134,104 @@ function SourceToggle({
   );
 }
 
+/**
+ * The checklist column, click-to-edit.
+ *
+ * Same interaction as the Fund Details grid on stage 4 — click, type, Enter
+ * saves and Escape cancels — because a CA who spots a mistyped price while
+ * reviewing should not have to go back two stages to fix it.
+ *
+ * Only the checklist side is editable. The reference column is what the fund
+ * master and FE returned; editing that would be inventing data.
+ */
+function CedingCell({
+  comparison,
+  editable,
+  saving,
+  onSave,
+}: {
+  comparison: FieldComparison;
+  editable: boolean;
+  saving: boolean;
+  onSave: (raw: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const committing = useRef(false);
+
+  const start = () => {
+    if (!editable || saving) return;
+    setValue(comparison.cedingRaw ?? "");
+    setEditing(true);
+  };
+
+  const commit = async () => {
+    if (committing.current) return;
+    if (value === (comparison.cedingRaw ?? "")) {
+      setEditing(false);
+      return;
+    }
+    committing.current = true;
+    try {
+      await onSave(value);
+      setEditing(false);
+    } finally {
+      committing.current = false;
+    }
+  };
+
+  if (editing) {
+    return (
+      <Input
+        autoFocus
+        type={comparison.field === "fundName" ? "text" : "number"}
+        step={comparison.field === "fundName" ? undefined : "0.0001"}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setEditing(false);
+          }
+        }}
+        disabled={saving}
+        className="h-6 text-[11px] py-0"
+      />
+    );
+  }
+
+  if (!editable) return <span>{comparison.cedingDisplay}</span>;
+
+  return (
+    <button
+      type="button"
+      onClick={start}
+      title="Click to edit"
+      className="w-full min-h-[20px] flex items-center text-left cursor-text hover:bg-muted/50 rounded px-1 -mx-1 transition-colors"
+    >
+      {comparison.cedingDisplay}
+    </button>
+  );
+}
+
 function FieldRow({
   comparison,
   disabled,
+  canEdit,
+  saving,
   onPick,
+  onSave,
 }: {
   comparison: FieldComparison;
   disabled: boolean;
+  canEdit: boolean;
+  saving: boolean;
   onPick: (choice: ValueSource) => void;
+  onSave: (raw: string) => Promise<void>;
 }) {
   const differs = comparison.status === "differs";
   return (
@@ -161,7 +255,12 @@ function FieldRow({
           comparison.chosen === "CEDING" ? "font-semibold text-foreground" : "text-muted-foreground"
         }`}
       >
-        {comparison.cedingDisplay}
+        <CedingCell
+          comparison={comparison}
+          editable={canEdit}
+          saving={saving}
+          onSave={onSave}
+        />
       </td>
       <td
         className={`px-3 py-1.5 ${
@@ -182,6 +281,7 @@ export function FundVerificationPanel({
   loading,
   onVerify,
   onChooseSource,
+  onEditValue,
   canEdit,
   onUnavailable,
 }: Props) {
@@ -244,6 +344,24 @@ export function FundVerificationPanel({
       }
     } finally {
       setRunning(false);
+    }
+  };
+
+  const edit = async (row: FundLine, field: ComparisonField, raw: string) => {
+    const key = `${row.id}:${field}`;
+    setSavingKey(key);
+    try {
+      // Empty clears the field rather than storing "", so the comparison sees
+      // "the CA has no figure" instead of a blank string.
+      const trimmed = raw.trim();
+      await onEditValue(row.id, { [EDIT_FIELD_KEY[field]]: trimmed === "" ? null : trimmed });
+      toast.success("Saved");
+    } catch (err) {
+      toast.error("Could not save that change", {
+        description: messageOf(err, "Please try again."),
+      });
+    } finally {
+      setSavingKey(null);
     }
   };
 
@@ -421,7 +539,10 @@ export function FundVerificationPanel({
                             key={f.field}
                             comparison={f}
                             disabled={!canEdit || savingKey === `${row.id}:${f.field}` || running}
+                            canEdit={canEdit}
+                            saving={savingKey === `${row.id}:${f.field}`}
                             onPick={(choice) => void pick(row, f.field, choice)}
+                            onSave={(raw) => edit(row, f.field, raw)}
                           />
                         ))}
                       </tbody>
