@@ -27,7 +27,11 @@ import {
   readExistingHoldings,
   HOLDINGS_SUBFORM,
   type HoldingRow,
+  type MergeResult,
 } from "../services/holdingsSubform";
+
+/** What the receipt reports about the Holdings subform. */
+type HoldingsOutcome = Pick<MergeResult, "added" | "updated" | "kept" | "skipped">;
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -261,7 +265,7 @@ router.post(
       orderBy: [{ isWithProfits: "asc" }, { displayOrder: "asc" }, { createdAt: "asc" }],
     });
     const holdingRows: HoldingRow[] = fundLines.map(buildHoldingRow);
-    let holdingsResult: { added: number; kept: number; skipped: string[] } | null = null;
+    let holdingsResult: HoldingsOutcome | null = null;
     let holdingsError: string | null = null;
 
     // 2a. Resolve which Plans record to update.
@@ -375,16 +379,17 @@ router.post(
           // Held until the PUT returns. Reporting "added: 2" for a write that
           // then failed sends the CA to CRM looking for rows that were never
           // created.
-          let pending: { added: number; kept: number; skipped: string[] } | null = null;
+          let pending: HoldingsOutcome | null = null;
           try {
             const plan = await findPlanRecordById(id);
             const existing = plan ? readExistingHoldings(plan.record) : [];
             const merged = mergeHoldings(existing, holdingRows);
-            if (merged.added > 0 || merged.kept > 0) {
+            if (merged.rows.length > 0) {
               payload[HOLDINGS_SUBFORM] = merged.rows;
             }
             pending = {
               added: merged.added,
+              updated: merged.updated,
               kept: merged.kept,
               skipped: merged.skipped,
             };

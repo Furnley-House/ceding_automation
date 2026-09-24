@@ -169,15 +169,47 @@ describe("mergeHoldings", () => {
     expect(result.rows[2]).not.toHaveProperty("id"); // new rows carry no id
   });
 
-  // The CA may have corrected a row in CRM; this export is not the authority
-  // on a row somebody else has touched.
-  it("leaves a holding already on the Plan exactly as it is", () => {
+  // Stage 6 is where the CA settles which figure is right. An export that
+  // only appends means a re-check, a source change or a corrected price never
+  // reaches CRM after the first push.
+  it("refreshes a holding already on the Plan, in place", () => {
     const incoming = [{ isin: "GB0000026087", security_name: "Phoenix AL International Pn", OCF: 9.9 }];
     const result = mergeHoldings(existing, incoming);
     expect(result.added).toBe(0);
+    expect(result.updated).toBe(1);
     expect(result.rows).toHaveLength(2);
-    expect(result.rows[0]).not.toHaveProperty("OCF");
-    expect(result.skipped).toHaveLength(1);
+    // Same row — it keeps its id — carrying the new figure.
+    expect(result.rows[0]).toMatchObject({ id: "row-1", OCF: 9.9 });
+  });
+
+  // Our values win on the fields we populate; anything else a workflow or a
+  // person put on the row survives.
+  it("overlays our fields without discarding the rest of the row", () => {
+    const result = mergeHoldings(
+      [{ id: "row-1", isin: "GB1", security_name: "Old name", Asset_Class: "Equity", Weighting: 25 }],
+      [{ isin: "GB1", security_name: "New name", OCF: 1.08 }],
+    );
+    expect(result.rows[0]).toEqual({
+      id: "row-1",
+      isin: "GB1",
+      security_name: "New name",
+      Asset_Class: "Equity",
+      Weighting: 25,
+      OCF: 1.08,
+    });
+  });
+
+  // The manual row from the live test. Nothing to do with this case, so it is
+  // passed through exactly as found.
+  it("leaves a row this case does not own untouched", () => {
+    const result = mergeHoldings(
+      [{ id: "row-9", isin: "gfghh666", security_name: "gfg" }],
+      [{ isin: "GB1", security_name: "Ours" }],
+    );
+    expect(result.kept).toBe(1);
+    expect(result.updated).toBe(0);
+    expect(result.added).toBe(1);
+    expect(result.rows[0]).toEqual({ id: "row-9", isin: "gfghh666", security_name: "gfg" });
   });
 
   it("matches an existing row case-insensitively on the ISIN", () => {
@@ -186,6 +218,7 @@ describe("mergeHoldings", () => {
       [{ isin: "GB0000026087", security_name: "Phoenix" }],
     );
     expect(result.added).toBe(0);
+    expect(result.updated).toBe(1);
   });
 
   it("matches a row with no ISIN on the fund name", () => {
@@ -194,6 +227,23 @@ describe("mergeHoldings", () => {
       [{ security_name: "with profits fund" }],
     );
     expect(result.added).toBe(0);
+    expect(result.updated).toBe(1);
+  });
+
+  // The bug this replaced: a second export left the first export's figures in
+  // place, so a re-priced holding stayed stale in CRM for ever.
+  it("carries a re-priced holding through on a second export", () => {
+    const firstExport = mergeHoldings([], [
+      { isin: "GB0000011444", security_name: "Institutional AUT", gbp_valuation: 13.77 },
+    ]);
+    const asStoredInCrm = firstExport.rows.map((r, i) => ({ ...r, id: `row-${i}` }));
+
+    const secondExport = mergeHoldings(asStoredInCrm, [
+      { isin: "GB0000011444", security_name: "Institutional AUT", gbp_valuation: 13.66 },
+    ]);
+    expect(secondExport.rows).toHaveLength(1);
+    expect(secondExport.rows[0].gbp_valuation).toBe(13.66);
+    expect(secondExport.rows[0].id).toBe("row-0");
   });
 
   it("strips the fields Zoho will not take back on an existing row", () => {

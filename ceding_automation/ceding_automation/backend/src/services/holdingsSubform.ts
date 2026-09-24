@@ -170,9 +170,13 @@ function echoable(row: HoldingRow): HoldingRow {
 
 export interface MergeResult {
   rows: HoldingRow[];
+  /** Holdings that were not on the Plan before. */
   added: number;
+  /** Holdings we own that were already there and have been refreshed. */
+  updated: number;
+  /** Rows on the Plan that are nothing to do with this case, left alone. */
   kept: number;
-  /** Holdings already on the Plan, so not written again. */
+  /** Incoming rows with nothing to identify them by, so not written. */
   skipped: string[];
 }
 
@@ -180,42 +184,73 @@ export interface MergeResult {
  * Merge our holdings into the Plan's existing subform.
  *
  * A PUT REPLACES THE WHOLE SUBFORM — any row left out of the payload is
- * deleted. So every existing row is echoed back with its id, and ours are
- * appended after them. A holding already on the Plan is left exactly as it
- * is rather than updated: the CA may have corrected it in CRM, and this
- * export is not the authority on a row somebody else has touched.
+ * deleted — so every existing row is echoed back with its id, whether or not
+ * this case knows anything about it.
+ *
+ * A holding this case DOES own is refreshed in place rather than skipped.
+ * Stage 6 is where the CA settles which figure is right, and an export that
+ * only ever appends means a re-check, a source change or a corrected price
+ * never reaches CRM after the first push — the row just sits there carrying
+ * whatever the first export happened to send.
+ *
+ * The update is a field-level overlay, not a replacement: our values win on
+ * the fields we populate, and anything else on the row (Asset_Class,
+ * Weighting, whatever a workflow put there) is preserved. Rows we cannot
+ * match at all — someone else's holdings, a manually added row — are passed
+ * through untouched.
+ *
+ * The trade-off, stated plainly: a figure edited directly in CRM on a holding
+ * this case owns will be overwritten by the next export. That is the right way
+ * round, because the checklist is where the holding is reviewed and signed
+ * off, but it does mean corrections belong on the checklist and not in CRM.
  */
 export function mergeHoldings(existing: HoldingRow[], incoming: HoldingRow[]): MergeResult {
-  const kept = existing.map(echoable);
-  const seen = new Set<string>();
-  for (const row of existing) {
-    const key = holdingKey(row);
-    if (key) seen.add(key);
-  }
-
-  const added: HoldingRow[] = [];
+  // Index what we are pushing, so each existing row can find its counterpart.
+  const byKey = new Map<string, HoldingRow>();
   const skipped: string[] = [];
-
   for (const row of incoming) {
     const key = holdingKey(row);
-    // A row with nothing to identify it cannot be deduped, and appending it
-    // blindly would duplicate it on every export. Skip it and say so.
+    // Nothing to identify it by: it can neither be matched to an existing row
+    // nor safely appended, since appending would duplicate it every export.
     if (!key) {
       skipped.push(String(row.security_name ?? "(unnamed holding)"));
       continue;
     }
-    if (seen.has(key)) {
-      skipped.push(String(row.security_name ?? key));
-      continue;
+    // Two checklist lines for the same fund — the first wins, as before.
+    if (!byKey.has(key)) byKey.set(key, row);
+  }
+
+  const rows: HoldingRow[] = [];
+  const matched = new Set<string>();
+  let updated = 0;
+  let kept = 0;
+
+  for (const row of existing) {
+    const base = echoable(row);
+    const key = holdingKey(row);
+    const ours = key ? byKey.get(key) : undefined;
+    if (ours) {
+      matched.add(key!);
+      updated += 1;
+      // Our fields overlay theirs; the id keeps it the same row.
+      rows.push({ ...base, ...ours });
+    } else {
+      kept += 1;
+      rows.push(base);
     }
-    seen.add(key);
+  }
+
+  const added: HoldingRow[] = [];
+  for (const [key, row] of byKey) {
+    if (matched.has(key)) continue;
     added.push(row);
   }
 
   return {
-    rows: [...kept, ...added],
+    rows: [...rows, ...added],
     added: added.length,
-    kept: kept.length,
+    updated,
+    kept,
     skipped,
   };
 }
