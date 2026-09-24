@@ -128,6 +128,17 @@ export function ChecklistField({
 
   const commitValue = () => {
     if (localValue === (state.value ?? "")) return;
+    // Silent-clear-on-blur guard. Blur fires on any focus loss including a
+    // distracted click on the page background, so writing null purely on
+    // "input is empty at blur" has silently destroyed populated fields 57
+    // times in prod between 2026-08 and 2026-09-23. Refuse the write and
+    // snap the input back to the stored value. Deliberate clears must go
+    // through an explicit action (retype, then confirm), not a blur.
+    const stored = (state.value ?? "").trim();
+    if (stored && !localValue) {
+      setLocalValue(state.value ?? "");
+      return;
+    }
     const isManualOverride = canEditChecklist || canApprove;
     onChange({
       value: localValue || null,
