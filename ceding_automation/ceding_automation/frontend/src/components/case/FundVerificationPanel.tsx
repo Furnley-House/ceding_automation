@@ -15,6 +15,7 @@ import {
   ChevronDown,
   ChevronRight,
   Loader2,
+  Pencil,
   RefreshCw,
   ShieldCheck,
   ShieldAlert,
@@ -206,15 +207,28 @@ function CedingCell({
 
   if (!editable) return <span>{comparison.cedingDisplay}</span>;
 
+  // An explicit Edit link, not just a clickable cell. The checklist fields
+  // above this panel show one, and a hover-only affordance is invisible to
+  // anyone who does not already know it is there.
   return (
-    <button
-      type="button"
-      onClick={start}
-      title="Click to edit"
-      className="w-full min-h-[20px] flex items-center text-left cursor-text hover:bg-muted/50 rounded px-1 -mx-1 transition-colors"
-    >
-      {comparison.cedingDisplay}
-    </button>
+    <span className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={start}
+        title="Click to edit"
+        className="min-h-[20px] flex items-center text-left cursor-text hover:bg-muted/50 rounded px-1 -mx-1 transition-colors"
+      >
+        {comparison.cedingDisplay}
+      </button>
+      <button
+        type="button"
+        onClick={start}
+        className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-teal hover:underline shrink-0"
+      >
+        <Pencil className="h-2.5 w-2.5" />
+        Edit
+      </button>
+    </span>
   );
 }
 
