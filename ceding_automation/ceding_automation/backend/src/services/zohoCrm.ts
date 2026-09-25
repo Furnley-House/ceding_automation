@@ -58,11 +58,25 @@ export function buildAuthorizeUrl(redirectUri: string): string {
     //   - tasks.ALL → existing CRM-task import flow
     //   - settings.fields.READ / users.READ → admin lookups
     //   - WorkDrive.* → upload exports + recordings to the ceding folder
+    //   - ZohoCreator.form.CREATE → enqueue a row on the Meeting_Recordings
+    //     form that Palindrome sweeps (see services/palindrome.ts)
+    //   - ZohoCreator.report.READ → read Processing Status / Palindrome Code
+    //     back off that row while polling for a finished transcript
+    //
+    // NOTE: scopes are baked into the refresh token when it is minted. Adding
+    // to this list has no effect until someone re-runs /api/crm/oauth/authorize
+    // and replaces ZOHO_REFRESH_TOKEN with the new value.
     scope:
-      'ZohoCRM.modules.ALL,ZohoCRM.modules.tasks.ALL,ZohoCRM.modules.contacts.READ,ZohoCRM.settings.fields.READ,ZohoCRM.users.READ,WorkDrive.files.ALL,WorkDrive.team.READ',
+      'ZohoCRM.modules.ALL,ZohoCRM.modules.tasks.ALL,ZohoCRM.modules.contacts.READ,ZohoCRM.settings.fields.READ,ZohoCRM.users.READ,WorkDrive.files.ALL,WorkDrive.team.READ,ZohoCreator.form.CREATE,ZohoCreator.report.READ',
     client_id: process.env.ZOHO_CLIENT_ID!,
     response_type: 'code',
     access_type: 'offline',
+    // Force the consent screen even when this Zoho user has already approved
+    // the app. Without it Zoho treats a repeat authorise as already-granted
+    // and returns an access token with NO refresh_token — which is how a
+    // token ends up stuck on whatever narrow scope set it was first minted
+    // with, silently, while this function appears to request more.
+    prompt: 'consent',
     redirect_uri: redirectUri,
   });
   return `${accountsBase()}/oauth/v2/auth?${params.toString()}`;

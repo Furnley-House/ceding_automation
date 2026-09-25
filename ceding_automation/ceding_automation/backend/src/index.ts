@@ -22,7 +22,10 @@ import { crmRoutes } from "./routes/crm";
 import { callRoutes } from "./routes/calls";
 import { rcAuthRoutes } from "./routes/rcAuth";
 import { exportRoutes } from "./routes/export";
+import { publicRecordingRoutes } from "./routes/publicRecordings";
 import { startPoller } from "./services/aiBffPoller";
+import { startPalindromePoller } from "./services/palindromePoller";
+import { startRecordingWatcher } from "./services/recordingWatcher";
 
 const app = express();
 
@@ -92,6 +95,10 @@ app.use("/api/cases", callRoutes);
 app.use("/api/cases", exportRoutes);
 // Internal BFF write-back endpoints (X-Internal-Key auth, no human users).
 app.use("/api/documents", documentInternalRoutes);
+// Unauthenticated by design — Palindrome fetches call recordings from here
+// over the public internet using a signed, expiring, single-file token.
+// Auth is the token itself; see services/recordingLinks.ts.
+app.use("/api/public", publicRecordingRoutes);
 
 // ── 404 handler ──────────────────────────────────────────
 app.use((_req, res) => {
@@ -109,6 +116,14 @@ app.listen(PORT, () => {
   // Background poller is a safety net for missed BFF write-backs.
   // No-op when AI_VIA_BFF !== "true" or NODE_ENV === "test".
   startPoller();
+  // Palindrome has no callback at all, so for transcription this poller is
+  // the only completion path, not a safety net.
+  // No-op when TRANSCRIPT_VIA_PALINDROME !== "true" or NODE_ENV === "test".
+  startPalindromePoller();
+  // Picks up recordings dropped straight into a client's "Ceding Call
+  // Recordings" folder in WorkDrive, for CAs who file audio there rather than
+  // using the app. No-op unless WATCH_RECORDING_FOLDER="true".
+  startRecordingWatcher();
 });
 
 export default app;

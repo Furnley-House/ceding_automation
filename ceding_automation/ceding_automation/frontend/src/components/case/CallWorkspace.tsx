@@ -145,11 +145,337 @@ export function CallWorkspace({
   const [elapsedSec, setElapsedSec] = useState(0);
   const [transcript, setTranscript] = useState("");
 
+  // ── Palindrome transcription ──────────────────────────────────────────
+  // The CA picks the call recording; the backend puts it in the client's
+  // WorkDrive folder, triggers Palindrome, and a poller collects the
+  // transcript. We poll our own API — not Zoho — and drop the finished text
+  // into the same textarea the manual flow uses, so "Analyse & propose
+  // updates" works unchanged from there.
+  type PalPhase = "idle" | "uploading" | "waiting" | "done" | "failed";
+  const [palPhase, setPalPhase] = useState<PalPhase>("idle");
+  const [palTranscriptId, setPalTranscriptId] = useState<string | null>(null);
+  const [palMessage, setPalMessage] = useState<string | null>(null);
+  const [palWaitedSec, setPalWaitedSec] = useState(0);
+  const palPollRef = useRef<number | null>(null);
+  // Whether TRANSCRIPT_VIA_PALINDROME is on server-side. Decides which engine
+  // the Transcribe buttons use; when off they keep the Azure Speech path.
+  const [palEnabled, setPalEnabled] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get(`/cases/${caseId}/calls/palindrome-status`)
+      .then((r) => {
+        const d = r.data as { enabled?: boolean; configured?: boolean };
+        if (!cancelled) setPalEnabled(Boolean(d.enabled && d.configured));
+      })
+      .catch(() => {
+        // Probe failure just means we stay on Azure Speech.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [caseId]);
+
+  // Transcripts already stored against this case.
+  //
+  // Palindrome is asynchronous and the in-page poll only survives as long as
+  // the tab does. Without this, a transcript that arrived after the CA
+  // navigated away — or was submitted from anywhere other than this screen —
+  // sits in the database with no way to reach it. So on mount we look for
+  // finished ones and offer them.
+  interface StoredTranscript {
+    id: string;
+    source: string;
+    createdAt: string;
+    completedAt: string | null;
+    chars: number;
+    hasText: boolean;
+    palindromeStatus: string | null;
+  }
+  const [storedTranscripts, setStoredTranscripts] = useState<StoredTranscript[]>([]);
+
+  const refreshStoredTranscripts = async (): Promise<StoredTranscript[] | null> => {
+    try {
+      const r = await api.get(`/cases/${caseId}/calls/transcripts`);
+      // Server returns newest first; keep only ones that actually have text.
+      const all = r.data as StoredTranscript[];
+      // A row with no completedAt is a Palindrome job still running — that is
+      // what keeps the poll alive.
+      setHasPendingJob(all.some((t) => !t.completedAt));
+      const withText = all.filter((t) => t.hasText);
+      setStoredTranscripts(withText);
+      return withText;
+    } catch {
+      // Non-critical — the manual paste path still works.
+      return null;
+    }
+  };
+
+  // Keep watching for transcripts that land while this page is open.
+  //
+  // Palindrome takes minutes and jobs can be started from anywhere — the
+  // Transcribe buttons, a file dropped into WorkDrive, another tab. Loading
+  // only on mount meant a CA who submitted and waited here saw nothing until
+  // they refreshed.
+  //
+  // When a newer transcript appears we swap it in, but only if the editor
+  // still holds a stored transcript we put there (palTranscriptId is set) or
+  // is empty. Anything hand-typed or edited is left alone and the CA is told
+  // instead — losing someone's typing to a background poll would be worse
+  // than making them click.
+  const [newerTranscriptId, setNewerTranscriptId] = useState<string | null>(null);
+
+  // Only poll while something is actually in flight. The list endpoint tells
+  // us: a row with completedAt === null is a job still running. Once every
+  // job has settled there is nothing to wait for, so we stop rather than
+  // hitting the API every 30s for the rest of the session.
+  const [hasPendingJob, setHasPendingJob] = useState(false);
+
+  // Two cadences rather than one. Polling every 30s forever was wasteful, but
+  // stopping entirely meant a transcript submitted elsewhere — the folder
+  // watcher, another tab — never appeared without a manual refresh.
+  //
+  // Also re-check when the tab regains focus: a CA who starts a transcription
+  // and goes to do something else expects it waiting when they come back.
+  useEffect(() => {
+    const onFocus = () => void refreshStoredTranscripts();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseId]);
+
+  useEffect(() => {
+    const active = hasPendingJob || palPhase === "waiting";
+    const everyMs = active ? 15_000 : 90_000;
+
+    const id = window.setInterval(async () => {
+      const list = await refreshStoredTranscripts();
+      const newest = list?.[0];
+      if (!newest || newest.id === palTranscriptId) return;
+
+      const editorIsOurs = Boolean(palTranscriptId) || !transcript.trim();
+      if (editorIsOurs) {
+        try {
+          const r = await api.get(`/cases/${caseId}/calls/transcripts/${newest.id}`);
+          const text = (r.data as { rawText?: string }).rawText ?? "";
+          if (text) {
+            setTranscript(text);
+            setPalTranscriptId(newest.id);
+            setPalPhase("done");
+            setNewerTranscriptId(null);
+            toast.success("New transcript ready", {
+              description: "Loaded into the editor below.",
+            });
+          }
+        } catch {
+          /* try again next tick */
+        }
+      } else {
+        setNewerTranscriptId(newest.id);
+      }
+    }, everyMs);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseId, palTranscriptId, transcript, hasPendingJob, palPhase]);
+
+  // On first load, drop the most recent transcript straight into the editor.
+  // That is almost always the call the CA just made, so making them pick it
+  // out of a list is a step for nothing. Older ones stay listed below.
+  //
+  // Guarded on the editor being empty so we never overwrite something the CA
+  // has pasted or edited by hand.
+  const autoLoadedRef = useRef(false);
+  useEffect(() => {
+    autoLoadedRef.current = false;
+    void (async () => {
+      const list = await refreshStoredTranscripts();
+      if (autoLoadedRef.current) return;
+      const newest = list?.[0];
+      if (newest && !transcript.trim()) {
+        autoLoadedRef.current = true;
+        try {
+          const r = await api.get(`/cases/${caseId}/calls/transcripts/${newest.id}`);
+          const text = (r.data as { rawText?: string }).rawText ?? "";
+          if (text) {
+            setTranscript(text);
+            setPalPhase("done");
+            setPalTranscriptId(newest.id);
+          }
+        } catch {
+          // Leave it in the list for a manual load.
+        }
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseId]);
+
+  const loadStoredTranscript = async (id: string) => {
+    const t = toast.loading("Loading transcript…");
+    try {
+      const r = await api.get(`/cases/${caseId}/calls/transcripts/${id}`);
+      const text = (r.data as { rawText?: string }).rawText ?? "";
+      if (!text) {
+        toast.warning("That transcript is empty", { id: t });
+        return;
+      }
+      setTranscript(text);
+      setPhase("ended");
+      setPalPhase("done");
+      setPalTranscriptId(id);
+      toast.success("Transcript loaded", {
+        id: t,
+        description: "Review it below, then click Analyse & propose updates.",
+      });
+    } catch {
+      toast.error("Could not load transcript", { id: t });
+    }
+  };
+
   // ── RC Embeddable widget state ────────────────────────────────────────
   const [rcLoggedIn, setRcLoggedIn] = useState(false);
   const [rcTranscriptStatus, setRcTranscriptStatus] = useState<
     "idle" | "fetching" | "done" | "unavailable"
   >("idle");
+
+  // Stop polling when the component goes away, or a closed case keeps a
+  // timer alive against a transcript nobody is watching.
+  useEffect(() => {
+    return () => {
+      if (palPollRef.current) window.clearInterval(palPollRef.current);
+    };
+  }, []);
+
+  /**
+   * Watch one transcript row until the poller fills in rawText.
+   *
+   * Palindrome usually lands in 2–3 minutes. We give it 15 before calling it
+   * failed — long enough for a queue backlog (ceding shares the Creator form
+   * with the meeting pipeline), short enough that a CA isn't left staring at
+   * a spinner forever.
+   */
+  const watchPalindromeTranscript = (transcriptId: string) => {
+    if (palPollRef.current) window.clearInterval(palPollRef.current);
+    const startedAt = Date.now();
+    const LIMIT_MS = 15 * 60_000;
+
+    palPollRef.current = window.setInterval(async () => {
+      setPalWaitedSec(Math.round((Date.now() - startedAt) / 1000));
+
+      if (Date.now() - startedAt > LIMIT_MS) {
+        window.clearInterval(palPollRef.current!);
+        setPalPhase("failed");
+        setPalMessage("Still waiting after 15 minutes — check the case audit trail.");
+        return;
+      }
+
+      try {
+        const res = await api.get(`/cases/${caseId}/calls/transcripts/${transcriptId}`);
+        const row = res.data as {
+          rawText?: string;
+          palindromeStatus?: string | null;
+          palindromeError?: string | null;
+          completedAt?: string | null;
+        };
+
+        if (row.palindromeError) {
+          window.clearInterval(palPollRef.current!);
+          setPalPhase("failed");
+          setPalMessage(row.palindromeError);
+          toast.error("Transcription failed", { description: row.palindromeError });
+          return;
+        }
+
+        if (row.rawText && row.rawText.length > 20) {
+          window.clearInterval(palPollRef.current!);
+          setTranscript(row.rawText);
+          setPalPhase("done");
+          setPalMessage(null);
+          void refreshStoredTranscripts();
+          toast.success("Transcript ready", {
+            description: "Review it below, then click Analyse & propose updates.",
+          });
+          return;
+        }
+
+        // Surface Palindrome's own wording while we wait. It is unreliable —
+        // rows have been observed finishing while the field still reads
+        // "Ready For Processing" — so it is shown as progress only and never
+        // used to decide completion.
+        setPalMessage(row.palindromeStatus ?? null);
+      } catch {
+        // Transient failures are fine; the next tick retries.
+      }
+    }, 10_000);
+  };
+
+  /**
+   * Provider_Client_YYYY-MM-DD_HH-MM.mp3 — matches the naming the existing
+   * "Save to WorkDrive" button uses, so recordings filed by either route sort
+   * together and read the same way in the client's folder.
+   */
+  const rcRecordingFileName = (rec: RcRecording): string => {
+    const sanitize = (s: string) =>
+      (s || "")
+        .trim()
+        .replace(/[\s/\\:*?"<>|]+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_|_$/g, "");
+    const dt = new Date(rec.startTime || Date.now());
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const datePart =
+      `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}` +
+      `_${pad(dt.getHours())}-${pad(dt.getMinutes())}`;
+    return `${sanitize(providerName) || "Provider"}_${sanitize(clientName) || "Client"}_${datePart}.mp3`;
+  };
+
+  /**
+   * Send a recording to Palindrome and wait for the transcript.
+   *
+   * Backs the existing Transcribe buttons — the RC Recordings panel passes a
+   * contentUri, the WorkDrive panel passes a file id. Either way the backend
+   * files the audio in the client's WorkDrive folder, triggers Palindrome and
+   * the poller collects the result.
+   *
+   * Returns true when the submission was accepted, so callers can fall back to
+   * Azure Speech if Palindrome is unavailable.
+   */
+  const submitToPalindrome = async (
+    body: { workdriveFileId?: string; contentUri?: string; fileName?: string },
+  ): Promise<boolean> => {
+    setPalPhase("uploading");
+    setPalMessage(null);
+    setPalWaitedSec(0);
+    const t = toast.loading("Sending recording for transcription…");
+
+    try {
+      const payload = { ...body, ...(rcConfigured ? {} : { rcToken: rcToken.trim() }) };
+      const res = await api.post(`/cases/${caseId}/calls/palindrome-submit`, payload);
+      const { transcriptId } = res.data as { transcriptId: string };
+      setPalTranscriptId(transcriptId);
+      setPalPhase("waiting");
+      toast.success("Sent to Palindrome", {
+        id: t,
+        description: "Transcript usually arrives in 2–3 minutes.",
+      });
+      watchPalindromeTranscript(transcriptId);
+      return true;
+    } catch (err: unknown) {
+      const e = err as {
+        response?: { status?: number; data?: { error?: string; message?: string } };
+      };
+      const detail = e.response?.data?.message ?? e.response?.data?.error ?? "Submission failed";
+      setPalPhase("failed");
+      setPalMessage(detail);
+      toast.error(
+        e.response?.status === 422
+          ? "No WorkDrive folder for this client"
+          : "Could not send for transcription",
+        { id: t, description: detail },
+      );
+      return false;
+    }
+  };
 
   // ── RC Recordings panel ───────────────────────────────────────────────
   interface RcRecording {
@@ -177,7 +503,10 @@ export function CallWorkspace({
     id: string;
     name: string;
     sizeBytes?: number;
+    /** Display string only — "Aug 19, 16:01". Never pass to new Date(). */
     createdTime?: string;
+    /** Epoch ms. Safe to compare and format. */
+    createdTimeMs?: number;
     permalink?: string;
   }
   const [wdFiles, setWdFiles] = useState<WorkDriveFile[]>([]);
@@ -759,7 +1088,9 @@ export function CallWorkspace({
       const res = await api.get(url);
       const files = (res.data as { files: WorkDriveFile[] }).files ?? [];
       // Show newest first
-      files.sort((a, b) => (b.createdTime ?? "").localeCompare(a.createdTime ?? ""));
+      // Sort on the numeric timestamp — the display string sorts
+      // alphabetically ("Aug" before "Jul"), which is not chronological.
+      files.sort((a, b) => (b.createdTimeMs ?? 0) - (a.createdTimeMs ?? 0));
       setWdFiles(files);
     } catch (err: unknown) {
       const status = (err as any)?.response?.status;
@@ -807,6 +1138,15 @@ export function CallWorkspace({
 
   // ── Transcribe a WorkDrive file ─────────────────────────────────────────
   const transcribeWorkDriveFile = async (file: WorkDriveFile) => {
+    // Palindrome path: async, so hand off and let the poller finish.
+    if (palEnabled) {
+      setWdTranscribingId(file.id);
+      const ok = await submitToPalindrome({ workdriveFileId: file.id, fileName: file.name });
+      setWdTranscribingId(null);
+      if (ok) return;
+      // Fall through to Azure Speech if the submission was rejected.
+    }
+
     setWdTranscribingId(file.id);
     const t = toast.loading("Transcribing with Azure Whisper…");
     try {
@@ -834,6 +1174,25 @@ export function CallWorkspace({
   // Transcribe a recording via Azure Whisper (backend downloads MP3 + sends to Whisper)
   const handleUseRecording = async (rec: RcRecording) => {
     setFetchingTranscriptFor(rec.sessionId);
+
+    // ── Palindrome path ────────────────────────────────────────────────────
+    // Pulls the audio from RingCentral, files it in the client's WorkDrive
+    // folder and transcribes it. Async, unlike Azure Speech below, so we hand
+    // off to the poller and return.
+    if (palEnabled && rec.contentUri && (rcConfigured || rcToken.trim())) {
+      const ok = await submitToPalindrome({
+        contentUri: rec.contentUri,
+        fileName: rcRecordingFileName(rec),
+      });
+      setSessionId(rec.sessionId);
+      setFetchingTranscriptFor(null);
+      if (ok) {
+        setPhase("ended");
+        return;
+      }
+      // Submission rejected — fall through to Azure Speech.
+      setFetchingTranscriptFor(rec.sessionId);
+    }
 
     // ── Path A: We have the audio file URL — use Azure Whisper ──────────────
     if (rec.contentUri && (rcConfigured || rcToken.trim())) {
@@ -1479,9 +1838,151 @@ export function CallWorkspace({
               </div>
             )}
 
+            {/* Palindrome runs asynchronously (2–3 min) rather than returning
+                inline like Azure Speech did, so the Transcribe buttons need a
+                progress line — otherwise the CA clicks and nothing appears to
+                happen for minutes. */}
+            {palPhase === "waiting" && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground py-1">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                Transcribing with Palindrome — usually 2–3 minutes
+                {palWaitedSec > 0 && ` · ${Math.floor(palWaitedSec / 60)}m ${palWaitedSec % 60}s`}
+                {palMessage && ` · ${palMessage}`}
+              </div>
+            )}
+            {palPhase === "failed" && (
+              <div className="text-xs text-destructive py-1">
+                {palMessage ?? "Transcription failed."} You can paste the transcript manually below.
+              </div>
+            )}
+
+            {/* Transcripts already stored for this case. Shown whenever the
+                editor is empty or holds something different, so a transcript
+                that arrived while the CA was elsewhere is never stranded. */}
+            {storedTranscripts.length > 1 && palPhase !== "waiting" && (
+              <details className="rounded-md border border-border bg-muted/40 p-2.5">
+                <summary className="flex items-center gap-1.5 cursor-pointer list-none">
+                  <FileText className="h-3.5 w-3.5 text-primary" />
+                  <span className="text-xs font-medium">
+                    {storedTranscripts.length - 1} earlier transcript
+                    {storedTranscripts.length > 2 ? "s" : ""} for this case
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void refreshStoredTranscripts();
+                    }}
+                    title="Refresh"
+                    className="ml-auto text-muted-foreground hover:text-foreground"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                  </button>
+                </summary>
+                <ul className="space-y-1 mt-2">
+                  {/* Skip index 0 — that one is already in the editor. */}
+                  {storedTranscripts.slice(1, 6).map((t) => (
+                    <li key={t.id} className="flex items-center gap-2 text-[11px]">
+                      <span className="text-muted-foreground">
+                        {new Date(t.completedAt ?? t.createdAt).toLocaleString(undefined, {
+                          day: "2-digit",
+                          month: "short",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </span>
+                      <Badge variant="outline" className="h-4 px-1 text-[9px]">
+                        {t.source}
+                      </Badge>
+                      <span className="text-muted-foreground">
+                        {t.chars.toLocaleString()} chars
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 px-2 text-[10px] ml-auto"
+                        onClick={() => void loadStoredTranscript(t.id)}
+                      >
+                        Load into editor
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+
+            {/* A newer transcript arrived but the editor holds hand-entered
+                text, so we ask rather than overwrite it. */}
+            {newerTranscriptId && (
+              <div className="flex items-center gap-2 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-1.5 text-[11px]">
+                <Sparkles className="h-3 w-3 text-primary shrink-0" />
+                <span>A newer transcript has arrived for this case.</span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 px-2 text-[10px] ml-auto"
+                  onClick={() => {
+                    void loadStoredTranscript(newerTranscriptId);
+                    setNewerTranscriptId(null);
+                  }}
+                >
+                  Load it
+                </Button>
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground"
+                  onClick={() => setNewerTranscriptId(null)}
+                  title="Dismiss"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Say which transcript is in the editor. Without this the CA
+                cannot tell whether they are looking at the call they just
+                made, one loaded from the list, or something they pasted. */}
+            {(() => {
+              const loaded = storedTranscripts.find((t) => t.id === palTranscriptId);
+              if (loaded) {
+                return (
+                  <div className="flex items-center gap-2 text-[11px] text-muted-foreground flex-wrap">
+                    <CheckCircle2 className="h-3 w-3 text-success shrink-0" />
+                    <span>
+                      Showing transcript from{" "}
+                      <strong className="text-foreground">
+                        {new Date(loaded.completedAt ?? loaded.createdAt).toLocaleString(undefined, {
+                          day: "2-digit",
+                          month: "short",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </strong>
+                    </span>
+                    <Badge variant="outline" className="h-4 px-1 text-[9px]">
+                      {loaded.source}
+                    </Badge>
+                    <span>{loaded.chars.toLocaleString()} chars</span>
+                  </div>
+                );
+              }
+              if (transcript.trim()) {
+                return (
+                  <div className="text-[11px] text-muted-foreground">
+                    Showing a manually entered transcript — not saved against this case.
+                  </div>
+                );
+              }
+              return null;
+            })()}
+
             <Textarea
               value={transcript}
-              onChange={(e) => setTranscript(e.target.value)}
+              onChange={(e) => {
+                setTranscript(e.target.value);
+                // Once edited by hand it is no longer that stored transcript.
+                if (palTranscriptId) setPalTranscriptId(null);
+              }}
               placeholder={
                 rcLoggedIn
                   ? "Transcript will appear here automatically after the call ends.\nYou can also paste or edit it manually."
@@ -1835,10 +2336,20 @@ export function CallWorkspace({
             {wdFiles.length > 0 && (
               <ul className="space-y-1.5 max-h-[320px] overflow-y-auto">
                 {wdFiles.map((file) => {
-                  const dt = file.createdTime ? new Date(file.createdTime) : null;
-                  const dateStr = dt ? dt.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "";
+                  // Use the epoch-millisecond field, never createdTime.
+                  // WorkDrive sends createdTime as a display string like
+                  // "Aug 19, 16:01", and new Date() reads the "19" as a YEAR —
+                  // every file then renders as 2001. Fall back to the string
+                  // only when the millisecond field is absent.
+                  const dt = file.createdTimeMs
+                    ? new Date(file.createdTimeMs)
+                    : null;
+                  const dateStr = dt ? dt.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : (file.createdTime ?? "");
                   const timeStr = dt ? dt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
-                  const sizeKb = file.sizeBytes ? `${Math.round(file.sizeBytes / 1024)} KB` : "";
+                  const sizeKb =
+                    typeof file.sizeBytes === "number" && Number.isFinite(file.sizeBytes)
+                      ? `${Math.round(file.sizeBytes / 1024).toLocaleString()} KB`
+                      : "";
                   const isTranscribing = wdTranscribingId === file.id;
                   return (
                     <li
