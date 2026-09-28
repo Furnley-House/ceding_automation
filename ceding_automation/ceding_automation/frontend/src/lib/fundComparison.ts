@@ -86,6 +86,21 @@ export function chargesAgree(a: number, b: number): boolean {
   return Math.abs(a - b) <= CHARGE_TOLERANCE;
 }
 
+// Recognising a 100x is a far easier question than deciding two prices are
+// the same, and needs a far wider tolerance. GB0000011444 came in at
+// 1,376.7774 against a reference of 13.5979 — plainly pence, but 1.25% apart
+// once scaled, because the two were priced four days apart. The 0.5% above
+// missed it. Nothing but a unit error lands near exactly 100x, so this can
+// afford to be generous where agreement cannot.
+//
+// Charges keep the tight tolerance: an OCF is an attribute of the share
+// class, so there is no date drift to absorb.
+const SCALE_RELATIVE_TOLERANCE = 0.2; // 20%
+
+export function pricesAgreeAtScale(a: number, b: number): boolean {
+  return Math.abs(a - b) <= Math.max(PRICE_ABSOLUTE_FLOOR, Math.abs(b) * SCALE_RELATIVE_TOLERANCE);
+}
+
 /**
  * Does this difference look like a unit problem rather than a real one?
  *
@@ -277,7 +292,7 @@ export function compareFundLine(row: FundLine): RowComparison {
       note:
         priceStatus === "differs"
           ? scaleNote(
-              scaleFactorBetween(cedingPrice as number, lookupPrice as number, pricesAgree),
+              scaleFactorBetween(cedingPrice as number, lookupPrice as number, pricesAgreeAtScale),
               "price",
             )
           : undefined,
@@ -326,7 +341,7 @@ export function compareFundLine(row: FundLine): RowComparison {
   // for, so the warning should disappear the moment they do.
   const priceScaleFactor =
     priceField.chosen === "CEDING" && cedingPrice !== null && lookupPrice !== null
-      ? scaleFactorBetween(cedingPrice, lookupPrice, pricesAgree)
+      ? scaleFactorBetween(cedingPrice, lookupPrice, pricesAgreeAtScale)
       : null;
 
   return {

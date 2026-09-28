@@ -26,6 +26,8 @@ import { toast } from "sonner";
 import type { FundLine, SourceChoice, VerificationSummary } from "@/hooks/useFundLines";
 import {
   compareFundLine,
+  fmtPrice,
+  toNumber,
   SOURCE_FIELD_KEY,
   EDIT_FIELD_KEY,
   type ComparisonField,
@@ -321,6 +323,21 @@ export function FundVerificationPanel({
   const amberCount = rows.filter((r) => r.holdingRag === "AMBER").length;
   const allVerified = rows.length > 0 && verifiedCount === rows.length;
 
+  // A price bound for CRM at 100x its real value is not something to leave in
+  // a banner the CA may scroll past: it is money, it looks right on the
+  // statement it was copied from, and nobody downstream re-checks it. So it
+  // interrupts — on load, and again after every re-check that still finds it.
+  //
+  // Dismissal is remembered against the exact set of offending holdings, so
+  // closing it does not hide a different holding that breaks later.
+  const scaleIssues = useMemo(
+    () => comparisons.filter((c) => c.cmp.priceScaleFactor !== undefined),
+    [comparisons],
+  );
+  const scaleKey = scaleIssues.map((c) => c.row.id).join("|");
+  const [dismissedScaleKey, setDismissedScaleKey] = useState<string | null>(null);
+  const showScaleDialog = scaleKey !== "" && dismissedScaleKey !== scaleKey;
+
   const lastVerified = useMemo(() => {
     const stamps = rows.map((r) => r.verifiedAt).filter(Boolean) as string[];
     if (stamps.length === 0) return null;
@@ -330,6 +347,8 @@ export function FundVerificationPanel({
   const runVerify = async () => {
     setRunning(true);
     setPanelError(null);
+    // Re-check asks the question again, so a previous dismissal is spent.
+    setDismissedScaleKey(null);
     try {
       const summary = await onVerify();
       toast.success(
@@ -598,6 +617,60 @@ export function FundVerificationPanel({
           );
         })}
       </div>
+
+      {showScaleDialog && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setDismissedScaleKey(scaleKey)}
+        >
+          <div
+            className="bg-card border border-border rounded-lg shadow-lg w-[500px] max-w-full p-4 space-y-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
+              <div>
+                <h3 className="text-sm font-bold text-foreground">
+                  Check the price units before this goes to CRM
+                </h3>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {scaleIssues.length === 1 ? "This holding has" : "These holdings have"} a
+                  checklist price 100x away from the reference price. UK statements usually quote
+                  pence and CRM stores pounds, so this is normally a unit mix-up rather than a
+                  different price.
+                </p>
+              </div>
+            </div>
+
+            <ul className="text-[11px] bg-muted/40 rounded p-2 max-h-40 overflow-y-auto space-y-1.5">
+              {scaleIssues.map(({ row, cmp }) => (
+                <li key={row.id}>
+                  <span className="font-semibold text-foreground">{row.fundName}</span>
+                  <span className="text-muted-foreground tabular-nums">
+                    {" — "}checklist {fmtPrice(toNumber(row.pricePerUnit))}, reference{" "}
+                    {fmtPrice(toNumber(row.resolvedUnitPrice))}
+                    {cmp.priceScaleFactor === 0.01 ? " (100x too high)" : " (100x too low)"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+
+            <p className="text-[11px] text-muted-foreground">
+              Set the price to <strong className="text-foreground">Reference</strong> on each, or
+              edit the checklist figure to pounds. Until then this case cannot be sent for
+              approval.
+            </p>
+
+            <div className="flex items-center justify-end">
+              <Button size="sm" onClick={() => setDismissedScaleKey(scaleKey)}>
+                Review these holdings
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

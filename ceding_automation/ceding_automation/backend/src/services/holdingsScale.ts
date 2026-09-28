@@ -13,12 +13,17 @@
 
 import { FundValueSource } from "@prisma/client";
 
-const PRICE_RELATIVE_TOLERANCE = 0.005; // 0.5%
+// "Is this gap a factor of 100?" is a far easier question than "is this the
+// same price?", and needs a far wider tolerance. The two sides are rarely
+// struck on the same day — GB0000011444 came in 1.25% apart over four days
+// and the 0.5% used for agreement missed it — while nothing except a unit
+// error lands anywhere near exactly 100x. A same-fund price that genuinely
+// differs by 80x to 125x does not occur.
+const SCALE_RELATIVE_TOLERANCE = 0.2; // 20%
 const PRICE_ABSOLUTE_FLOOR = 0.0001;
 
-/** Prices are rarely struck on the same day, so "agree" is relative. */
-export function pricesAgree(a: number, b: number): boolean {
-  const tolerance = Math.max(PRICE_ABSOLUTE_FLOOR, Math.abs(b) * PRICE_RELATIVE_TOLERANCE);
+function nearEnoughForScale(a: number, b: number): boolean {
+  const tolerance = Math.max(PRICE_ABSOLUTE_FLOOR, Math.abs(b) * SCALE_RELATIVE_TOLERANCE);
   return Math.abs(a - b) <= tolerance;
 }
 
@@ -32,8 +37,8 @@ export function pricesAgree(a: number, b: number): boolean {
  */
 export function scaleFactorBetween(ceding: number, lookup: number): 100 | 0.01 | null {
   if (ceding === 0 || lookup === 0) return null;
-  if (pricesAgree(ceding * 100, lookup)) return 100;
-  if (pricesAgree(ceding / 100, lookup)) return 0.01;
+  if (nearEnoughForScale(ceding * 100, lookup)) return 100;
+  if (nearEnoughForScale(ceding / 100, lookup)) return 0.01;
   return null;
 }
 
