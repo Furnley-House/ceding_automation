@@ -31,6 +31,9 @@ import { toast } from "sonner";
 
 // (Demo seed data was removed — Import CRM task now hits the real Zoho API via the backend.)
 
+// Sentinel value for the task-owner filter; can't collide with a real name.
+const UNASSIGNED = "__unassigned__";
+
 const Cases = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -40,6 +43,12 @@ const Cases = () => {
   const [statusFilter, setStatusFilter] = useState<string>(searchParams.get("status") ?? "all");
   const [planFilter, setPlanFilter] = useState<string>("all");
   const [ragFilter, setRagFilter] = useState<string>("all");
+  const [ownerFilter, setOwnerFilter] = useState<string>("all");
+  // CA team and paraplanners see every case; "My cases" narrows the list
+  // back to the ones they own (CA = Zoho task owner, paraplanner = assigned
+  // reviewer). Advisers are already scoped server-side, so no toggle.
+  const canToggleMine = role === "ca_team" || role === "paraplanner";
+  const [mineOnly, setMineOnly] = useState<boolean>(searchParams.get("scope") === "mine");
   const [dialogOpen, setDialogOpen] = useState(false);
   // ?completed=week — set by the dashboard "Done · week" tile so the list
   // matches the tile: cases completed since Monday.
@@ -203,9 +212,11 @@ const Cases = () => {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return cases.filter((c) => {
-      // CA team only sees tasks assigned to them in CRM.
-      if (role === "ca_team" && (c.owner_name ?? "").trim() !== (userName ?? "").trim())
-        return false;
+      if (canToggleMine && mineOnly) {
+        const me = (userName ?? "").trim();
+        const owner = role === "ca_team" ? c.owner_name : c.paraplanner_name;
+        if (String(owner ?? "").trim() !== me) return false;
+      }
       // "complete" (UI) covers STAGE_10_COMPLETE and CANCELLED. APPROVED is
       // still active — it awaits Stage 9 Export.
       if (statusFilter === "active") {
@@ -225,11 +236,36 @@ const Cases = () => {
       }
       if (planFilter !== "all" && c.plan_type !== planFilter) return false;
       if (ragFilter !== "all" && calculateRag(c) !== ragFilter) return false;
+      if (ownerFilter !== "all") {
+        const owner = String(c.owner_name ?? "").trim();
+        if (ownerFilter === UNASSIGNED ? owner !== "" : owner !== ownerFilter) return false;
+      }
       if (q && !`${c.client_name} ${c.Provider_group} ${c.plan_number} ${c.case_ref}`.toLowerCase().includes(q))
         return false;
       return true;
     });
-  }, [cases, search, statusFilter, planFilter, ragFilter, role, userName, completedThisWeek]);
+  }, [cases, search, statusFilter, planFilter, ragFilter, ownerFilter, role, userName, canToggleMine, mineOnly, completedThisWeek]);
+
+  // Task owner options come from the loaded cases, so the filter only ever
+  // lists CAs who actually own something in the current result set.
+  const ownerOptions = useMemo(() => {
+    const names = new Set<string>();
+    let hasUnassigned = false;
+    for (const c of cases) {
+      const owner = String(c.owner_name ?? "").trim();
+      if (owner) names.add(owner);
+      else hasUnassigned = true;
+    }
+    return { names: [...names].sort((a, b) => a.localeCompare(b)), hasUnassigned };
+  }, [cases]);
+
+  const setScope = (mine: boolean) => {
+    setMineOnly(mine);
+    const next = new URLSearchParams(searchParams);
+    if (mine) next.set("scope", "mine");
+    else next.delete("scope");
+    setSearchParams(next, { replace: true });
+  };
 
   return (
     <div className="animate-slide-in">
@@ -239,11 +275,7 @@ const Cases = () => {
             <Briefcase className="h-6 w-6 text-teal" /> Cases
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {role === "admin"
-              ? "All ceding cases across the team."
-              : role === "ca_team"
-                ? "All ceding cases assigned to you."
-                : "All ceding cases you're linked to."}{" "}
+            {role === "adviser" ? "Ceding cases for your clients." : "All ceding cases across the team."}{" "}
             {filtered.length} of {cases.length} shown.
           </p>
         </div>
@@ -310,7 +342,25 @@ const Cases = () => {
         </div>
       </div>
 
-      <div className="mb-4 grid gap-3 md:grid-cols-[1fr,auto,auto,auto]">
+      {canToggleMine && (
+        <div className="mb-3 inline-flex rounded-md border border-border bg-muted/40 p-0.5" role="group" aria-label="Case scope">
+          {([false, true] as const).map((mine) => (
+            <button
+              key={String(mine)}
+              type="button"
+              aria-pressed={mineOnly === mine}
+              onClick={() => setScope(mine)}
+              className={`rounded px-3 py-1.5 text-sm font-medium transition-colors ${
+                mineOnly === mine ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {mine ? "My cases" : "All cases"}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="mb-4 grid gap-3 md:grid-cols-[1fr,auto,auto,auto,auto]">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by client, provider, policy ref…" className="pl-9" />
@@ -349,6 +399,15 @@ const Cases = () => {
           <SelectItem value="amber">🟡 Amber</SelectItem>
           <SelectItem value="red">🔴 Red</SelectItem>
         </FilterSelect>
+        <FilterSelect value={ownerFilter} onChange={setOwnerFilter} placeholder="Task owner">
+          <SelectItem value="all">All task owners</SelectItem>
+          {ownerOptions.names.map((name) => (
+            <SelectItem key={name} value={name}>
+              {name}
+            </SelectItem>
+          ))}
+          {ownerOptions.hasUnassigned && <SelectItem value={UNASSIGNED}>Unassigned</SelectItem>}
+        </FilterSelect>
       </div>
 
       {completedThisWeek ? (
@@ -376,6 +435,7 @@ const Cases = () => {
             <tr className="border-b border-border bg-muted/40 text-[11px] uppercase tracking-wider text-muted-foreground">
               <th className="px-4 py-3 text-left font-semibold w-8" />
               <th className="px-4 py-3 text-left font-semibold">Client</th>
+              <th className="px-4 py-3 text-left font-semibold">Task owner</th>
               <th className="px-4 py-3 text-left font-semibold">Provider</th>
               <th className="px-4 py-3 text-left font-semibold">Plan Type</th>
               <th className="px-4 py-3 text-left font-semibold">Policy Ref</th>
@@ -387,13 +447,13 @@ const Cases = () => {
           <tbody>
             {isLoading ? (
               <tr>
-                <td colSpan={8} className="px-4 py-12 text-center">
+                <td colSpan={9} className="px-4 py-12 text-center">
                   <Loader2 className="h-5 w-5 animate-spin mx-auto text-muted-foreground" />
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-12 text-center text-sm text-muted-foreground">
+                <td colSpan={9} className="px-4 py-12 text-center text-sm text-muted-foreground">
                   {cases.length === 0 ? (
                     <>
                       No ceding cases yet. Click <strong>+ New Case</strong> to get started.
@@ -425,6 +485,7 @@ const Cases = () => {
                       </div>
                       <p className="text-[11px] text-muted-foreground font-normal mt-0.5">{c.case_ref}</p>
                     </td>
+                    <td className="px-4 py-3 text-muted-foreground">{String(c.owner_name ?? "").trim() || "—"}</td>
                     <td className="px-4 py-3 text-muted-foreground">{c.Provider_group}</td>
                     <td className="px-4 py-3 text-muted-foreground">{c.plan_type}</td>
                     <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{c.plan_number}</td>
