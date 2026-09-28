@@ -18,15 +18,10 @@ import {
   Users,
   Wand2,
 } from "lucide-react";
-import { getCases } from "@/services/api";
+import { getCases, getCaseStats, type CaseStats } from "@/services/api";
 import { auditApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
-
-// ────────────────────────────────────────────────────────────
-// Constants
-// ────────────────────────────────────────────────────────────
-const BASELINE_MIN_PER_CASE = 195; // FR-01 KPI: ~195 min baseline before automation
 
 // ────────────────────────────────────────────────────────────
 // Helpers
@@ -39,6 +34,13 @@ function initials(name?: string | null): string {
     .slice(0, 2)
     .map((p) => p[0]?.toUpperCase())
     .join("");
+}
+
+// A case is closed once ceding is complete or it's been cancelled — both map
+// to UI status "complete" in flattenCase. APPROVED is NOT closed: the
+// checklist is signed off but Stage 9 (Export & WorkDrive) still has to run.
+function isClosed(c: { status?: string }): boolean {
+  return (c.status ?? "").toLowerCase() === "complete";
 }
 
 function timeAgo(iso: string | Date | null | undefined): string {
@@ -126,12 +128,16 @@ const Dashboard = () => {
   });
 
   // Auditlog feed — guarded by RBAC server-side, so this just returns 403 for
-  // CA team (we catch it and render a quieter empty state).
+  // CA team (we catch it and render a quieter empty state). Limited to the
+  // last 24 hours and refreshed every minute, matching the "Live · last 24
+  // hours" labels on the card.
   const { data: auditPayload } = useQuery({
     queryKey: ["audit", "global", "dashboard"],
+    refetchInterval: 60_000,
     queryFn: async () => {
       try {
-        const r = await auditApi.list({ limit: 10 });
+        const from = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const r = await auditApi.list({ limit: 10, from });
         return r.data as { logs: AuditRow[]; total: number } | AuditRow[];
       } catch {
         return null;
@@ -154,105 +160,32 @@ const Dashboard = () => {
   }, [rawCases, role, userName]);
 
   // ────────────────────────────────────────────────────────
-  // KPIs
+  // KPIs + caseflow — aggregated server-side (GET /cases/stats) so they
+  // cover the whole caseload, not just the 200 rows fetched above.
   // ────────────────────────────────────────────────────────
-  const stats = useMemo(() => {
-    const now = new Date();
-    const monday = new Date(now);
-    monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
-    monday.setHours(0, 0, 0, 0);
+  const { data: stats } = useQuery<CaseStats>({
+    queryKey: ["cases", "stats"],
+    queryFn: getCaseStats,
+  });
 
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const caseflow = useMemo(
+    () =>
+      (stats?.caseflow ?? []).map((b) => ({
+        label: new Date(b.weekStart).toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "short",
+        }),
+        opened: b.opened,
+        delivered: b.completed,
+      })),
+    [stats],
+  );
 
-    let active = 0,
-      doneWeek = 0,
-      inReview = 0,
-      doneMonth = 0,
-      adviserCreated = 0;
-
-    let totalCompletedMinutes = 0,
-      completedSamples = 0;
-
-    for (const c of cases) {
-      const status = (c.status ?? "").toLowerCase();
-      const updated = c.updated_at ? new Date(c.updated_at) : null;
-      if (!["complete", "approved"].includes(status)) active++;
-      if (status === "in_review") inReview++;
-      if (status === "complete" && updated && updated >= monday) doneWeek++;
-      if (status === "complete" && updated && updated >= startOfMonth) doneMonth++;
-
-      // case duration → time saved
-      if (c.created_at && (status === "complete" || status === "approved")) {
-        const created = new Date(c.created_at).getTime();
-        const end = c.ceding_complete_date
-          ? new Date(c.ceding_complete_date).getTime()
-          : updated?.getTime() ?? null;
-        if (end && end > created) {
-          const minutes = (end - created) / 60000;
-          // Only count cases that took <= 4h (240m) — otherwise the long
-          // tail (cases waiting weeks on providers) skews the metric and
-          // makes "time saved" look absurd. The KPI is about FH-side
-          // processing time, not provider response time.
-          if (minutes <= 240) {
-            totalCompletedMinutes += minutes;
-            completedSamples++;
-          }
-        }
-      }
-
-      const createdBy = c.created_by as { role?: string } | undefined;
-      if (createdBy?.role === "ADVISER") adviserCreated++;
-    }
-
-    const avgProcessingMin =
-      completedSamples > 0 ? totalCompletedMinutes / completedSamples : null;
-    const timeSavedMin =
-      avgProcessingMin !== null
-        ? Math.max(0, Math.round(BASELINE_MIN_PER_CASE - avgProcessingMin))
-        : null;
-
-    return {
-      active,
-      doneWeek,
-      inReview,
-      doneMonth,
-      adviserCreated,
-      timeSavedMin,
-      totalCases: cases.length,
-    };
-  }, [cases]);
-
-  // ────────────────────────────────────────────────────────
-  // Caseflow line chart — bucket created_at by week, last 30 days
-  // ────────────────────────────────────────────────────────
-  const caseflow = useMemo(() => {
-    const buckets: { label: string; opened: number; delivered: number }[] = [];
-    const now = new Date();
-    for (let i = 4; i >= 0; i--) {
-      const start = new Date(now);
-      start.setDate(now.getDate() - i * 7);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(start);
-      end.setDate(start.getDate() + 7);
-      const label = start.toLocaleDateString("en-GB", {
-        day: "numeric",
-        month: "short",
-      });
-      let opened = 0,
-        delivered = 0;
-      for (const c of cases) {
-        const created = c.created_at ? new Date(c.created_at) : null;
-        if (created && created >= start && created < end) opened++;
-        // "Delivered" = ceding workflow finished. We use ceding_complete_date
-        // (set when the case reaches Stage 10). sr_prepared_at was reserved
-        // for the adviser-side SR handoff but is not written today.
-        const done = c.ceding_complete_date ? new Date(c.ceding_complete_date) : null;
-        if (done && done >= start && done < end) delivered++;
-      }
-      buckets.push({ label, opened, delivered });
-    }
-    return buckets;
-  }, [cases]);
+  const weekDelta = stats ? stats.doneWeek - stats.doneLastWeek : 0;
+  const donePct =
+    stats && stats.total - stats.cancelled > 0
+      ? Math.round((stats.completed * 100) / (stats.total - stats.cancelled))
+      : 0;
 
   // ────────────────────────────────────────────────────────
   // Provider donut — top 3 + Other
@@ -282,7 +215,7 @@ const Dashboard = () => {
   // ────────────────────────────────────────────────────────
   // Cases by client — group + progress
   // ────────────────────────────────────────────────────────
-  const clientRows = useMemo(() => {
+  const allClientRows = useMemo(() => {
     const map = new Map<string, CaseLite[]>();
     for (const c of cases) {
       const k = c.client_name?.trim() || "Unknown client";
@@ -296,7 +229,9 @@ const Dashboard = () => {
             new Date(b.updated_at ?? b.created_at ?? 0).getTime() -
             new Date(a.updated_at ?? a.created_at ?? 0).getTime(),
         );
-        const top = sorted[0]!;
+        // Represent the client by their most recently updated *open* case, so
+        // a finished case doesn't mask outstanding work on another plan.
+        const top = sorted.find((it) => !isClosed(it)) ?? sorted[0]!;
         const totalStages = 10;
         const completed = Array.isArray(top.stages_completed)
           ? top.stages_completed.length
@@ -313,8 +248,7 @@ const Dashboard = () => {
         // So when `completed === 8` (stages 1-8 done) AND the case isn't
         // yet closed AND SR hasn't already been prepared, the next action
         // is to assemble the SR pack — that's when we surface the button.
-        const status = (top.status ?? "").toLowerCase();
-        const caseClosed = ["complete", "approved"].includes(status);
+        const caseClosed = isClosed(top);
         const alreadyPrepared = Boolean(top.sr_prepared_at);
         const srReady =
           !caseClosed && !alreadyPrepared && completed === 8;
@@ -326,11 +260,12 @@ const Dashboard = () => {
         // adviser will draft the SR). The CRM URL template is derived from
         // any case's zoho_deep_link by swapping the path to /tab/Contacts;
         // the exact CRM page can be tweaked later by the user.
+        // At least one must be genuinely complete — a client whose cases
+        // were all cancelled has nothing to hand to the adviser.
         const allClientCasesComplete =
           items.length > 0 &&
-          items.every((it) =>
-            ["complete", "approved"].includes((it.status ?? "").toLowerCase()),
-          );
+          items.every(isClosed) &&
+          items.some((it) => it.backend_status === "STAGE_10_COMPLETE");
 
         let srCrmUrl: string | null = null;
         if (allClientCasesComplete) {
@@ -361,12 +296,23 @@ const Dashboard = () => {
           updatedRelative: timeAgo(top.updated_at ?? top.created_at),
         };
       })
-      .sort((a, b) => b.progressPct - a.progressPct)
-      .slice(0, 4);
+      .sort((a, b) => b.progressPct - a.progressPct);
   }, [cases]);
+  const clientRows = allClientRows.slice(0, 4);
 
-  const topCase = clientRows[0];
-  const today = new Date();
+  // Hero "top priority": the open case closest to done. Fully signed-off
+  // clients only surface (as the Prepare-SR prompt) when nothing is open —
+  // otherwise they'd sit at 100% and pin the hero permanently.
+  const topCase =
+    allClientRows.find((r) => !isClosed(r.top)) ??
+    allClientRows.find((r) => r.allClientCasesComplete);
+  // Ticks every 30s so the Today card's clock (and the date, past midnight)
+  // stays current instead of freezing at page-load time.
+  const [today, setToday] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setToday(new Date()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
   const heroDate = today.toLocaleDateString("en-GB", {
     weekday: "long",
     day: "numeric",
@@ -381,31 +327,34 @@ const Dashboard = () => {
   })();
 
   // ────────────────────────────────────────────────────────
-  // Team load — approx (no users API for CA role)
+  // Team load — open cases per owner across the whole team, counted
+  // server-side (GET /cases/stats) so every role sees the full team, not
+  // just the cases they can open. Bars are relative to the busiest person;
+  // there's no capacity figure to measure "overloaded" against.
   // ────────────────────────────────────────────────────────
   const teamLoad = useMemo(() => {
-    const allCases = (rawCases as CaseLite[]) ?? [];
-    const tally = new Map<string, { active: number; role?: string }>();
-    for (const c of allCases) {
-      const k = c.owner_name?.trim();
-      if (!k) continue;
-      const active = !["complete", "approved"].includes((c.status ?? "").toLowerCase());
-      const entry = tally.get(k) ?? { active: 0 };
-      if (active) entry.active += 1;
-      const ownerRole = (c.assigned_to as { role?: string } | undefined)?.role;
-      if (ownerRole) entry.role = ownerRole;
-      tally.set(k, entry);
-    }
-    const arr = Array.from(tally.entries())
-      .map(([name, v]) => ({ name, active: v.active, role: v.role ?? "—" }))
-      .sort((a, b) => b.active - a.active)
-      .slice(0, 4);
-    const max = Math.max(...arr.map((a) => a.active), 6);
-    return arr.map((a) => {
-      const pct = Math.round((a.active / max) * 100);
-      return { ...a, pct, over: pct > 85 };
-    });
-  }, [rawCases]);
+    const arr = (stats?.teamLoad ?? []).slice(0, 6);
+    const max = Math.max(1, ...arr.map((a) => a.active));
+    return arr.map((a) => ({ ...a, pct: Math.round((a.active / max) * 100) }));
+  }, [stats]);
+
+  // ────────────────────────────────────────────────────────
+  // Today — real to-do list from the viewer's caseload. Each bucket matches
+  // a Cases-page status filter so the item opens exactly those cases.
+  // ────────────────────────────────────────────────────────
+  const todayItems = useMemo(() => {
+    const n = (statuses: string[]) =>
+      statuses.reduce((sum, st) => sum + (stats?.statusCounts?.[st] ?? 0), 0);
+    const reviewer = role === "paraplanner" || role === "adviser";
+    return [
+      { key: "pending_loa", label: "Send LOAs", count: n(["DRAFT", "STAGE_1_LOA_PREP", "STAGE_2_COLLECT_DETAILS", "STAGE_3_CRM_SETUP"]) },
+      { key: "awaiting_documents", label: "Chase provider documents", count: n(["STAGE_4_PROVIDER_REQUEST", "STAGE_5_CHASING", "STAGE_6_DOCUMENT_UPLOAD"]) },
+      { key: "extraction_complete", label: "Verify extracted checklists", count: n(["STAGE_7_MISSING_INFO", "STAGE_8_VERIFY_CHECKLIST"]) },
+      { key: "in_review", label: reviewer ? "Sign off reviews" : "Awaiting sign-off", count: n(["STAGE_9_ADVISER_REVIEW", "IN_REVIEW"]) },
+      { key: "approved", label: "Export approved cases to WorkDrive", count: n(["APPROVED"]) },
+      { key: "on_hold", label: "Cases on hold", count: n(["ON_HOLD"]) },
+    ].filter((i) => i.count > 0);
+  }, [stats, role]);
 
   // ────────────────────────────────────────────────────────
   // Activity → audit log mapping
@@ -472,12 +421,15 @@ const Dashboard = () => {
                       <strong className="text-white/85 font-semibold">{topCase.name}</strong>'s
                       {topCase.top.provider_name ? ` ${topCase.top.provider_name}` : ""}
                       {topCase.top.plan_type ? ` ${topCase.top.plan_type}` : ""} case is one task
-                      away from being report-ready. Worth a focused 30 minutes this morning.
+                      away from being report-ready.
                     </>
                   ) : (
                     <>
-                      You have <strong className="text-white/85 font-semibold">{stats.active}</strong> active
-                      cases. Top priority is{" "}
+                      {/* Admin sees the whole team's caseload, not cases
+                          assigned to them — word it accordingly. */}
+                      {role === "admin" ? "The team has" : "You have"}{" "}
+                      <strong className="text-white/85 font-semibold">{stats?.active ?? "…"}</strong> active
+                      {stats?.active === 1 ? " case" : " cases"}. Top priority is{" "}
                       <strong className="text-white/85 font-semibold">{topCase.name}</strong> at{" "}
                       {topCase.progressPct}% complete.
                     </>
@@ -527,7 +479,7 @@ const Dashboard = () => {
             ) : null}
             <Button
               variant="outline"
-              onClick={() => navigate("/cases")}
+              onClick={() => navigate("/cases?new=1")}
               className="gap-2 rounded-full h-10 px-4 bg-transparent text-white border-white/20 hover:bg-white/10 hover:text-white hover:border-white/40"
             >
               <Plus className="h-4 w-4" /> New case
@@ -537,18 +489,21 @@ const Dashboard = () => {
       </section>
 
       {/* ── KPI TILES ──────────────────────────────────────────
+          No throughput target shown: the 75/week goal spans every plan type
+          and depends on the full app shipping, so "Done · week" compares
+          against last week instead.
           Removed:
           - "On hold"        — backend supports ON_HOLD, but no UI sets it
-          - "AI confidence"  — confidence_score is never written to the DB */}
+          - "AI confidence"  — confidence_score is never written to the DB
+          - "Time saved"     — needs hands-on effort time, which isn't
+                               recorded; replaced by median cycle time */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiTile
           tone="teal"
           label="Active"
-          value={stats.active}
-          sub={`of ${stats.totalCases} total`}
-          delta={
-            stats.active > 0 ? `${Math.round((stats.totalCases - stats.active) * 100 / Math.max(1, stats.totalCases))}% done` : "all clear"
-          }
+          value={stats?.active ?? "—"}
+          sub={stats ? `of ${stats.total} total` : "loading"}
+          delta={stats ? (stats.active > 0 ? `${donePct}% done` : "all clear") : undefined}
           icon={<Briefcase className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=active")}
           index={0}
@@ -556,29 +511,43 @@ const Dashboard = () => {
         <KpiTile
           tone="green"
           label="Done · week"
-          value={stats.doneWeek}
-          sub="primary KPI"
-          delta={stats.doneWeek >= 4 ? "▲ on target" : `target 4 · ${Math.max(0, 4 - stats.doneWeek)} to go`}
+          value={stats?.doneWeek ?? "—"}
+          sub="completed since Monday"
+          delta={
+            stats
+              ? weekDelta > 0
+                ? `▲ ${weekDelta} vs last week`
+                : weekDelta < 0
+                  ? `▼ ${-weekDelta} vs last week`
+                  : "same as last week"
+              : undefined
+          }
           icon={<CheckCircle2 className="h-4 w-4" />}
-          onClick={() => navigate("/cases?status=complete")}
+          onClick={() => navigate("/cases?status=complete&completed=week")}
           index={1}
         />
         <KpiTile
           tone="blue"
           label="In review"
-          value={stats.inReview}
-          sub="awaiting paraplanner"
+          value={stats?.inReview ?? "—"}
+          sub="awaiting sign-off"
           icon={<Clock className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=in_review")}
           index={2}
         />
         <KpiTile
           tone="navy"
-          label="Time saved"
-          value={stats.timeSavedMin ?? "—"}
-          suffix={stats.timeSavedMin !== null ? "m" : undefined}
-          sub="avg/case vs baseline"
-          delta={stats.timeSavedMin !== null ? `baseline ${BASELINE_MIN_PER_CASE}m` : "needs completed cases"}
+          label="Cycle time"
+          value={stats?.cycleTime.medianDays ?? "—"}
+          suffix={stats?.cycleTime.medianDays != null ? "d" : undefined}
+          sub="median, open → complete"
+          delta={
+            stats
+              ? stats.cycleTime.sampleSize > 0
+                ? `${stats.cycleTime.sampleSize} case${stats.cycleTime.sampleSize === 1 ? "" : "s"} · last ${stats.cycleTime.windowDays}d`
+                : `none completed in ${stats.cycleTime.windowDays}d`
+              : undefined
+          }
           icon={<Clock className="h-4 w-4" />}
           index={3}
         />
@@ -636,7 +605,7 @@ const Dashboard = () => {
             icon={<Briefcase className="h-4 w-4" />}
             eyebrow="Caseload"
             title="Cases by client"
-            titleMeta={`· ${stats.active} active`}
+            titleMeta={`· ${stats?.active ?? "…"} active`}
             rightPill={
               <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-teal/15 text-teal">
                 {clientRows.length} shown
@@ -868,21 +837,28 @@ const Dashboard = () => {
               </div>
             </div>
             <ul className="mt-5 space-y-0">
-              <TodayItem done label="Sync with Zoho CRM" pill="auto" />
-              {topCase ? (
+              {topCase && !topCase.allClientCasesComplete ? (
                 <TodayItem
                   label={`Resume ${topCase.name.split(" ")[0]}'s case`}
                   pillTone="now"
-                  pill="Now"
+                  pill="Next"
+                  onClick={() => navigate(`/cases/${topCase.top.id}`)}
                 />
               ) : null}
-              <TodayItem label="Review approvals inbox" pill="11:30" />
-              <TodayItem label="Apply call findings" pill="13:00" />
-              <TodayItem
-                label="Hand off completed cases"
-                pillTone="due"
-                pill="14:30"
-              />
+              {todayItems.map((item) => (
+                <TodayItem
+                  key={item.key}
+                  label={item.label}
+                  pill={String(item.count)}
+                  pillTone={item.key === "approved" || item.key === "in_review" ? "due" : undefined}
+                  onClick={() => navigate(`/cases?status=${item.key}`)}
+                />
+              ))}
+              {stats && todayItems.length === 0 && !topCase ? (
+                <li className="py-2.5 text-sm text-muted-foreground italic">
+                  Nothing waiting — all clear.
+                </li>
+              ) : null}
             </ul>
           </div>
 
@@ -900,13 +876,13 @@ const Dashboard = () => {
             <div className="px-5 pb-4 pt-1 space-y-3">
               <InsightRow
                 tone="blue"
-                num={stats.doneMonth}
+                num={stats?.doneMonth ?? 0}
                 label="Cases closed this month"
-                delta="target 16 by month-end"
+                delta="ceding complete"
               />
               <InsightRow
                 tone="gold"
-                num={stats.adviserCreated}
+                num={stats?.adviserCreated ?? 0}
                 label="Cases opened by advisers"
                 delta="adviser-led intros"
               />
@@ -917,13 +893,13 @@ const Dashboard = () => {
           <AccordionCard
             iconTone="blue"
             icon={<Users className="h-4 w-4" />}
-            eyebrow="Today"
+            eyebrow="Workload"
             title="Team load"
-            titleMeta={`· ${teamLoad.length} people`}
+            titleMeta={`· ${teamLoad.length} ${teamLoad.length === 1 ? "person" : "people"}`}
             rightPill={
-              teamLoad.some((t) => t.over) ? (
+              stats && stats.unassigned > 0 ? (
                 <span className="text-[11px] font-semibold px-2 py-1 rounded-full bg-overdue/15 text-overdue">
-                  {teamLoad.filter((t) => t.over).length} over
+                  {stats.unassigned} unassigned
                 </span>
               ) : undefined
             }
@@ -932,12 +908,12 @@ const Dashboard = () => {
           >
             <div className="px-5 pb-4 pt-1 space-y-3">
               {teamLoad.length === 0 ? (
-                <p className="text-xs text-muted-foreground italic">No assignees on active cases yet.</p>
+                <p className="text-xs text-muted-foreground italic">No open cases assigned yet.</p>
               ) : (
                 teamLoad.map((t) => {
                   const me = (userName ?? "").trim() === t.name;
                   return (
-                    <div key={t.name} className="grid grid-cols-[32px_1fr_60px] gap-3 items-center">
+                    <div key={t.userId} className="grid grid-cols-[32px_1fr_60px] gap-3 items-center">
                       <div
                         className="h-8 w-8 rounded-full text-white text-[11px] font-bold flex items-center justify-center"
                         style={{
@@ -956,7 +932,7 @@ const Dashboard = () => {
                           ) : null}
                         </div>
                         <div className="text-xs text-muted-foreground mt-0.5">
-                          {t.role.replace(/_/g, " ").toLowerCase()} · {t.active} active
+                          {ROLE_LABEL[t.role] ?? t.role.replace(/_/g, " ").toLowerCase()} · {t.active} active
                         </div>
                       </div>
                       <div>
@@ -965,12 +941,9 @@ const Dashboard = () => {
                             className="h-full rounded-full transition-all duration-700"
                             style={{
                               width: `${Math.min(100, t.pct)}%`,
-                              background: t.over ? "#C28B1C" : "#5a6878",
+                              background: "#5a6878",
                             }}
                           />
-                        </div>
-                        <div className="text-[10px] text-muted-foreground text-right tabular-nums">
-                          {t.pct}%
                         </div>
                       </div>
                     </div>
@@ -996,6 +969,7 @@ interface CaseLite {
   plan_type?: string;
   plan_number?: string;
   status?: string;
+  backend_status?: string;
   owner_name?: string;
   created_at?: string;
   updated_at?: string;
@@ -1025,6 +999,13 @@ interface AuditRow {
   new_value?: string | null;
   actor_name?: string | null;
 }
+
+const ROLE_LABEL: Record<string, string> = {
+  CA_TEAM: "CA team",
+  PARAPLANNER: "Paraplanner",
+  ADVISER: "Adviser",
+  ADMIN: "Admin",
+};
 
 const KPI_TONES: Record<string, { bg: string; text: string; iconBg: string }> = {
   teal: {
@@ -1387,10 +1368,21 @@ function AccordionCard({
   };
   return (
     <div className="rounded-2xl border border-border bg-card overflow-hidden">
-      <button
+      {/* div[role=button], not <button>: the header hosts its own buttons
+          (View all, Show older) and a <button> can't contain another. */}
+      <div
         onClick={handle}
-        type="button"
-        className="w-full flex items-center gap-3.5 px-5 py-3.5 hover:bg-muted/30 transition-colors text-left"
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handle();
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        className="w-full flex items-center gap-3.5 px-5 py-3.5 hover:bg-muted/30 transition-colors text-left cursor-pointer"
       >
         <span
           className="w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0 transition-transform hover:scale-110"
@@ -1412,7 +1404,7 @@ function AccordionCard({
         <ChevronDown
           className={`h-5 w-5 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
         />
-      </button>
+      </div>
       <div
         className={`overflow-hidden transition-[max-height] duration-500 ease-out ${
           open ? "max-h-[2000px]" : "max-h-0"
@@ -1429,17 +1421,28 @@ function TodayItem({
   done,
   pill,
   pillTone,
+  onClick,
 }: {
   label: string;
   done?: boolean;
   pill?: string;
   pillTone?: "now" | "due";
+  onClick?: () => void;
 }) {
   return (
     <li
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (onClick && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
       className={`grid grid-cols-[18px_1fr_auto] items-center gap-2.5 py-2.5 border-t border-dashed border-border first:border-t-0 text-sm ${
         done ? "text-muted-foreground line-through decoration-muted-foreground/30" : "text-foreground/85"
-      }`}
+      } ${onClick ? "cursor-pointer hover:text-foreground" : ""}`}
     >
       <span
         className={`w-4 h-4 rounded-full border-[1.5px] ${

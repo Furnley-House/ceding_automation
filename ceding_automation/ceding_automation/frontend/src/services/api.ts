@@ -171,12 +171,56 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
 
 // ==================== CASES ====================
 
+// Fetches every case the user can see, page by page. It used to take one
+// page of 200, which silently truncated the dashboard, Cases list and
+// header search once the caseload grew past 200.
+const CASES_PAGE_SIZE = 500;
 export async function getCases() {
-  const res = await api.get("/cases", { params: { limit: 200 } });
-  // Backend returns { cases: [...], total, page, limit }
-  const raw = res.data as { cases?: unknown[]; [k: string]: unknown };
-  const arr = raw.cases ?? (Array.isArray(raw) ? raw : []);
-  return (snakeKeys(arr) as Record<string, unknown>[]).map(flattenCase);
+  const all: unknown[] = [];
+  for (let page = 1; ; page++) {
+    const res = await api.get("/cases", { params: { limit: CASES_PAGE_SIZE, page } });
+    // Backend returns { cases: [...], total, page, limit }
+    const raw = res.data as { cases?: unknown[]; total?: number; [k: string]: unknown };
+    const arr = raw.cases ?? (Array.isArray(raw) ? raw : []);
+    all.push(...arr);
+    const total = typeof raw.total === "number" ? raw.total : all.length;
+    if (arr.length < CASES_PAGE_SIZE || all.length >= total) break;
+  }
+  return (snakeKeys(all) as Record<string, unknown>[]).map(flattenCase);
+}
+
+export interface CaseStats {
+  total: number;
+  active: number;
+  completed: number;
+  cancelled: number;
+  inReview: number;
+  onHold: number;
+  doneWeek: number;
+  doneLastWeek: number;
+  doneMonth: number;
+  adviserCreated: number;
+  cycleTime: { medianDays: number | null; sampleSize: number; windowDays: number };
+  caseflow: { weekStart: string; opened: number; completed: number }[];
+  // Prisma CaseStatus → count, scoped to the viewer.
+  statusCounts: Record<string, number>;
+  // Open cases per owner across the whole team.
+  teamLoad: { userId: string; name: string; role: string; active: number }[];
+  unassigned: number;
+}
+
+// Dashboard KPIs, aggregated server-side across the whole caseload. Week and
+// month boundaries are sent in the browser's local time.
+export async function getCaseStats(): Promise<CaseStats> {
+  const now = new Date();
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+  weekStart.setHours(0, 0, 0, 0);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const res = await api.get("/cases/stats", {
+    params: { weekStart: weekStart.toISOString(), monthStart: monthStart.toISOString() },
+  });
+  return res.data as CaseStats;
 }
 
 export async function getCaseById(id: string) {

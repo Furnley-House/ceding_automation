@@ -41,6 +41,19 @@ const Cases = () => {
   const [planFilter, setPlanFilter] = useState<string>("all");
   const [ragFilter, setRagFilter] = useState<string>("all");
   const [dialogOpen, setDialogOpen] = useState(false);
+  // ?completed=week — set by the dashboard "Done · week" tile so the list
+  // matches the tile: cases completed since Monday.
+  const completedThisWeek = searchParams.get("completed") === "week";
+
+  // ?new=1 — dashboard "New case" button opens the create dialog directly.
+  useEffect(() => {
+    if (searchParams.get("new") !== "1") return;
+    setDialogOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("new");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // Sync filter state from URL (so dashboard KPI clicks land here pre-filtered)
   useEffect(() => {
@@ -193,10 +206,22 @@ const Cases = () => {
       // CA team only sees tasks assigned to them in CRM.
       if (role === "ca_team" && (c.owner_name ?? "").trim() !== (userName ?? "").trim())
         return false;
+      // "complete" (UI) covers STAGE_10_COMPLETE and CANCELLED. APPROVED is
+      // still active — it awaits Stage 9 Export.
       if (statusFilter === "active") {
-        if (["complete", "approved"].includes(c.status)) return false;
+        if (c.status === "complete") return false;
+      } else if (statusFilter === "complete") {
+        if (c.status !== "complete" || c.backend_status === "CANCELLED") return false;
       } else if (statusFilter !== "all" && c.status !== statusFilter) {
         return false;
+      }
+      if (completedThisWeek) {
+        const monday = new Date();
+        monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+        monday.setHours(0, 0, 0, 0);
+        const completedAt = typeof c.completed_at === "string" ? new Date(c.completed_at) : null;
+        if (c.backend_status !== "STAGE_10_COMPLETE" || !completedAt || completedAt < monday)
+          return false;
       }
       if (planFilter !== "all" && c.plan_type !== planFilter) return false;
       if (ragFilter !== "all" && calculateRag(c) !== ragFilter) return false;
@@ -204,7 +229,7 @@ const Cases = () => {
         return false;
       return true;
     });
-  }, [cases, search, statusFilter, planFilter, ragFilter, role, userName]);
+  }, [cases, search, statusFilter, planFilter, ragFilter, role, userName, completedThisWeek]);
 
   return (
     <div className="animate-slide-in">
@@ -214,7 +239,12 @@ const Cases = () => {
             <Briefcase className="h-6 w-6 text-teal" /> Cases
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            All ceding cases assigned to you. {filtered.length} of {cases.length} shown.
+            {role === "admin"
+              ? "All ceding cases across the team."
+              : role === "ca_team"
+                ? "All ceding cases assigned to you."
+                : "All ceding cases you're linked to."}{" "}
+            {filtered.length} of {cases.length} shown.
           </p>
         </div>
         <div className="flex gap-2">
@@ -292,6 +322,7 @@ const Cases = () => {
             const next = new URLSearchParams(searchParams);
             if (v === "all") next.delete("status");
             else next.set("status", v);
+            next.delete("completed");
             setSearchParams(next, { replace: true });
           }}
           placeholder="Status"
@@ -319,6 +350,25 @@ const Cases = () => {
           <SelectItem value="red">🔴 Red</SelectItem>
         </FilterSelect>
       </div>
+
+      {completedThisWeek ? (
+        <div className="mb-3 flex items-center gap-2 text-xs">
+          <span className="rounded-full bg-teal/15 text-teal font-semibold px-2.5 py-1">
+            Completed this week
+          </span>
+          <button
+            type="button"
+            className="text-muted-foreground hover:text-foreground hover:underline"
+            onClick={() => {
+              const next = new URLSearchParams(searchParams);
+              next.delete("completed");
+              setSearchParams(next, { replace: true });
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      ) : null}
 
       <div className="rounded-lg border border-border bg-card overflow-hidden">
         <table className="w-full text-sm">

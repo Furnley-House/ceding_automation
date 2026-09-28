@@ -24,6 +24,7 @@ import {
   inferPlanType,
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
+import { CLOSED_STATUSES, medianCycleDays, summariseStatusCounts } from "../utils/caseStats";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -482,6 +483,161 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
   res.json({ cases, total, page: Number(page), limit: Number(limit) });
 });
 
+// ── Dashboard Stats ─────────────────────────────────────
+// Aggregated KPIs for the dashboard tiles + caseflow chart. Counted in the
+// database so the numbers cover the whole caseload — the dashboard used to
+// derive them from the first 200 rows of GET /cases, which silently capped
+// "total" at 200.
+//
+// "Completed" = STAGE_10_COMPLETE, dated by completedAt (stamped on
+// completion). APPROVED is still active — it awaits Stage 9 Export.
+// CANCELLED is neither active nor completed.
+//
+// Query params (optional, ISO timestamps from the browser so week/month
+// boundaries follow the user's local time rather than the server's UTC):
+//   weekStart  — Monday 00:00 of the current week
+//   monthStart — 1st of the current month 00:00
+const CYCLE_WINDOW_DAYS = 90;
+const CASEFLOW_WEEKS = 5;
+const DAY_MS = 86_400_000;
+
+function parseIsoParam(v: unknown): Date | null {
+  if (typeof v !== "string" || !v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+router.get("/stats", requireAuth, async (req: Request, res: Response) => {
+  const now = new Date();
+  const utcMonday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  utcMonday.setUTCDate(utcMonday.getUTCDate() - ((utcMonday.getUTCDay() + 6) % 7));
+  const weekStart = parseIsoParam(req.query.weekStart) ?? utcMonday;
+  const monthStart =
+    parseIsoParam(req.query.monthStart) ??
+    new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const lastWeekStart = new Date(weekStart.getTime() - 7 * DAY_MS);
+
+  // Same visibility as GET /cases, except CA Team is narrowed to the cases
+  // they own (assignee, falling back to creator when unassigned) — matching
+  // the dashboard's historical owner_name filter.
+  const me = req.user!.id;
+  let scope: Prisma.CaseWhereInput = {};
+  if (req.user!.role === "CA_TEAM") {
+    scope = { OR: [{ assignedToId: me }, { assignedToId: null, createdById: me }] };
+  } else if (req.user!.role !== "ADMIN") {
+    scope = {
+      OR: [
+        { createdById: me },
+        { assignedToId: me },
+        { paralPlannerId: me },
+        { adviserId: me },
+      ],
+    };
+  }
+  const scoped = (w: Prisma.CaseWhereInput): Prisma.CaseWhereInput => ({ AND: [scope, w] });
+  const completedBetween = (from: Date, to?: Date) =>
+    prisma.case.count({
+      where: scoped({
+        status: { in: CLOSED_STATUSES },
+        completedAt: { gte: from, ...(to ? { lt: to } : {}) },
+      }),
+    });
+
+  const flowStarts = Array.from(
+    { length: CASEFLOW_WEEKS },
+    (_, i) => new Date(weekStart.getTime() - (CASEFLOW_WEEKS - 1 - i) * 7 * DAY_MS),
+  );
+
+  const [byStatus, doneWeek, doneLastWeek, doneMonth, adviserCreated, cycleRows, flow] =
+    await Promise.all([
+      prisma.case.groupBy({ by: ["status"], where: scope, _count: { _all: true } }),
+      completedBetween(weekStart),
+      completedBetween(lastWeekStart, weekStart),
+      completedBetween(monthStart),
+      prisma.case.count({ where: scoped({ createdBy: { role: "ADVISER" } }) }),
+      prisma.case.findMany({
+        where: scoped({
+          status: { in: CLOSED_STATUSES },
+          completedAt: { gte: new Date(now.getTime() - CYCLE_WINDOW_DAYS * DAY_MS) },
+        }),
+        select: { createdAt: true, completedAt: true },
+      }),
+      Promise.all(
+        flowStarts.map(async (start) => {
+          const end = new Date(start.getTime() + 7 * DAY_MS);
+          const [opened, completed] = await Promise.all([
+            prisma.case.count({ where: scoped({ createdAt: { gte: start, lt: end } }) }),
+            completedBetween(start, end),
+          ]);
+          return { weekStart: start.toISOString(), opened, completed };
+        }),
+      ),
+    ]);
+
+  // Elapsed time includes provider waits — cycle time, not hands-on effort.
+  const cycle = medianCycleDays(cycleRows);
+
+  // Team load — open cases per owner across the WHOLE team (not scoped to
+  // the viewer): it's a workload view, counts only, no case detail. Owner =
+  // assignee, falling back to creator when unassigned (same rule as the
+  // dashboard / Cases list). Cases owned by the AI system user count as
+  // unassigned.
+  const openWhere: Prisma.CaseWhereInput = {
+    status: { notIn: [...CLOSED_STATUSES, CaseStatus.CANCELLED] },
+  };
+  const [byAssignee, byCreator] = await Promise.all([
+    prisma.case.groupBy({
+      by: ["assignedToId"],
+      where: { ...openWhere, assignedToId: { not: null } },
+      _count: { _all: true },
+    }),
+    prisma.case.groupBy({
+      by: ["createdById"],
+      where: { ...openWhere, assignedToId: null },
+      _count: { _all: true },
+    }),
+  ]);
+  const loadByUser = new Map<string, number>();
+  for (const r of byAssignee) {
+    loadByUser.set(r.assignedToId!, (loadByUser.get(r.assignedToId!) ?? 0) + r._count._all);
+  }
+  for (const r of byCreator) {
+    loadByUser.set(r.createdById, (loadByUser.get(r.createdById) ?? 0) + r._count._all);
+  }
+  let unassigned = loadByUser.get(SYSTEM_USER_ID) ?? 0;
+  loadByUser.delete(SYSTEM_USER_ID);
+  const owners = await prisma.user.findMany({
+    where: { id: { in: [...loadByUser.keys()] } },
+    select: { id: true, name: true, role: true },
+  });
+  const ownerById = new Map(owners.map((u) => [u.id, u]));
+  const teamLoad = [...loadByUser.entries()]
+    .flatMap(([id, active]) => {
+      const u = ownerById.get(id);
+      if (!u) {
+        unassigned += active;
+        return [];
+      }
+      return [{ userId: id, name: u.name, role: u.role, active }];
+    })
+    .sort((a, b) => b.active - a.active);
+
+  res.json({
+    ...summariseStatusCounts(byStatus.map((r) => ({ status: r.status, count: r._count._all }))),
+    doneWeek,
+    doneLastWeek,
+    doneMonth,
+    adviserCreated,
+    cycleTime: { ...cycle, windowDays: CYCLE_WINDOW_DAYS },
+    caseflow: flow,
+    // Raw per-status counts (viewer-scoped) — drives the dashboard's
+    // "Today" to-do list.
+    statusCounts: Object.fromEntries(byStatus.map((r) => [r.status, r._count._all])),
+    teamLoad,
+    unassigned,
+  });
+});
+
 // ── Get Single Case ─────────────────────────────────────
 router.get("/:id", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
   const caseRecord = await prisma.case.findUnique({
@@ -698,9 +854,14 @@ router.patch(
       // If the UI sent the canonical Prisma enum, accept it directly.
       if ((Object.values(CaseStatus) as string[]).includes(upper)) {
         data.status = upper as CaseStatus;
-        if (upper === "STAGE_10_COMPLETE" || upper === "APPROVED") {
+        // APPROVED is not the end of the workflow — Stage 9 (Export &
+        // WorkDrive) still runs — so only STAGE_10_COMPLETE stamps
+        // completedAt. Stamping it on APPROVED made an approved case count
+        // as "done" on the dashboard depending on which route approved it.
+        if (upper === "STAGE_10_COMPLETE") {
           data.completedAt = data.completedAt ?? new Date();
         }
+        if (upper === "APPROVED") data.approvedAt = new Date();
       } else if (UI_STATUS_TO_PRISMA[body.status]) {
         data.status = UI_STATUS_TO_PRISMA[body.status];
         if (body.status === "complete") data.completedAt = new Date();
