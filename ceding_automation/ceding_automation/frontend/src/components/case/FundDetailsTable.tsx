@@ -6,7 +6,7 @@
 //     updateRow, Escape cancels. One cell at a time; other cells stay display-only.
 import { useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Plus, Trash2, Loader2, Upload } from "lucide-react";
+import { Plus, Trash2, Loader2, Upload, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
@@ -86,8 +86,68 @@ export function FundDetailsTable({ caseId, readOnly = false, onChanged }: Props)
   // onKeyDown and onBlur handlers in the same commit.
   const commitInFlight = useRef(false);
 
+  // ── Whole-row edit ───────────────────────────────────────────────────────
+  // Click-to-edit is quicker once you know it is there, but it announces
+  // itself with nothing but a hover highlight — and the checklist fields
+  // above this table all carry a visible Edit link. So a row can also be
+  // opened as a whole, which is the only obvious way in for the identifier.
+  // Both routes stay: neither gets in the other's way.
+  const [editingRow, setEditingRow] = useState<{
+    rowId: string;
+    values: Record<EditableField, string>;
+  } | null>(null);
+  const [rowSaving, setRowSaving] = useState(false);
+
+  const EDITABLE_FIELDS: EditableField[] = [
+    "fundName",
+    "isinSedolCiti",
+    "numberOfUnits",
+    "pricePerUnit",
+    "value",
+    "ocf",
+    "transactionCosts",
+  ];
+
+  const startRowEdit = (row: FundLine) => {
+    if (readOnly || rowSaving) return;
+    setEditing(null); // a single cell may be open; the row takes over
+    const values = {} as Record<EditableField, string>;
+    for (const f of EDITABLE_FIELDS) values[f] = ((row[f] as string | null) ?? "").toString();
+    setEditingRow({ rowId: row.id, values });
+  };
+
+  const saveRowEdit = async (row: FundLine) => {
+    if (!editingRow) return;
+    // Send only what actually changed, so an untouched field is never
+    // rewritten — and editing the identifier is not triggered by accident,
+    // since that clears the row's verification.
+    const patch: Partial<FundLineDraft> = {};
+    for (const f of EDITABLE_FIELDS) {
+      const next = editingRow.values[f];
+      const before = ((row[f] as string | null) ?? "").toString();
+      if (next !== before) patch[f] = next === "" ? null : next;
+    }
+    if (Object.keys(patch).length === 0) {
+      setEditingRow(null);
+      return;
+    }
+    setRowSaving(true);
+    try {
+      await updateRow(row.id, patch);
+      setEditingRow(null);
+      onChanged?.();
+    } catch (err) {
+      toast.error("Failed to update fund row", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+      // Left open so the CA can correct it without retyping the lot.
+    } finally {
+      setRowSaving(false);
+    }
+  };
+
   const startEdit = (row: FundLine, field: EditableField) => {
-    if (readOnly || editing || cellSaving) return;
+    if (readOnly || editing || cellSaving || editingRow) return;
     const current = ((row[field] as string | null) ?? "").toString();
     setEditing({ rowId: row.id, field, value: current, original: current });
   };
@@ -145,6 +205,35 @@ export function FundDetailsTable({ caseId, readOnly = false, onChanged }: Props)
     inputStep?: string,
     extraInputClassName?: string,
   ) => {
+    // The whole row is open — every cell is an input, and Enter/Escape act
+    // on the row rather than on the one field.
+    if (editingRow?.rowId === row.id) {
+      return (
+        <Input
+          type={rawInputType}
+          step={inputStep}
+          value={editingRow.values[field]}
+          onChange={(e) =>
+            setEditingRow({
+              ...editingRow,
+              values: { ...editingRow.values, [field]: e.target.value },
+            })
+          }
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void saveRowEdit(row);
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              setEditingRow(null);
+            }
+          }}
+          disabled={rowSaving}
+          className={`h-7 text-xs ${extraInputClassName ?? ""}`}
+        />
+      );
+    }
+
     const isEditing = editing?.rowId === row.id && editing.field === field;
     if (isEditing) {
       return (
@@ -267,7 +356,7 @@ export function FundDetailsTable({ caseId, readOnly = false, onChanged }: Props)
                 <th className="text-right px-3 py-2 font-semibold">Value</th>
                 <th className="text-right px-3 py-2 font-semibold">OCF</th>
                 <th className="text-right px-3 py-2 font-semibold">Transaction Costs</th>
-                {!readOnly && <th className="px-3 py-2 w-8" />}
+                {!readOnly && <th className="px-3 py-2 w-24" />}
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
@@ -300,16 +389,47 @@ export function FundDetailsTable({ caseId, readOnly = false, onChanged }: Props)
                     {renderEditableCell(r, "transactionCosts", pct(r.transactionCosts), "number", "0.0001", "text-right")}
                   </td>
                   {!readOnly && (
-                    <td className="px-2 py-2">
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(r)}
-                        className="text-muted-foreground hover:text-destructive"
-                        title="Remove row"
-                        disabled={cellSaving}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      {editingRow?.rowId === r.id ? (
+                        <span className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void saveRowEdit(r)}
+                            disabled={rowSaving}
+                            className="text-[11px] font-semibold text-teal hover:underline disabled:opacity-50"
+                          >
+                            {rowSaving ? "Saving…" : "Save"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingRow(null)}
+                            disabled={rowSaving}
+                            className="text-[11px] text-muted-foreground hover:underline disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => startRowEdit(r)}
+                            disabled={cellSaving || rowSaving}
+                            className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-teal hover:underline disabled:opacity-50"
+                          >
+                            <Pencil className="h-3 w-3" /> Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(r)}
+                            className="text-muted-foreground hover:text-destructive disabled:opacity-50"
+                            title="Remove row"
+                            disabled={cellSaving || rowSaving}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </span>
+                      )}
                     </td>
                   )}
                 </tr>
@@ -392,7 +512,7 @@ export function FundDetailsTable({ caseId, readOnly = false, onChanged }: Props)
 
       {!readOnly && sorted.length > 0 && !draft && (
         <div className="px-3 py-1 text-[10px] text-muted-foreground italic border-t border-border/50">
-          Click any cell to edit — Enter saves, Escape cancels.
+          Use <strong className="font-semibold">Edit</strong> to change a whole row, or click any single cell. Enter saves, Escape cancels.
         </div>
       )}
 
