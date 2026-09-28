@@ -102,4 +102,14 @@ describe("buildStyledExport", () => {
     const ws = await build({ planType: "PENSION", fields: [{ field_key: "current_value", value: "£10.00" }] });
     expect(ws.getCell("B24").value).toBe("£10.00");
   });
+
+  it("wraps multi-line Additional Notes and sizes the row for every line", async () => {
+    const ws = await build({ planType: "PENSION", fields: [
+      { field_key: "other_notes", value: "Line one\nLine two\nLine three" },
+    ] });
+    const c = ws.getCell("B83");
+    expect(c.value).toBe("Line one\nLine two\nLine three");
+    expect(c.alignment?.wrapText).toBe(true);
+    expect(ws.getRow(83).height).toBeGreaterThanOrEqual(45);
+  });
 });

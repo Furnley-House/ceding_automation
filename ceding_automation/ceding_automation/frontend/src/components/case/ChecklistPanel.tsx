@@ -21,6 +21,10 @@ import { FundDetailsTable } from "./FundDetailsTable";
 import { ContributionsTable } from "./ContributionsTable";
 import { useContributions } from "@/hooks/useContributions";
 import { contributionsProgress } from "@/lib/contributionsDerivation";
+import { useOptionalSections } from "@/hooks/useOptionalSections";
+import { isRealValue } from "@/lib/optionalSections";
+import { optionalSectionsApi, type OptionalSectionState } from "@/lib/api";
+import { OptionalSectionSwitch, SectionCollapse } from "./OptionalSectionSwitch";
 
 // Legacy free-text fields that the AI extractor populates with unstructured
 // contributions text ("See contributions tables for full history"). These
@@ -88,6 +92,20 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     caseId,
     template,
   });
+  // Stage 4 on/off switches for optional sections (With-Profit Funds,
+  // Guarantees, Protected Tax-Free Cash (Pre-A-Day)). Flipping one rewrites
+  // its fields server-side, so re-read the checklist afterwards.
+  const optional = useOptionalSections(caseId, refresh);
+  // Count answers per optional section from the rows on screen now, so a
+  // value typed seconds ago still triggers the "replace with N/A?" check.
+  const optionalByName = useMemo(() => {
+    const m = new Map<string, OptionalSectionState>();
+    for (const [name, st] of optional.byName) {
+      const keys = template.filter((f) => f.section === name).map((f) => f.key);
+      m.set(name, { ...st, realValueCount: keys.filter((k) => isRealValue(byKey.get(k)?.value)).length });
+    }
+    return m;
+  }, [optional.byName, template, byKey]);
 
   // Layout toggle — persisted per user, not per case. Users get the same
   // view when switching between cases in one session.
@@ -209,9 +227,22 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
 
   const grouped = useMemo(() => groupBySection(visibleFields), [visibleFields]);
 
-  const matchesFilter = (key: string) => {
+  // Optional sections switched OFF (With-Profit Funds / Guarantees /
+  // Protected TFC) are "not applicable": their fields drop out of the
+  // counts and the Missing / Needs-review / High filters until switched on.
+  const offSections = useMemo(
+    () => new Set([...optionalByName.values()].filter((s) => !s.enabled).map((s) => s.section)),
+    [optionalByName],
+  );
+  const countedFields = useMemo(
+    () => visibleFields.filter((f) => !offSections.has(f.section)),
+    [visibleFields, offSections],
+  );
+
+  const matchesFilter = (f: ChecklistFieldDef) => {
     if (filter === "all") return true;
-    const r = byKey.get(key);
+    if (offSections.has(f.section)) return false;
+    const r = byKey.get(f.key);
     const conf = (r?.confidence ?? "MISSING").toUpperCase();
     if (filter === "high") return conf === "HIGH";
     // CONFLICT belongs in the review bucket — two sources disagreed, the
@@ -226,10 +257,10 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
   const filteredGrouped = useMemo(
     () =>
       grouped
-        .map((g) => ({ ...g, fields: g.fields.filter((f) => matchesFilter(f.key)) }))
+        .map((g) => ({ ...g, fields: g.fields.filter((f) => matchesFilter(f)) }))
         .filter((g) => g.fields.length > 0),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [grouped, filter, byKey],
+    [grouped, filter, byKey, offSections],
   );
 
   // Fund Details is a separate sub-table — pull its rows so we can fold its
@@ -251,7 +282,7 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
 
   const stats = useMemo(() => {
     const counts = { high: 0, medium: 0, low: 0, conflict: 0, missing: 0, approved: 0, review: 0 };
-    visibleFields.forEach((f) => {
+    countedFields.forEach((f) => {
       const r = byKey.get(f.key);
       // Missing wins over confidence buckets — a value-says-"MISSING" row
       // would otherwise be counted under HIGH (which it technically came
@@ -285,10 +316,10 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     );
     counts.high += contribProgress.filled;
     counts.missing += contribProgress.add - contribProgress.filled;
-    const total = visibleFields.length + 1 + contribProgress.add;
+    const total = countedFields.length + 1 + contribProgress.add;
     const completion = total === 0 ? 0 : Math.round(((total - counts.missing) / total) * 100);
     return { ...counts, total, completion };
-  }, [visibleFields, byKey, fundStatus, contributions, isPension]);
+  }, [countedFields, byKey, fundStatus, contributions, isPension]);
 
   // Assemble the two-candidate resolver pack for a CONFLICT field. Returns
   // undefined when not conflicted or when the row lacks conflict_values
@@ -430,12 +461,20 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     if (ok) markMissingNA.mutate();
   };
 
-  const markReadyForReview = () => {
+  const markReadyForReview = async () => {
     if (stats.missing > 0) {
       toast.error("Cannot mark Ready for Review", {
         description: `${stats.missing} field${stats.missing === 1 ? "" : "s"} still missing.`,
       });
       return;
+    }
+    // Same as Stage 4 "Mark complete": sections left switched off get their
+    // fields written as N/A so later stages don't see them as missing.
+    try {
+      await optionalSectionsApi.applyDefaults(caseId);
+      await Promise.all([refresh(), optional.refresh()]);
+    } catch {
+      /* best-effort — never blocks */
     }
     toast.success("Case marked Ready for Review", {
       description: "Move to Step 8 to assign a paraplanner.",
@@ -654,6 +693,11 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
             onFieldChange={handleFieldChange}
             onJumpToSource={onJumpToSource}
             caseId={caseId}
+            optionalSections={{
+              byName: optionalByName,
+              busy: optional.busy,
+              setEnabled: (section, enabled) => void optional.setEnabled(section, enabled),
+            }}
             extraContentBySection={
               isPension
                 ? {
@@ -668,13 +712,31 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
             }
           />
         ) : (
-          filteredGrouped.map(({ section, fields }) => (
+          filteredGrouped.map(({ section, fields }) => {
+          const opt = optionalByName.get(section);
+          const open = !opt || opt.enabled;
+          return (
           <div key={section} className="rounded-md border border-border bg-card">
-            <div className="px-4 py-2 border-b border-border bg-muted/30">
+            <div className="px-4 py-2 border-b border-border bg-muted/30 flex items-center justify-between gap-3">
               <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground">
                 {section}
               </h4>
+              {opt && (
+                <OptionalSectionSwitch
+                  state={opt}
+                  disabled={!canEditChecklist || optional.busy === section}
+                  onChange={(enabled) => void optional.setEnabled(section, enabled)}
+                />
+              )}
             </div>
+            {opt && !opt.enabled && (
+              <p className="px-4 py-2 text-xs italic text-muted-foreground">
+                {opt.explicit
+                  ? `Not applicable — all ${opt.fieldCount} fields are set to N/A.`
+                  : `Not applicable — the ${opt.fieldCount} fields will be set to N/A when you mark this step complete. Switch on if this plan has ${section.toLowerCase()}.`}
+              </p>
+            )}
+            <SectionCollapse open={open}>
             {/* Pension Contributions table renders at the top of the
                Transaction History section — it replaces the two legacy
                text fields that were filtered out of visibleFields above. */}
@@ -727,8 +789,10 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
                 );
               })}
             </div>
+            </SectionCollapse>
           </div>
-          ))
+          );
+          })
         )}
       </div>
 

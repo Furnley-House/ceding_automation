@@ -43,6 +43,7 @@ import { casesApi, checklistApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { Pencil, Ban } from "lucide-react";
 import { toast } from "sonner";
+import { insertNewlineAtCaret } from "./NotesInput";
 interface StageProps {
   caseItem: CaseRow;
 }
@@ -574,7 +575,12 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
                     const missing = isMissing(row);
                     const filled = !missing;
                     const returned = row?.status === "review_requested";
-                    const editable = (isCA || isAdmin) && (returned || missing);
+                    // Every field is editable at Review Checklist, not only
+                    // missing / returned ones — CAs correct any answer here.
+                    // Editing an approved field clears its approval
+                    // server-side (checklist PATCH), so it goes back to the
+                    // paraplanner.
+                    const editable = isCA || isAdmin;
                     return (
                       <li
                         key={f.key}
@@ -591,7 +597,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
                             )}
                           </span>
                           <span className="text-muted-foreground min-w-[180px]">{f.label}</span>
-                          <span className={`flex-1 ${filled ? "text-foreground" : "italic text-warning"}`}>
+                          <span className={`flex-1 whitespace-pre-wrap ${filled ? "text-foreground" : "italic text-warning"}`}>
                             {filled ? displayValue(row) : "Missing"}
                           </span>
                           {editable && (
@@ -704,9 +710,25 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
                   {template.find((t) => t.key === editingKey)?.label ?? editingKey}
                 </h3>
               </div>
+              {byKey.get(editingKey)?.status === "approved" && (
+                <div className="flex items-start gap-1.5 text-[11px] text-foreground bg-warning/10 border border-warning/30 px-2 py-1.5 rounded">
+                  <AlertTriangle className="h-3.5 w-3.5 mt-px shrink-0 text-warning" />
+                  <span>
+                    This field is already approved. Changing it will clear the
+                    approval so the paraplanner can re-approve the new value.
+                  </span>
+                </div>
+              )}
               <textarea
                 value={editValue}
                 onChange={(e) => setEditValue(e.target.value)}
+                onKeyDown={(e) => {
+                  // Enter / Shift+Enter already add a line here; Alt+Enter too.
+                  if (e.key === "Enter" && e.altKey) {
+                    e.preventDefault();
+                    insertNewlineAtCaret(e.currentTarget, setEditValue);
+                  }
+                }}
                 rows={3}
                 autoFocus
                 className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm font-mono"

@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, AlertTriangle, ExternalLink, RefreshCw, Search, Plus } from "lucide-react";
 import type { AppLayoutContext } from "@/components/layout/AppLayout";
 import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho, type SyncDebug } from "@/services/api";
+import { optionalSectionsApi } from "@/lib/api";
 import { CEDING_STAGES, STATUS_LABELS, STATUS_STYLES, RAG_STYLES, calculateRag } from "@/lib/caseHelpers";
 import { isSupportedPlanType, SUPPORTED_PLAN_TYPES } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
@@ -231,7 +232,20 @@ const CaseDetail = () => {
     setViewStage(n);
   };
 
-  const completeAndNext = () => {
+  const completeAndNext = async () => {
+    // Stage 4 (Extract & Fill): optional sections the CA left switched off
+    // (With-Profit Funds / Guarantees / Protected Tax-Free Cash) get their
+    // fields written as N/A now. Best-effort — never blocks moving on.
+    if (currentStage === 4 && (isCA || role === "admin")) {
+      try {
+        const r = await optionalSectionsApi.applyDefaults(String(caseItem.id));
+        if (r.data.changed.length > 0) {
+          toast.message("Marked not applicable", { description: r.data.changed.join(", ") });
+        }
+      } catch {
+        /* backend refuses for other roles / offline — carry on */
+      }
+    }
     const newCompleted = Array.from(new Set([...stagesCompleted, currentStage])).sort((a, b) => a - b);
     const next = Math.min(currentStage + 1, 10);
     // Advance the view stage locally first — the backend may legitimately

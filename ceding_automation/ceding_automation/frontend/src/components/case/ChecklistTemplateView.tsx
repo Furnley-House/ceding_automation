@@ -24,7 +24,10 @@ import type { ChecklistRow } from "@/hooks/useChecklistFields";
 import { FundDetailsTable } from "./FundDetailsTable";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
+import { NotesInput, isNotesField } from "./NotesInput";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { OptionalSectionSwitch, SectionCollapse } from "./OptionalSectionSwitch";
+import type { OptionalSectionState } from "@/lib/api";
 
 interface Props {
   /** Sections in template order, each with its ordered fields. Comes from
@@ -59,6 +62,14 @@ interface Props {
    *  <ContributionsTable> inline in the Transaction History section. Keys
    *  match section names exactly (case-sensitive). */
   extraContentBySection?: Record<string, React.ReactNode>;
+  /** Stage 4 on/off switches for optional sections (With-Profit Funds,
+   *  Guarantees, Protected Tax-Free Cash). Sections not in the map render
+   *  as before. */
+  optionalSections?: {
+    byName: Map<string, OptionalSectionState>;
+    busy: string | null;
+    setEnabled: (section: string, enabled: boolean) => void;
+  };
 }
 
 const CONF_META: Record<Confidence, { label: string; cls: string; icon: React.ElementType }> = {
@@ -78,6 +89,7 @@ export function ChecklistTemplateView({
   onJumpToSource,
   caseId,
   extraContentBySection,
+  optionalSections,
 }: Props) {
   return (
     <div className="rounded-md border border-border bg-card overflow-hidden">
@@ -91,9 +103,29 @@ export function ChecklistTemplateView({
         const isFundSection =
           section.toLowerCase() === fundSectionName.toLowerCase();
         const extra = extraContentBySection?.[section] ?? null;
+        const opt = optionalSections?.byName.get(section);
         return (
           <div key={section}>
-            <SectionHeaderRow title={section} />
+            <SectionHeaderRow
+              title={section}
+              control={
+                opt && optionalSections ? (
+                  <OptionalSectionSwitch
+                    state={opt}
+                    disabled={readOnly || optionalSections.busy === section}
+                    onChange={(enabled) => optionalSections.setEnabled(section, enabled)}
+                  />
+                ) : null
+              }
+            />
+            {opt && !opt.enabled && (
+              <p className="border-t border-border px-4 py-2 text-xs italic text-muted-foreground">
+                {opt.explicit
+                  ? `Not applicable — all ${opt.fieldCount} fields are set to N/A.`
+                  : `Not applicable — the ${opt.fieldCount} fields will be set to N/A when you mark this step complete.`}
+              </p>
+            )}
+            <SectionCollapse open={!opt || opt.enabled}>
             {extra && (
               <div className="border-t border-border bg-muted/10 p-3">{extra}</div>
             )}
@@ -115,6 +147,7 @@ export function ChecklistTemplateView({
                 <FundDetailsTable caseId={caseId} readOnly={readOnly} />
               </div>
             )}
+            </SectionCollapse>
           </div>
         );
       })}
@@ -122,12 +155,13 @@ export function ChecklistTemplateView({
   );
 }
 
-function SectionHeaderRow({ title }: { title: string }) {
+function SectionHeaderRow({ title, control }: { title: string; control?: React.ReactNode }) {
   return (
-    <div className="border-t border-border bg-teal/10 px-4 py-2">
+    <div className="border-t border-border bg-teal/10 px-4 py-2 flex items-center justify-between gap-3">
       <p className="text-xs font-bold uppercase tracking-wider text-foreground">
         {title}
       </p>
+      {control}
     </div>
   );
 }
@@ -155,7 +189,7 @@ function TemplateRow({ def, row, readOnly, onFieldChange, onJumpToSource }: RowP
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<string>(displayValue);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
 
   // Keep the draft in sync with server-side updates (undo/redo, other tabs).
   useEffect(() => {
@@ -244,7 +278,7 @@ function TemplateRow({ def, row, readOnly, onFieldChange, onJumpToSource }: RowP
             inputRef={inputRef}
           />
         ) : (
-          <span className={`text-xs ${displayValue ? "text-foreground" : "text-muted-foreground italic"}`}>
+          <span className={`text-xs whitespace-pre-wrap ${displayValue ? "text-foreground" : "text-muted-foreground italic"}`}>
             {displayValue || "—"}
           </span>
         )}
@@ -289,7 +323,7 @@ interface EditControlProps {
   onDraftChange: (v: string) => void;
   onCommit: (v: string) => void;
   onCancel: () => void;
-  inputRef: React.MutableRefObject<HTMLInputElement | null>;
+  inputRef: React.MutableRefObject<HTMLInputElement | HTMLTextAreaElement | null>;
 }
 
 function EditControl({
@@ -356,9 +390,26 @@ function EditControl({
             ? "YYYY-MM-DD"
             : "";
 
+  // Every free-text field wraps and grows while editing so long answers
+  // stay visible; only notes fields accept line breaks.
+  if (def.type === "text") {
+    return (
+      <NotesInput
+        ref={(el) => { inputRef.current = el; }}
+        allowNewlines={isNotesField(def)}
+        value={value}
+        onChange={onDraftChange}
+        onCommit={onCommit}
+        onBlur={onCommit}
+        onCancel={onCancel}
+        placeholder=""
+      />
+    );
+  }
+
   return (
     <Input
-      ref={inputRef}
+      ref={inputRef as React.MutableRefObject<HTMLInputElement | null>}
       type={def.type === "date" ? "date" : "text"}
       value={value}
       placeholder={placeholder}

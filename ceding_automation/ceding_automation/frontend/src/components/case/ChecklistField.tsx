@@ -20,6 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { NotesInput, isNotesField } from "./NotesInput";
 import { Label } from "@/components/ui/label";
 
 // Must mirror backend Prisma enum `ConfidenceLevel`. CONFLICT is set by the
@@ -235,6 +236,24 @@ export function ChecklistField({
         : def.type === "date"
         ? "YYYY-MM-DD"
         : "—";
+
+    // Every free-text field wraps and grows while editing so long answers
+    // stay visible; only notes fields accept line breaks.
+    if (def.type === "text") {
+      return (
+        <NotesInput
+          value={localValue}
+          disabled={disabled}
+          allowNewlines={isNotesField(def)}
+          onChange={setLocalValue}
+          onBlur={commitValue}
+          // Enter saves by leaving the field — blur runs commitValue with
+          // the latest state (calling it directly here would read a stale
+          // closure of localValue).
+          onCommit={() => (document.activeElement as HTMLElement | null)?.blur()}
+        />
+      );
+    }
 
     return (
       <Input

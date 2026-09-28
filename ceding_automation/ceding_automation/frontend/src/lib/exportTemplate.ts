@@ -396,7 +396,15 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
     // Anchor cell is B{row}. The template merges B..G on that row, so we
     // only need to write the top-left; ExcelJS writes into merged cells by
     // targeting the anchor.
-    keep.getCell(`B${targetRow}`).value = value;
+    const cell = keep.getCell(`B${targetRow}`);
+    cell.value = value;
+    // Multi-line answers (e.g. Additional Notes typed with Shift+Enter):
+    // wrap and give the row room for every line.
+    if (value.includes("\n")) {
+      cell.style = { ...cell.style, alignment: { ...cell.alignment, wrapText: true, vertical: "top" } };
+      const lines = value.split("\n").length;
+      keep.getRow(targetRow).height = Math.max(keep.getRow(targetRow).height ?? 15, 15 * lines);
+    }
   }
 
   // ── Valuation dates ─────────────────────────────────────────────────────

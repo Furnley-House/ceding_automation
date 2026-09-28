@@ -100,6 +100,24 @@ api.interceptors.response.use(
 );
 
 // ── Cases ────────────────────────────────────────────────
+// Optional checklist sections — Stage 4 on/off switches for With-Profit
+// Funds / Guarantees / Protected Tax-Free Cash (Pre-A-Day).
+export interface OptionalSectionState {
+  section: string;
+  enabled: boolean;
+  explicit: boolean;
+  fieldCount: number;
+  realValueCount: number;
+}
+export const optionalSectionsApi = {
+  list: (caseId: string) =>
+    api.get<{ sections: OptionalSectionState[] }>(`/cases/${caseId}/optional-sections`),
+  set: (caseId: string, section: string, enabled: boolean) =>
+    api.post<{ sections: OptionalSectionState[] }>(`/cases/${caseId}/optional-sections`, { section, enabled }),
+  applyDefaults: (caseId: string) =>
+    api.post<{ changed: string[]; sections: OptionalSectionState[] }>(`/cases/${caseId}/optional-sections/apply-defaults`),
+};
+
 export const casesApi = {
   list: (params?: Record<string, string>) => api.get("/cases", { params }),
   get: (id: string) => api.get(`/cases/${id}`),
