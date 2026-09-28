@@ -755,6 +755,7 @@ router.get(
 router.get(
   "/:caseId/calls/palindrome-status",
   requireAuth,
+  requireCaseAccess,
   (_req: Request, res: Response) => {
     res.json({
       enabled: isPalindromeEnabled(),
@@ -836,6 +837,7 @@ router.post(
   "/:caseId/calls/upload-recording",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   recordingUpload.single("file"),
   async (req: Request, res: Response) => {
     if (!req.file) {
@@ -932,6 +934,7 @@ router.post(
   "/:caseId/calls/rc-auto-submit",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { telephonySessionId } = req.body as { telephonySessionId?: string };
     if (!telephonySessionId) {
@@ -1052,6 +1055,7 @@ router.post(
   "/:caseId/calls/palindrome-submit",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { workdriveFileId, contentUri, fileName, rcToken: userToken } = req.body as {
       workdriveFileId?: string;
@@ -1189,6 +1193,7 @@ router.post(
 router.get(
   "/:caseId/calls/palindrome-job/:transcriptId",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     res.set("Cache-Control", "no-store");
 
@@ -1253,6 +1258,7 @@ router.get(
 router.get(
   "/:caseId/calls/palindrome-output",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     res.set("Cache-Control", "no-store");
 
@@ -1292,6 +1298,7 @@ router.get(
 router.get(
   "/:caseId/calls/transcripts",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     res.set("Cache-Control", "no-store");
     const rows = await prisma.transcript.findMany({
@@ -1327,6 +1334,7 @@ router.get(
 router.get(
   "/:caseId/calls/transcripts/:transcriptId",
   requireAuth,
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     res.set("Cache-Control", "no-store");
     const row = await prisma.transcript.findUnique({
@@ -1370,6 +1378,7 @@ router.post(
   "/:caseId/calls/transcripts/:transcriptId/analyse",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const row = await prisma.transcript.findUnique({
       where: { id: req.params.transcriptId },
@@ -1417,6 +1426,7 @@ router.post(
   "/:caseId/calls/transcripts/:transcriptId/apply",
   requireAuth,
   requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
   async (req: Request, res: Response) => {
     const { acceptedFields, summary } = req.body as {
       acceptedFields?: Array<{
