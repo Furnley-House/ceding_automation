@@ -149,168 +149,6 @@ describe("holdingKey", () => {
   });
 });
 
-describe("mergeHoldings", () => {
-  const existing = [
-    { id: "row-1", isin: "GB0000026087", security_name: "Phoenix AL International Pn" },
-    { id: "row-2", isin: "GB0000011444", security_name: "Institutional AUT" },
-  ];
-
-  // A PUT replaces the subform, so anything left out is DELETED. This is the
-  // test that stops an export wiping a CA's work in CRM.
-  it("echoes every existing row back with its id", () => {
-    const { rows } = mergeHoldings(existing, []);
-    expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.id)).toEqual(["row-1", "row-2"]);
-  });
-
-  it("appends a holding the Plan does not have", () => {
-    const incoming = [{ isin: "GB00B3ZHN960", security_name: "Vanguard LifeStrategy" }];
-    const result = mergeHoldings(existing, incoming);
-    expect(result.added).toBe(1);
-    expect(result.kept).toBe(2);
-    expect(result.rows).toHaveLength(3);
-    expect(result.rows[2]).not.toHaveProperty("id"); // new rows carry no id
-  });
-
-  // Stage 6 is where the CA settles which figure is right. An export that
-  // only appends means a re-check, a source change or a corrected price never
-  // reaches CRM after the first push.
-  it("refreshes a holding already on the Plan, in place", () => {
-    const incoming = [{ isin: "GB0000026087", security_name: "Phoenix AL International Pn", OCF: 9.9 }];
-    const result = mergeHoldings(existing, incoming);
-    expect(result.added).toBe(0);
-    expect(result.updated).toBe(1);
-    expect(result.rows).toHaveLength(2);
-    // Same row — it keeps its id — carrying the new figure.
-    expect(result.rows[0]).toMatchObject({ id: "row-1", OCF: 9.9 });
-  });
-
-  // Our values win on the fields we own; anything else a workflow or a
-  // person put on the row survives.
-  it("overlays our fields without discarding the rest of the row", () => {
-    const result = mergeHoldings(
-      [{ id: "row-1", isin: "GB1", security_name: "Old name", Asset_Class: "Equity", Weighting: 25 }],
-      [{ isin: "GB1", security_name: "New name", OCF: 1.08 }],
-    );
-    expect(result.rows[0]).toMatchObject({
-      id: "row-1",
-      security_name: "New name",
-      OCF: 1.08,
-      Asset_Class: "Equity", // not ours — untouched
-      Weighting: 25, // not ours — untouched
-    });
-  });
-
-  // Before this, deleting a wrong OCF on the checklist made it disappear
-  // from ceding and stay in CRM for ever, with nothing to say so.
-  it("clears a figure the CA deleted from the checklist", () => {
-    const result = mergeHoldings(
-      [{ id: "row-1", isin: "GB1", security_name: "Fund", OCF: 1.08 }],
-      [{ isin: "GB1", security_name: "Fund" }], // OCF gone
-    );
-    expect(result.rows[0].OCF).toBeNull();
-  });
-
-  // Nothing to clear on a brand new row, and a subform row full of explicit
-  // nulls is noise.
-  it("omits empty fields on a row being added, rather than sending nulls", () => {
-    const result = mergeHoldings([], [buildHoldingRow(fundLine({
-      transactionCosts: null, resolvedTxCost: null, holdingRag: null,
-    }))]);
-    expect("Transaction_Cost" in result.rows[0]).toBe(false);
-    expect("RAG" in result.rows[0]).toBe(false);
-    expect(result.rows[0].security_name).toBeTruthy();
-  });
-
-  // The manual row from the live test. Nothing to do with this case, so it is
-  // passed through exactly as found.
-  it("leaves a row this case does not own untouched", () => {
-    const result = mergeHoldings(
-      [{ id: "row-9", isin: "gfghh666", security_name: "gfg" }],
-      [{ isin: "GB1", security_name: "Ours" }],
-    );
-    expect(result.kept).toBe(1);
-    expect(result.updated).toBe(0);
-    expect(result.added).toBe(1);
-    expect(result.rows[0]).toEqual({ id: "row-9", isin: "gfghh666", security_name: "gfg" });
-  });
-
-  it("matches an existing row case-insensitively on the ISIN", () => {
-    const result = mergeHoldings(
-      [{ id: "row-1", isin: "gb0000026087" }],
-      [{ isin: "GB0000026087", security_name: "Phoenix" }],
-    );
-    expect(result.added).toBe(0);
-    expect(result.updated).toBe(1);
-  });
-
-  it("matches a row with no ISIN on the fund name", () => {
-    const result = mergeHoldings(
-      [{ id: "row-1", security_name: "With Profits Fund" }],
-      [{ security_name: "with profits fund" }],
-    );
-    expect(result.added).toBe(0);
-    expect(result.updated).toBe(1);
-  });
-
-  // The bug this replaced: a second export left the first export's figures in
-  // place, so a re-priced holding stayed stale in CRM for ever.
-  it("carries a re-priced holding through on a second export", () => {
-    const firstExport = mergeHoldings([], [
-      { isin: "GB0000011444", security_name: "Institutional AUT", gbp_valuation: 13.77 },
-    ]);
-    const asStoredInCrm = firstExport.rows.map((r, i) => ({ ...r, id: `row-${i}` }));
-
-    const secondExport = mergeHoldings(asStoredInCrm, [
-      { isin: "GB0000011444", security_name: "Institutional AUT", gbp_valuation: 13.66 },
-    ]);
-    expect(secondExport.rows).toHaveLength(1);
-    expect(secondExport.rows[0].gbp_valuation).toBe(13.66);
-    expect(secondExport.rows[0].id).toBe("row-0");
-  });
-
-  it("strips the fields Zoho will not take back on an existing row", () => {
-    const { rows } = mergeHoldings(
-      [
-        {
-          id: "row-1",
-          isin: "GB1",
-          Parent_Id: { id: "plan-1" },
-          Created_Time: "2026-01-01T00:00:00Z",
-          Modified_Time: "2026-01-02T00:00:00Z",
-          $approval: { approve: false },
-        },
-      ],
-      [],
-    );
-    expect(rows[0]).toEqual({ id: "row-1", isin: "GB1" });
-  });
-
-  // Appending an unidentifiable row would duplicate it on every export.
-  it("skips an incoming row with nothing to identify it", () => {
-    const result = mergeHoldings([], [{ position: 10 }]);
-    expect(result.added).toBe(0);
-    expect(result.skipped).toHaveLength(1);
-  });
-
-  it("does not add the same holding twice from one export", () => {
-    const result = mergeHoldings(
-      [],
-      [
-        { isin: "GB1", security_name: "A" },
-        { isin: "GB1", security_name: "A" },
-      ],
-    );
-    expect(result.added).toBe(1);
-  });
-
-  it("handles a Plan with no subform at all", () => {
-    const result = mergeHoldings([], [{ isin: "GB1", security_name: "A" }]);
-    expect(result.rows).toHaveLength(1);
-    expect(result.kept).toBe(0);
-  });
-});
-
 describe("readExistingHoldings", () => {
   it("reads the rows off a Plan record", () => {
     const rows = readExistingHoldings({ [HOLDINGS_SUBFORM]: [{ id: "row-1" }] });
@@ -371,80 +209,155 @@ describe("field precision", () => {
   });
 });
 
-// Deleting a holding on the checklist has to delete it from the Plan too,
-// or the CA has to raise a ticket to get someone to remove it by hand. The
-// danger is deleting a row we did not put there, so only keys recorded from
-// a previous successful export are ever dropped.
+// These describe the subform's MEASURED behaviour, not the documented one.
+// A row with an id updates, a row without one inserts, a row not mentioned
+// is left alone, and { id, _delete: null } deletes. The third of those is
+// the opposite of what the usual "a PUT replaces the subform" advice says,
+// and believing that advice is what made deletes silently do nothing.
+describe("mergeHoldings", () => {
+  const onPlan = [
+    { id: "row-1", isin: "GB1", security_name: "Ours" },
+    { id: "row-9", isin: "gfghh666", security_name: "gfg" }, // added by hand in CRM
+  ];
+  const OURS = ["isin:GB1"];
+
+  it("updates a holding we own, by id", () => {
+    const r = mergeHoldings(onPlan, [{ isin: "GB1", security_name: "Ours", OCF: 1.08 }], OURS);
+    expect(r.updated).toBe(1);
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0]).toMatchObject({ id: "row-1", security_name: "Ours", OCF: 1.08 });
+  });
+
+  // Saying nothing about a row is what leaves it alone, so a row we do not
+  // own must not appear in the payload at all.
+  it("says nothing at all about a row we do not own", () => {
+    const r = mergeHoldings(onPlan, [{ isin: "GB1", security_name: "Ours" }], OURS);
+    expect(r.kept).toBe(1);
+    expect(r.rows.some((x) => x.id === "row-9")).toBe(false);
+  });
+
+  it("inserts a holding the plan does not have, with no id", () => {
+    const r = mergeHoldings(onPlan, [{ isin: "GB2", security_name: "New" }], OURS);
+    expect(r.added).toBe(1);
+    const inserted = r.rows.find((x) => x.security_name === "New")!;
+    expect(inserted).not.toHaveProperty("id");
+  });
+
+  it("never writes a field we do not own onto a row we do", () => {
+    const r = mergeHoldings(
+      [{ id: "row-1", isin: "GB1", Asset_Class: "Equity", Weighting: 25 }],
+      [{ isin: "GB1", security_name: "Ours" }],
+      OURS,
+    );
+    expect(r.rows[0]).not.toHaveProperty("Asset_Class");
+    expect(r.rows[0]).not.toHaveProperty("Weighting");
+    expect(r.rows[0]).not.toHaveProperty("Parent_Id");
+  });
+
+  it("clears a figure the CA deleted from the checklist", () => {
+    const r = mergeHoldings(
+      [{ id: "row-1", isin: "GB1", security_name: "Fund", OCF: 1.08 }],
+      [{ isin: "GB1", security_name: "Fund" }],
+      OURS,
+    );
+    expect(r.rows[0].OCF).toBeNull();
+  });
+
+  it("omits empty fields on a row being inserted", () => {
+    const r = mergeHoldings([], [buildHoldingRow(fundLine({
+      transactionCosts: null, resolvedTxCost: null, holdingRag: null,
+    }))]);
+    expect("Transaction_Cost" in r.rows[0]).toBe(false);
+    expect("RAG" in r.rows[0]).toBe(false);
+  });
+
+  it("does not insert the same holding twice from one export", () => {
+    const r = mergeHoldings([], [
+      { isin: "GB1", security_name: "A" },
+      { isin: "GB1", security_name: "A" },
+    ]);
+    expect(r.added).toBe(1);
+  });
+
+  it("skips an incoming row with nothing to identify it", () => {
+    const r = mergeHoldings([], [{ position: 10 }]);
+    expect(r.added).toBe(0);
+    expect(r.skipped).toHaveLength(1);
+  });
+
+  it("has nothing to send when the plan is already in step", () => {
+    const r = mergeHoldings([{ id: "row-9", isin: "x", security_name: "theirs" }], [], []);
+    expect(r.rows).toEqual([]);
+  });
+});
+
+// A holding deleted on the checklist has to leave the plan too, or the CA
+// raises a ticket for an ordinary correction. The danger is deleting a row
+// we did not put there, so only keys recorded on a previous successful
+// export are ever touched.
 describe("deleting a holding", () => {
   const onPlan = [
     { id: "row-1", isin: "GB1", security_name: "Kept Fund" },
     { id: "row-2", isin: "GB2", security_name: "Deleted Fund" },
   ];
 
-  it("removes a row this case put there and no longer holds", () => {
-    const result = mergeHoldings(
-      onPlan,
-      [{ isin: "GB1", security_name: "Kept Fund" }],
-      ["isin:GB1", "isin:GB2"],
-    );
-    expect(result.removed).toEqual(["Deleted Fund"]);
-    expect(result.rows.map((r) => r.id)).toEqual(["row-1"]);
+  it("marks a row we own and no longer hold for deletion", () => {
+    const r = mergeHoldings(onPlan, [{ isin: "GB1", security_name: "Kept Fund" }], [
+      "isin:GB1",
+      "isin:GB2",
+    ]);
+    expect(r.removed).toEqual(["Deleted Fund"]);
+    // The explicit marker — omitting the row would leave it on the plan.
+    expect(r.rows).toContainEqual({ id: "row-2", _delete: null });
   });
 
-  // The manual row from the live test. Never exported by us, so never ours
-  // to delete, however much it looks like a holding.
-  it("never removes a row this case did not put there", () => {
-    const result = mergeHoldings(
+  it("never deletes a row this case did not put there", () => {
+    const r = mergeHoldings(
       [{ id: "row-9", isin: "gfghh666", security_name: "gfg" }],
       [],
-      ["isin:GB1"], // we once wrote GB1; the manual row is not in our list
+      ["isin:GB1"],
     );
-    expect(result.removed).toEqual([]);
-    expect(result.kept).toBe(1);
-    expect(result.rows).toHaveLength(1);
+    expect(r.removed).toEqual([]);
+    expect(r.rows).toEqual([]);
   });
 
-  // A case that has not exported since this shipped owns nothing yet, so
-  // the first run afterwards must not delete the rows it put there earlier.
+  // A case that has not exported since this shipped owns nothing yet.
   it("deletes nothing when the case has no recorded keys", () => {
-    const result = mergeHoldings(onPlan, [], []);
-    expect(result.removed).toEqual([]);
-    expect(result.rows).toHaveLength(2);
+    const r = mergeHoldings(onPlan, [], []);
+    expect(r.removed).toEqual([]);
+    expect(r.rows).toEqual([]);
   });
 
-  it("removes every holding when the CA has deleted them all", () => {
-    const result = mergeHoldings(onPlan, [], ["isin:GB1", "isin:GB2"]);
-    expect(result.removed).toHaveLength(2);
-    expect(result.rows).toEqual([]);
-  });
-
-  it("reports the keys it now owns, for the next export", () => {
-    const result = mergeHoldings(
-      onPlan,
-      [{ isin: "GB1", security_name: "Kept Fund" }, { security_name: "No ISIN Fund" }],
-      ["isin:GB1", "isin:GB2"],
-    );
-    expect(result.ownedKeys).toEqual(["isin:GB1", "name:NO ISIN FUND"]);
+  it("deletes every holding when the CA has removed them all", () => {
+    const r = mergeHoldings(onPlan, [], ["isin:GB1", "isin:GB2"]);
+    expect(r.removed).toHaveLength(2);
+    expect(r.rows).toEqual([
+      { id: "row-1", _delete: null },
+      { id: "row-2", _delete: null },
+    ]);
   });
 
   it("matches a deleted holding on the fund name when it had no ISIN", () => {
-    const result = mergeHoldings(
+    const r = mergeHoldings(
       [{ id: "row-1", security_name: "With Profits Fund" }],
       [],
       ["name:WITH PROFITS FUND"],
     );
-    expect(result.removed).toEqual(["With Profits Fund"]);
-    expect(result.rows).toEqual([]);
+    expect(r.removed).toEqual(["With Profits Fund"]);
   });
 
-  // Re-adding the same fund must resurrect the row rather than delete it.
-  it("does not remove a holding that has come back", () => {
-    const result = mergeHoldings(
+  it("does not delete a holding that has come back", () => {
+    const r = mergeHoldings(onPlan, [{ isin: "GB2", security_name: "Deleted Fund" }], ["isin:GB2"]);
+    expect(r.removed).toEqual([]);
+    expect(r.updated).toBe(1);
+  });
+
+  it("reports the keys it now owns, for the next export", () => {
+    const r = mergeHoldings(
       onPlan,
-      [{ isin: "GB2", security_name: "Deleted Fund" }],
-      ["isin:GB2"],
+      [{ isin: "GB1", security_name: "Kept Fund" }, { security_name: "No ISIN Fund" }],
+      ["isin:GB1", "isin:GB2"],
     );
-    expect(result.removed).toEqual([]);
-    expect(result.updated).toBe(1);
+    expect(r.ownedKeys).toEqual(["isin:GB1", "name:NO ISIN FUND"]);
   });
 });

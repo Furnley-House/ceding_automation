@@ -411,11 +411,12 @@ router.post(
           // underneath us, and echoing another Plan's subform rows back would
           // move somebody else's holdings onto this one.
           //
-          // A PUT REPLACES THE SUBFORM: rows left out of the payload are
-          // deleted. So the existing rows are read first and echoed back with
-          // their ids. If that read fails, the holdings are left out of the
-          // payload entirely rather than sent as a bare list — losing the
-          // append is recoverable, deleting a CA's rows in CRM is not.
+          // The plan is read first to learn which rows already exist and
+          // what their ids are. Without that, every holding would be sent
+          // with no id and Zoho would INSERT it again, duplicating the whole
+          // list on each export. So if the read fails the holdings are left
+          // out entirely: losing the update is recoverable, doubling up a
+          // client's holdings in CRM is a mess someone has to clean by hand.
           const payload: Record<string, unknown> = { ...fields };
           // Held until the PUT returns. Reporting "added: 2" for a write that
           // then failed sends the CA to CRM looking for rows that were never
@@ -430,10 +431,12 @@ router.post(
               holdingRows,
               caseRecord.zohoHoldingKeys ?? [],
             );
-            // An empty list is meaningful: it means every holding this case
-            // had on the Plan has been deleted, and the payload has to carry
-            // the remaining rows (possibly none) for that to take effect.
-            payload[HOLDINGS_SUBFORM] = merged.rows;
+            // Only sent when there is something to say. An empty array would
+            // be a no-op at best, and the subform is not touched at all on a
+            // case whose holdings are already in step.
+            if (merged.rows.length > 0) {
+              payload[HOLDINGS_SUBFORM] = merged.rows;
+            }
             pending = {
               added: merged.added,
               updated: merged.updated,

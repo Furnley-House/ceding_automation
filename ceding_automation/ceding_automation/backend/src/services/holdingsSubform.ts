@@ -28,13 +28,6 @@ import { HoldingRag, FundValueSource, type ChecklistFundLine } from "@prisma/cli
 /** The subform field on the Plans module. */
 export const HOLDINGS_SUBFORM = "Holdings_List";
 
-/**
- * Keys Zoho returns on an existing subform row that must not be sent back.
- * Parent_Id is read-only; the timestamps are system-managed. Anything
- * "$"-prefixed is Zoho metadata rather than a field.
- */
-const NOT_WRITABLE = new Set(["Parent_Id", "Created_Time", "Modified_Time"]);
-
 export interface HoldingRow {
   [field: string]: unknown;
 }
@@ -188,14 +181,9 @@ export function holdingKey(row: HoldingRow): string | null {
   return normalised ? `name:${normalised}` : null;
 }
 
-/** Strip the keys Zoho will not accept back on an existing row. */
-function echoable(row: HoldingRow): HoldingRow {
-  const out: HoldingRow = {};
-  for (const [k, v] of Object.entries(row)) {
-    if (k.startsWith("$") || NOT_WRITABLE.has(k)) continue;
-    out[k] = v;
-  }
-  return out;
+/** The id Zoho gave an existing subform row, if it has one. */
+function rowId(row: HoldingRow): string | null {
+  return typeof row.id === "string" && row.id ? row.id : null;
 }
 
 export interface MergeResult {
@@ -215,23 +203,35 @@ export interface MergeResult {
 }
 
 /**
- * Merge our holdings into the Plan's existing subform.
+ * Work out what to send to the Holdings_List subform.
  *
- * A PUT REPLACES THE WHOLE SUBFORM — any row left out of the payload is
- * deleted — so every existing row is echoed back with its id, whether or not
- * this case knows anything about it.
+ * HOW THE SUBFORM ACTUALLY BEHAVES, measured against the live module rather
+ * than assumed (Sept 2026):
  *
- * A holding this case DOES own is refreshed in place rather than skipped.
- * Stage 6 is where the CA settles which figure is right, and an export that
- * only ever appends means a re-check, a source change or a corrected price
- * never reaches CRM after the first push — the row just sits there carrying
- * whatever the first export happened to send.
+ *   - a row sent WITH an id updates that row, field by field;
+ *   - a row sent WITHOUT an id is inserted;
+ *   - a row NOT MENTIONED is left exactly as it is — it is NOT deleted;
+ *   - a row sent as { id, _delete: null } is deleted.
  *
- * The update is a field-level overlay, not a replacement: our values win on
- * the fields we populate, and anything else on the row (Asset_Class,
- * Weighting, whatever a workflow put there) is preserved. Rows we cannot
- * match at all — someone else's holdings, a manually added row — are passed
- * through untouched.
+ * The third point is the one that matters and the one I first got wrong. The
+ * usual advice is that a subform PUT replaces the whole list, so an early
+ * version echoed every existing row back to avoid wiping them. That was
+ * unnecessary — and it hid the real bug, because a holding deleted from the
+ * checklist was simply left out of the payload and therefore never deleted
+ * from the plan.
+ *
+ * So this now says only what it means:
+ *
+ *   ours, still held      -> { id, ...our fields }   updated in place
+ *   ours, no longer held  -> { id, _delete: null }   deleted
+ *   not ours              -> not mentioned           untouched
+ *   new                   -> { ...our fields }       inserted
+ *
+ * Not mentioning other people's rows is better than echoing them: we never
+ * write a field on a row we do not own, so nothing we do can disturb it.
+ *
+ * "Ours" means the key was recorded on this case's last successful export.
+ * That, and only that, is what makes a delete safe.
  *
  * The trade-off, stated plainly: a figure edited directly in CRM on a holding
  * this case owns will be overwritten by the next export. That is the right way
@@ -277,31 +277,34 @@ export function mergeHoldings(
   let kept = 0;
 
   for (const row of existing) {
-    const base = echoable(row);
     const key = holdingKey(row);
-
-    // We put this row here, and the case no longer holds that fund — so the
-    // CA deleted it from the checklist. Leaving it out of the payload is how
-    // a subform row is deleted.
-    if (key && previouslyOurs.has(key) && !byKey.has(key)) {
-      removed.push(String(row.security_name ?? key));
-      continue;
-    }
-
+    const id = rowId(row);
     const ours = key ? byKey.get(key) : undefined;
-    if (ours) {
+
+    if (ours && id) {
       matched.add(key!);
       updated += 1;
       // Every field we own is written, empty ones included, so a value the
-      // CA deleted is cleared rather than left stale. The id keeps it the
-      // same row, and anything we do not own is carried over from `base`.
-      const overlay: HoldingRow = {};
-      for (const f of OWNED_FIELDS) overlay[f] = ours[f] ?? null;
-      rows.push({ ...base, ...overlay });
-    } else {
-      kept += 1;
-      rows.push(base);
+      // CA deleted on the checklist is cleared here rather than left stale.
+      // Fields we do not own are not mentioned, so Zoho leaves them alone.
+      const patch: HoldingRow = { id };
+      for (const f of OWNED_FIELDS) patch[f] = ours[f] ?? null;
+      rows.push(patch);
+      continue;
     }
+
+    // We put this row here on a previous export, and the case no longer
+    // holds that fund — the CA deleted it from the checklist, so it goes
+    // from the plan too. Only ever a key we recorded ourselves.
+    if (id && key && previouslyOurs.has(key)) {
+      removed.push(String(row.security_name ?? key));
+      rows.push({ id, _delete: null });
+      continue;
+    }
+
+    // Nothing to do with this case. Saying nothing about it is the safest
+    // thing we can do, and leaves it exactly as it is.
+    kept += 1;
   }
 
   const added: HoldingRow[] = [];
