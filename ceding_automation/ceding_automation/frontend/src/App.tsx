@@ -10,7 +10,8 @@ import { AuthProvider } from "@/hooks/useAuth";
 import { RoleGuard } from "@/components/RoleGuard";
 import { PermissionGuard } from "@/components/PermissionGuard";
 import { AppLayout } from "@/components/layout/AppLayout";
-import RolePicker from "./pages/RolePicker";
+import Login from "./pages/Login";
+import ChangePassword from "./pages/ChangePassword";
 import AuthCallback from "./pages/AuthCallback";
 import Dashboard from "./pages/Dashboard";
 import Cases from "./pages/Cases";
@@ -40,9 +41,18 @@ const App = () => (
               <Sonner position="bottom-left" closeButton />
               <BrowserRouter>
                 <Routes>
-                  <Route path="/" element={<RolePicker />} />
+                  {/* Phase 1 unified sign-in: SSO + password. Replaces
+                      the pre-2026-09-17 RolePicker which posted email-only
+                      to the (now closed) demo /auth/login endpoint. */}
+                  <Route path="/" element={<Login />} />
                   {/* Azure AD SSO callback — must be outside RoleGuard */}
                   <Route path="/auth/callback" element={<AuthCallback />} />
+                  {/* Forced first-sign-in rotation. Reached via redirect
+                      from /login when mustChangePassword=true on the
+                      response. Requires a valid JWT (issued by the same
+                      login response) so the route sits outside RoleGuard
+                      but expects the auth store to be populated. */}
+                  <Route path="/change-password" element={<ChangePassword />} />
                   <Route path="/presentation" element={<Presentation />} />
                   <Route path="/loa-workflow" element={<LOAWorkflow />} />
                   <Route

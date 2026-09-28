@@ -198,6 +198,30 @@ export interface BffJobResult {
       isWithProfits: boolean;
       confidence: BffConfidence;
     }>;
+    // Pension contribution rows, added alongside the pipeline PR-B Stage 4
+    // sysprompt block. Load-bearing on this PULL contract (not just the PUSH
+    // one) because H16 leaves COLLEAGUE_BACKEND_URL unset on the prodai
+    // apps — the poller is the only working write-back path in production
+    // today, so contributions have to arrive through here or they don't
+    // land at all. Kept as `date: string | null` (YYYY-MM-DD wire form)
+    // to match how completedAt keeps its wire-string shape; the caller
+    // in applyExtractionResult converts to Date before persistence.
+    contributionTransactions: Array<{
+      type: "EMPLOYER" | "PERSONAL";
+      taxYearLabel: string;
+      date: string | null;
+      amount: number;
+      description: string;
+      sourcePage: number | null;
+      sourceRef: string | null;
+      confidence: BffConfidence | null;
+    }>;
+    contributionTotals: Array<{
+      position: number;
+      taxYearLabel: string;
+      employerAiTotal: number | null;
+      personalAiTotal: number | null;
+    }>;
     withProfits: unknown;
     summary: {
       fieldsExtracted: number;
@@ -347,6 +371,25 @@ interface RawBffResult {
       is_with_profits: boolean;
       confidence: BffConfidence;
     }>;
+    // Mirrored from pipeline/bff/routes/extract.py _reshape_to_raw_bff_result.
+    // Both blocks optional at the raw level so a pre-PR-B Cosmos doc that
+    // never carried these keys still parses.
+    contribution_transactions?: Array<{
+      type: "EMPLOYER" | "PERSONAL";
+      tax_year_label: string;
+      date: string | null;
+      amount: number;
+      description: string;
+      source_page?: number | null;
+      source_ref?: string | null;
+      confidence?: BffConfidence | null;
+    }>;
+    contribution_totals?: Array<{
+      position: number;
+      tax_year_label: string;
+      employer_ai_total: number | null;
+      personal_ai_total: number | null;
+    }>;
     with_profits?: unknown;
     summary?: {
       fields_extracted?: number;
@@ -357,6 +400,36 @@ interface RawBffResult {
   llm_call_meta?: { total_tokens?: number; total_cost_usd?: number };
   completed_at: string;
   prompt_template_id?: string | null;
+}
+
+// Pure reshape helpers, exported so a plain unit test can exercise them
+// without mocking axios. Mirrors the codebase's DI-over-module-mock
+// preference (see contributionsService.test.ts). Same file so a future
+// change to the wire shape only has to update one location.
+export function reshapeContributionTransactionsFromWire(
+  rows: NonNullable<RawBffResult["response"]>["contribution_transactions"],
+): BffJobResult["response"]["contributionTransactions"] {
+  return (rows ?? []).map((c) => ({
+    type: c.type,
+    taxYearLabel: c.tax_year_label,
+    date: c.date,
+    amount: c.amount,
+    description: c.description,
+    sourcePage: c.source_page ?? null,
+    sourceRef: c.source_ref ?? null,
+    confidence: c.confidence ?? null,
+  }));
+}
+
+export function reshapeContributionTotalsFromWire(
+  rows: NonNullable<RawBffResult["response"]>["contribution_totals"],
+): BffJobResult["response"]["contributionTotals"] {
+  return (rows ?? []).map((t) => ({
+    position: t.position,
+    taxYearLabel: t.tax_year_label,
+    employerAiTotal: t.employer_ai_total,
+    personalAiTotal: t.personal_ai_total,
+  }));
 }
 
 export async function getJobResult(jobId: string): Promise<BffJobResult> {
@@ -430,6 +503,12 @@ export async function getJobResult(jobId: string): Promise<BffJobResult> {
           isWithProfits: f.is_with_profits ?? false,
           confidence: f.confidence,
         })),
+        contributionTransactions: reshapeContributionTransactionsFromWire(
+          data.response?.contribution_transactions,
+        ),
+        contributionTotals: reshapeContributionTotalsFromWire(
+          data.response?.contribution_totals,
+        ),
         withProfits: data.response?.with_profits ?? null,
         summary: {
           fieldsExtracted: data.response?.summary?.fields_extracted ?? 0,

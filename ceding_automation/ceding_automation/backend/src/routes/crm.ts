@@ -5,6 +5,7 @@ import { requireAuth } from '../middleware/auth';
 import * as zoho from '../services/zohoCrm';
 import { mapZohoTaskToCase, lookupParaplannerFromContact } from '../services/zohoCrm';
 import { generateNextCaseRef } from '../services/caseRef';
+import { SAFE_USER_SELECT } from "../utils/userSelects";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -203,7 +204,7 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
         const updated = await prisma.case.update({
           where: { id: existing.id },
           data: patches,
-          include: { provider: true, createdBy: true, assignedTo: true },
+          include: { provider: true, createdBy: { select: SAFE_USER_SELECT }, assignedTo: { select: SAFE_USER_SELECT } },
         });
         return res.json({
           case: updated,
@@ -256,7 +257,7 @@ router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: 
         paralPlannerId: paralPlannerId,       // paraplanner pulled from Contact (or fallback)
         status: CaseStatus.STAGE_1_LOA_PREP,
       },
-      include: { provider: true, createdBy: true, assignedTo: true, paraplanner: true },
+      include: { provider: true, createdBy: { select: SAFE_USER_SELECT }, assignedTo: { select: SAFE_USER_SELECT }, paraplanner: { select: SAFE_USER_SELECT } },
     });
 
     // 7. Intake-time template-availability check (audit only — NO seed).

@@ -3,8 +3,6 @@ import axios, { AxiosError, AxiosRequestConfig } from "axios";
 import { useAuthStore } from "./store";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001/api";
-const DEMO_LOGIN_DISABLED =
-  String(import.meta.env.VITE_DISABLE_DEMO_LOGIN).toLowerCase() === "true";
 
 export const api = axios.create({ baseURL: API_BASE });
 
@@ -15,20 +13,17 @@ api.interceptors.request.use((config) => {
 });
 
 // Where to send the user when refresh is impossible and we genuinely need
-// an interactive sign-in. Prod skips the in-app picker.
+// an interactive sign-in. Post-2026-09-17 phase 1: everyone lands on `/`,
+// which is the unified Login page (SSO button + password form). The
+// pre-2026-09-17 VITE_DISABLE_DEMO_LOGIN gate is gone — its only job was
+// hiding the insecure demo tiles from prod, which are now deleted from
+// the codebase rather than merely hidden by an env var.
 function redirectToSignIn(): void {
-  const returnTo = window.location.pathname + window.location.search;
-  if (DEMO_LOGIN_DISABLED) {
-    if (window.location.pathname !== "/auth/callback") {
-      window.location.replace(
-        `${API_BASE}/auth/azure?returnTo=${encodeURIComponent(returnTo)}`,
-      );
-    }
-  } else {
-    if (!window.location.pathname.startsWith("/?")) {
-      window.location.href = `/?returnTo=${encodeURIComponent(returnTo)}`;
-    }
+  if (window.location.pathname === "/" || window.location.pathname === "/auth/callback") {
+    return;
   }
+  const returnTo = window.location.pathname + window.location.search;
+  window.location.href = `/?returnTo=${encodeURIComponent(returnTo)}`;
 }
 
 // Coalesce concurrent refresh attempts. If a wave of 401s lands during a
@@ -207,6 +202,30 @@ export const contributionsApi = {
     patch: { taxYearLabel?: string; amount?: string | null },
   ) => api.patch(`/cases/${caseId}/contributions/${id}`, patch),
   reset: (caseId: string) => api.post(`/cases/${caseId}/contributions/reset`, {}),
+  // H33-followup PR3: manual entry into a two-grid contributions cell.
+  // Posts to the PR2 endpoint that atomically supersedes any non-
+  // superseded prior rows in (contributionId, type) and inserts one
+  // MANUAL child. Server preserves parent.employerAiTotal /
+  // personalAiTotal — that's the AI's forensic record of what it read.
+  addTransaction: (
+    caseId: string,
+    contributionId: string,
+    body: { type: "EMPLOYER" | "PERSONAL"; amount: string | number },
+  ) =>
+    api.post(`/cases/${caseId}/contributions/${contributionId}/transactions`, body),
+  // H33-followup PR5: flip the per-cell "not applicable" flag. Setting
+  // atomically supersedes any non-superseded transactions in the same
+  // (contributionId, type); clearing just nulls the flag columns.
+  // MANUAL only — no AI helper hits this endpoint.
+  setNotApplicable: (
+    caseId: string,
+    contributionId: string,
+    body: { type: "EMPLOYER" | "PERSONAL"; on: boolean },
+  ) =>
+    api.post(
+      `/cases/${caseId}/contributions/${contributionId}/not-applicable`,
+      body,
+    ),
 };
 
 // ── Providers ────────────────────────────────────────────

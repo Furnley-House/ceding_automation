@@ -3,7 +3,12 @@ import { CheckCircle2, AlertTriangle, CircleDashed, ListChecks, ThumbsUp, Ban, L
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChecklistField, type ChecklistFieldState, type Confidence, type ConflictResolution } from "./ChecklistField";
 import { ChecklistTemplateView } from "./ChecklistTemplateView";
-import { getTemplate, groupBySection, type ChecklistFieldDef } from "@/lib/checklistTemplates";
+import {
+  getTemplate,
+  groupBySection,
+  CONTRIBUTIONS_LEGACY_FIELD_KEYS,
+  type ChecklistFieldDef,
+} from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
 import { useEditHistory } from "@/hooks/useEditHistory";
 import { Button } from "@/components/ui/button";
@@ -14,16 +19,16 @@ import { useFundLines } from "@/hooks/useFundLines";
 import { checklistApi } from "@/lib/api";
 import { FundDetailsTable } from "./FundDetailsTable";
 import { ContributionsTable } from "./ContributionsTable";
+import { useContributions } from "@/hooks/useContributions";
+import { contributionsProgress } from "@/lib/contributionsDerivation";
 
 // Legacy free-text fields that the AI extractor populates with unstructured
 // contributions text ("See contributions tables for full history"). These
 // are still saved to ChecklistField as a raw fallback, but the checklist UI
 // hides them — the new <ContributionsTable> owns the visible representation.
 // Pension-only; other plan types don't have these fields in their template.
-const CONTRIBUTIONS_LEGACY_FIELD_KEYS = new Set([
-  "contributions_4yr_history",
-  "contributions_breakdown_employer_personal",
-]);
+// Promoted to lib/checklistTemplates.ts (H33-followup PR4) so Stage 6 and
+// Stage 8 apply the same filter — imported at the top of this file.
 
 // localStorage key holding the CA's preferred Stage 4 layout. Per-user
 // (not per-case) so switching between cases keeps the CA's chosen view.
@@ -234,6 +239,16 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
   const { rows: fundLines } = useFundLines(caseId);
   const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
 
+  // H33-followup PR3: the two-grid contributions (Employer + Personal) fold
+  // into the completion counter on Pension cases. +2 to the denominator;
+  // each grid contributes 1 to the "filled" bucket only when it has at
+  // least one non-superseded transaction. Pension cases pre-PR3 (or with
+  // no CA entry yet) drop by ~2 pts of completion until a CA types into
+  // the grids — the "100% complete with zero contribution data" reading
+  // was wrong on every case; this makes it honest. See commit message
+  // for the team-facing note.
+  const { rows: contributions } = useContributions(caseId, isPension);
+
   const stats = useMemo(() => {
     const counts = { high: 0, medium: 0, low: 0, conflict: 0, missing: 0, approved: 0, review: 0 };
     visibleFields.forEach((f) => {
@@ -263,10 +278,17 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     if (fundStatus === "missing") counts.missing++;
     else if (fundStatus === "review") counts.low++;
     else if (fundStatus === "filled") counts.high++;
-    const total = visibleFields.length + 1; // +1 for the Fund Details section
+    // Fold the two contributions grids. Non-Pension returns {add:0, filled:0}.
+    const contribProgress = contributionsProgress(
+      contributions,
+      isPension ? "PENSION" : null,
+    );
+    counts.high += contribProgress.filled;
+    counts.missing += contribProgress.add - contribProgress.filled;
+    const total = visibleFields.length + 1 + contribProgress.add;
     const completion = total === 0 ? 0 : Math.round(((total - counts.missing) / total) * 100);
     return { ...counts, total, completion };
-  }, [visibleFields, byKey, fundStatus]);
+  }, [visibleFields, byKey, fundStatus, contributions, isPension]);
 
   // Assemble the two-candidate resolver pack for a CONFLICT field. Returns
   // undefined when not conflicted or when the row lacks conflict_values
@@ -497,6 +519,19 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
       </div>
 
       <div className="rounded-md border border-border bg-muted/30 p-4">
+        {/* Initial-load gate: byKey is empty on the first render, which
+           makes every templated field count as "missing" (0% · 71 missing
+           on a Pension case). That misleads the reviewer into thinking
+           the case is empty. Show a loading line instead until the
+           first fetch resolves; refetches keep the prior stats visible
+           (loading with rows.length > 0), which is the correct UX. */}
+        {loading && rows.length === 0 ? (
+          <div className="flex items-center gap-2 py-3 text-xs text-muted-foreground">
+            <ListChecks className="h-4 w-4 text-teal" />
+            Loading {planType} checklist…
+          </div>
+        ) : (
+        <>
         <div className="flex items-center justify-between gap-4 mb-3">
           <h3 className="text-sm font-bold theme-heading text-foreground flex items-center gap-2">
             <ListChecks className="h-4 w-4 text-teal" />
@@ -559,6 +594,8 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
               Clear filter
             </button>
           </div>
+        )}
+        </>
         )}
       </div>
 

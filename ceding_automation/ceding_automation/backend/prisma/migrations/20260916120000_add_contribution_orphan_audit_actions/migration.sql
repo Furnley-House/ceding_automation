@@ -1,0 +1,32 @@
+-- Ship for the label-truth rewrite of applyContributionTransactions.
+--
+-- Two new audit actions fire when a document carries contribution data
+-- for a tax year the case does not have as a parent row:
+--
+--   CONTRIBUTION_TOTAL_ORPHANED — a contribution_totals[] entry from
+--   Cosmos carried a taxYearLabel that has no matching parent in
+--   checklist_contributions for the case. The AI totals are dropped
+--   (parent row is not extended silently — see ADR write-up 2026-09-16).
+--   metadata: { jobId, documentId, orphanedTotals: [{label, employer,
+--   personal}], parentLabelsInDb: [labels the case actually has] }.
+--
+--   CONTRIBUTION_TX_ORPHANED — one or more contribution_transactions[]
+--   entries carried a taxYearLabel with no matching parent. Same reason,
+--   same handling. metadata: { jobId, documentId, orphanedByLabel:
+--   [{label, type, count, totalAmount}], parentLabelsInDb: [...] }.
+--
+-- Both actions render at stage 7 via the existing AuditTimeline surface.
+-- CAs see the row and can decide whether the case's parent set should
+-- be extended manually. There is intentionally no auto-widening path.
+--
+-- Rationale: the prior implementation of applyContributionTransactions
+-- matched totals by position and used a position fallback for
+-- transactions. Both paths could silently misattribute a document's
+-- older tax years to the case's newer parent rows when the two
+-- coordinate systems disagreed. Label-only matching + explicit orphan
+-- audit prevents that. See paired src/services/aiBffApply.ts rewrite.
+--
+-- Additive enum values; no ALTER on existing rows.
+
+ALTER TYPE "AuditAction" ADD VALUE 'CONTRIBUTION_TOTAL_ORPHANED';
+ALTER TYPE "AuditAction" ADD VALUE 'CONTRIBUTION_TX_ORPHANED';

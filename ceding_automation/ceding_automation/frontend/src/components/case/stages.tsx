@@ -29,7 +29,14 @@ import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useChecklistFields, isMissing, displayValue, fundDetailsStatus } from "@/hooks/useChecklistFields";
 import { useFundLines } from "@/hooks/useFundLines";
-import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
+import { useContributions } from "@/hooks/useContributions";
+import { contributionsProgress } from "@/lib/contributionsDerivation";
+import { ContributionsTable } from "./ContributionsTable";
+import {
+  getTemplate,
+  groupBySection,
+  CONTRIBUTIONS_LEGACY_FIELD_KEYS,
+} from "@/lib/checklistTemplates";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation } from "react-router-dom";
 import { casesApi, checklistApi } from "@/lib/api";
@@ -156,7 +163,11 @@ export function StageSendLOA({ caseItem }: StageProps) {
 
 export function StageDocumentUpload({ caseItem }: StageProps) {
   // (Stage 3 — see StageSendLOA above for stage 2)
-  const { documents, removeDocument, refresh } = useDocuments(caseItem.id, { refreshInterval: 5000 });
+  const { documents, loading, removeDocument, refresh } = useDocuments(caseItem.id, { refreshInterval: 5000 });
+  // Suppress the header count during the initial fetch — "Uploaded
+  // documents (0)" is the same wrong-state-while-loading anti-pattern
+  // as the empty-state below.
+  const showCount = !(loading && documents.length === 0);
   return (
     <StagePanel
       num={3}
@@ -168,7 +179,7 @@ export function StageDocumentUpload({ caseItem }: StageProps) {
         <DocumentUploader caseId={caseItem.id} onUploaded={refresh} />
         <div className="rounded-md border border-border bg-card p-3">
           <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground mb-2">
-            Uploaded documents ({documents.length})
+            Uploaded documents{showCount ? ` (${documents.length})` : ""}
           </h4>
           <DocumentList
             documents={documents}
@@ -180,6 +191,7 @@ export function StageDocumentUpload({ caseItem }: StageProps) {
             showExtractButton={false}
             showViewButton={false}
             simplifiedBadge
+            loading={loading}
           />
         </div>
       </div>
@@ -287,17 +299,29 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
     return m;
   }, [rows]);
 
+  // H33-followup PR4: Pension guard — needed both for the contributions
+  // fold-in (below) and for hiding the two legacy contribution scalar
+  // fields in visibleFields (they render as "See detailed tables in
+  // document" prose which contradicts the grid the paraplanner now
+  // sees; the grid is the source of truth).
+  const isPension = (caseItem.plan_type ?? "").toUpperCase() === "PENSION";
+
   // Mirror ChecklistPanel: only count template fields whose showIf condition
   // is satisfied. Counting raw DB rows pulls in stale/legacy fields and gives
   // a different total than Extract & Fill Gaps and the Excel export.
+  // Also filter the two legacy Pension contribution scalars (H33-followup
+  // PR4) — the two-grid ContributionsTable owns their visible
+  // representation now; leaving them in this list would double up as
+  // "See detailed tables in document" prose next to the grid.
   const visibleFields = useMemo(
     () =>
       template.filter((f) => {
+        if (isPension && CONTRIBUTIONS_LEGACY_FIELD_KEYS.has(f.key)) return false;
         if (!f.showIf) return true;
         const dependent = byKey.get(f.showIf.key)?.value;
         return dependent ? f.showIf.in.includes(dependent) : false;
       }),
-    [template, byKey],
+    [template, byKey, isPension],
   );
 
   // Fund Details rolls into the totals alongside the scalar fields so the
@@ -305,6 +329,12 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
   // doesn't read as "All filled".
   const { rows: fundLines } = useFundLines(caseItem.id);
   const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
+  // H33-followup PR3: two-grid contributions (Employer + Personal) fold
+  // into the paraplanner-facing count on Pension cases. +2 to the
+  // denominator; the counter reads honestly rather than "100% complete
+  // with zero contribution data" (which was wrong on every completed
+  // Pension case pre-PR3). See commit message for team-facing note.
+  const { rows: contributions } = useContributions(caseItem.id, isPension);
 
   const totals = useMemo(() => {
     const fieldTotal = visibleFields.length;
@@ -319,8 +349,15 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
     // (the section has data, just not all high-confidence); missing only when
     // there are no rows / every row is empty.
     const fundFilled = fundStatus !== "missing";
-    const total = fieldTotal + 1;
     if (fundFilled) filled += 1;
+    // +2 for the two contributions grids on Pension. contributionsProgress
+    // returns {add: 0, filled: 0} for non-Pension.
+    const contribProgress = contributionsProgress(
+      contributions,
+      isPension ? "PENSION" : null,
+    );
+    filled += contribProgress.filled;
+    const total = fieldTotal + 1 + contribProgress.add;
     const missing = total - filled;
     return {
       total,
@@ -329,7 +366,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
       returned,
       complete: total > 0 && missing === 0 && returned === 0,
     };
-  }, [visibleFields, byKey, fundStatus]);
+  }, [visibleFields, byKey, fundStatus, contributions, isPension]);
 
   const grouped = useMemo(() => groupBySection(visibleFields), [visibleFields]);
 
@@ -416,6 +453,18 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
           </div>
         )}
 
+        {/* Initial-load gate: byKey is empty on first render → every
+            templated field counts as "missing" → tiles show
+            "71 total / 0 filled / 71 missing", which reads as a
+            worst-case case rather than a not-yet-loaded one. Hide
+            tiles + returned banner until the fetch resolves. */}
+        {loading && rows.length === 0 ? (
+          <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+            <ClipboardCheck className="h-4 w-4 text-teal" />
+            Loading checklist…
+          </div>
+        ) : (
+        <>
         {/* Returned-for-re-review banner */}
         {totals.returned > 0 && (
           <div className="rounded-md border border-warning/40 bg-warning/10 p-3 flex items-start gap-3">
@@ -470,6 +519,8 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
             onClick={() => setFilter(filter === "returned" ? "all" : "returned")}
           />
         </div>
+        </>
+        )}
         {filter !== "all" && (
           <div className="flex items-center justify-between text-xs">
             <span className="text-muted-foreground">
@@ -506,6 +557,17 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
                 <div className="px-3 py-2 border-b border-border bg-muted/30">
                   <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground">{section}</h4>
                 </div>
+                {/* H33-followup PR4: paraplanner sees the same read-only
+                    two-grid contributions table inside Transaction History
+                    that CAs see at Stage 4, replacing the two legacy scalar
+                    prose fields (now filtered out of visibleFields above).
+                    Drill-down chevrons stay clickable; edit affordances +
+                    Reset button hide via ContributionsTable's readOnly. */}
+                {isPension && section === "Transaction History" && (
+                  <div className="p-3 border-b border-border">
+                    <ContributionsTable caseId={caseItem.id} readOnly />
+                  </div>
+                )}
                 <ul className="divide-y divide-border">
                   {fields.map((f) => {
                     const row = byKey.get(f.key);

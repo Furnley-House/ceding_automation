@@ -179,7 +179,8 @@
           "Monthly",
           "Quarterly",
           "Half-yearly",
-          "Yearly"
+          "Yearly",
+          "N/A"
         ],
         "required": false,
         "parent_field": "ongoing_regular_contributions",
@@ -219,7 +220,8 @@
           "Monthly",
           "Quarterly",
           "Half-yearly",
-          "Yearly"
+          "Yearly",
+          "N/A"
         ],
         "required": false,
         "parent_field": "withdrawal_details",
@@ -618,7 +620,8 @@
           "Monthly",
           "Quarterly",
           "Half-yearly",
-          "Yearly"
+          "Yearly",
+          "N/A"
         ],
         "required": false,
         "parent_field": "ongoing_regular_contributions",
@@ -647,7 +650,8 @@
           "Monthly",
           "Quarterly",
           "Half-yearly",
-          "Yearly"
+          "Yearly",
+          "N/A"
         ],
         "required": false,
         "parent_field": "withdrawal_details",
@@ -1136,7 +1140,8 @@
           "Monthly",
           "Quarterly",
           "Half-yearly",
-          "Yearly"
+          "Yearly",
+          "N/A"
         ],
         "required": false,
         "parent_field": "regular_contribution_personal",
@@ -1167,7 +1172,8 @@
           "Monthly",
           "Quarterly",
           "Half-yearly",
-          "Yearly"
+          "Yearly",
+          "N/A"
         ],
         "required": false,
         "parent_field": "regular_contribution_employee",
@@ -1198,7 +1204,8 @@
           "Monthly",
           "Quarterly",
           "Half-yearly",
-          "Yearly"
+          "Yearly",
+          "N/A"
         ],
         "required": false,
         "parent_field": "regular_contribution_employer",
@@ -1227,7 +1234,8 @@
           "Monthly",
           "Quarterly",
           "Half-yearly",
-          "Yearly"
+          "Yearly",
+          "N/A"
         ],
         "required": false,
         "parent_field": "withdrawal_details",

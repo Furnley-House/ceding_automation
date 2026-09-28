@@ -331,10 +331,8 @@ export function ExtractionWorkspace({ caseId, planType }: Props) {
               // wouldn't flip to "Error" until the next ai-status poll
               // tick (3s) or a manual refresh.
               onExtractionDone={refreshDocuments}
+              loading={loading}
             />
-            {loading && (
-              <p className="text-[10px] text-muted-foreground text-center py-2">Loading documents…</p>
-            )}
           </div>
 
           <div className="flex-1 rounded-md border border-border bg-card overflow-hidden min-h-[400px]">

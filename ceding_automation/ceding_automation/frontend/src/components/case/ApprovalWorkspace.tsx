@@ -16,8 +16,13 @@ import { toast } from "sonner";
 import { checklistApi, casesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { useChecklistFields, isMissing } from "@/hooks/useChecklistFields";
-import { getTemplate, groupBySection } from "@/lib/checklistTemplates";
+import {
+  getTemplate,
+  groupBySection,
+  CONTRIBUTIONS_LEGACY_FIELD_KEYS,
+} from "@/lib/checklistTemplates";
 import { FundDetailsTable } from "./FundDetailsTable";
+import { ContributionsTable } from "./ContributionsTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -64,14 +69,29 @@ export function ApprovalWorkspace({ caseItem }: Props) {
     return m;
   }, [rows]);
 
+  // H33-followup PR4: hide the two legacy Pension contribution scalar
+  // keys — the two-grid ContributionsTable (mounted read-only below)
+  // owns their visible representation. Without this filter, the
+  // paraplanner would see "See detailed tables in document" prose
+  // fields sitting next to the grid with the actual figures — worse
+  // than either alone. isPension gate so ISA/GIA are untouched.
+  //
+  // Visible cosmetic drop for the team on first load: cases previously
+  // approved with these 2 fields marked "approved" will show
+  // stats.total drop by 2 (and stats.approved drop by 2 if they were
+  // approved). Approval percentage is unchanged; absolute counts move.
+  // Not a data change — just what the counter tallies. See commit body.
+  const isPension = (caseItem.plan_type ?? "").toUpperCase() === "PENSION";
+
   const visibleFields = useMemo(
     () =>
       template.filter((f) => {
+        if (isPension && CONTRIBUTIONS_LEGACY_FIELD_KEYS.has(f.key)) return false;
         if (!f.showIf) return true;
         const dependent = byKey.get(f.showIf.key)?.value;
         return dependent ? f.showIf.in.includes(dependent) : false;
       }),
-    [template, byKey],
+    [template, byKey, isPension],
   );
 
   const stats = useMemo(() => {
@@ -267,8 +287,23 @@ export function ApprovalWorkspace({ caseItem }: Props) {
   const allFieldsApproved = stats.approved === stats.total && stats.total > 0;
   const caseAlreadyApproved = caseItem.status === "approved" || caseItem.status === "complete";
 
+  // Initial-load gate: byKey is empty on first render → every visible
+  // templated field counts as "missing" → StatCards show
+  // "71 total / 0 approved / 71 missing", which reads as no progress
+  // rather than not-yet-loaded. Hide stats + progress bar until the
+  // fetch resolves. Refetches (loading with rows.length > 0) keep the
+  // prior values visible, which is the correct UX.
+  const isInitialLoad = loading && rows.length === 0;
+
   return (
     <div className="space-y-4">
+      {isInitialLoad ? (
+        <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+          <ShieldCheck className="h-4 w-4 text-teal" />
+          Loading checklist…
+        </div>
+      ) : (
+      <>
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
         <StatCard label="Total" value={stats.total} tone="muted" icon={CheckCircle2} />
@@ -294,6 +329,8 @@ export function ApprovalWorkspace({ caseItem }: Props) {
           />
         </div>
       </div>
+      </>
+      )}
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card p-2">
@@ -382,34 +419,49 @@ export function ApprovalWorkspace({ caseItem }: Props) {
         </div>
       ) : (
         <div className="space-y-3">
-          {grouped.map(({ section, items }) => (
-            <div key={section} className="rounded-md border border-border bg-card overflow-hidden">
-              <div className="px-3 py-2 border-b border-border bg-muted/30 flex items-center justify-between">
-                <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground">
-                  {section}
-                </h4>
-                <span className="text-[10px] text-muted-foreground">
-                  {items.length} field{items.length === 1 ? "" : "s"}
-                </span>
+          {grouped.map(({ section, items }) => {
+            const showContributions =
+              isPension && section === "Transaction History";
+            return (
+              <div key={section} className="rounded-md border border-border bg-card overflow-hidden">
+                <div className="px-3 py-2 border-b border-border bg-muted/30 flex items-center justify-between">
+                  <h4 className="text-[11px] uppercase tracking-widest font-bold text-muted-foreground">
+                    {section}
+                  </h4>
+                  <span className="text-[10px] text-muted-foreground">
+                    {items.length} field{items.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                {/* H33-followup PR4: paraplanner sees the same read-only
+                    two-grid contributions table inside Transaction History
+                    as CAs see at Stage 4, replacing the two legacy scalar
+                    prose fields (now filtered out of visibleFields).
+                    Drill-down chevrons stay clickable; edit affordances +
+                    Reset button hide via ContributionsTable's readOnly. */}
+                {showContributions && (
+                  <div className="p-3 border-b border-border">
+                    <ContributionsTable caseId={caseItem.id} readOnly />
+                  </div>
+                )}
+                <ul className="divide-y divide-border">
+                  {items.map((row) => (
+                    <FieldRow
+                      key={row.id}
+                      row={row}
+                      selected={selected.has(row.id)}
+                      onToggleSelect={() => toggleSelect(row.id)}
+                      onApprove={() => singleAction.mutate({ row, action: "approve" })}
+                      onRequestReview={() => {
+                        setReviewText(row.notes ?? "");
+                        setReviewDialog({ row });
+                      }}
+                      busy={singleAction.isPending}
+                    />
+                  ))}
+                </ul>
               </div>
-              <ul className="divide-y divide-border">
-                {items.map((row) => (
-                  <FieldRow
-                    key={row.id}
-                    row={row}
-                    selected={selected.has(row.id)}
-                    onToggleSelect={() => toggleSelect(row.id)}
-                    onApprove={() => singleAction.mutate({ row, action: "approve" })}
-                    onRequestReview={() => {
-                      setReviewText(row.notes ?? "");
-                      setReviewDialog({ row });
-                    }}
-                    busy={singleAction.isPending}
-                  />
-                ))}
-              </ul>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

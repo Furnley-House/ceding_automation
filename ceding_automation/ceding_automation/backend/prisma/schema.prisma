@@ -60,8 +60,8 @@ enum LOAStatus {
   NOT_SENT
   SENT
   PROCESSED // provider acknowledged receipt of the LOA
-  RECEIVED  // signed PDF / policy info pack back from provider
-  SIGNED    // legacy — unused by the UI, kept so the enum migration is non-destructive
+  RECEIVED // signed PDF / policy info pack back from provider
+  SIGNED // legacy — unused by the UI, kept so the enum migration is non-destructive
 }
 
 enum DocumentStatus {
@@ -150,12 +150,53 @@ enum AuditAction {
   // land on). See docs/phase2/PHASE2_TASKS.md §H23.
   SEEDING_ZERO_TEMPLATES
   SEEDING_HEAL_ON_SYNC
+  // H33-followup PR2: manual contribution transaction entry. Written by
+  // POST /:caseId/contributions/:id/transactions when a CA types a
+  // number into a contributions grid cell. metadata captures the new
+  // value and the supersededDetails of any prior rows in the same
+  // (contributionId, type) that were superseded by this entry.
+  CONTRIBUTION_TRANSACTION_ADDED
+  // H33-followup PR5: per-cell "not applicable" flip. Written by POST
+  // /:caseId/contributions/:id/not-applicable when a CA marks a cell
+  // as "does not apply" (or clears the flag). metadata captures which
+  // (contributionId, type) cell, whether the flip set or cleared the
+  // flag, and the full supersededDetails of any rows superseded when
+  // the flag was set. Mirrors CONTRIBUTION_TRANSACTION_ADDED shape so
+  // AuditTimeline's description helper can reuse the metadata parser
+  // with minor branching.
+  CONTRIBUTION_MARKED_NA
+  // Label-truth rewrite of applyContributionTransactions (2026-09-16):
+  // fire when a document carries a taxYearLabel the case does not have
+  // as a parent row. The AI data is dropped (parent set is NOT extended
+  // silently). Metadata: jobId, documentId, orphaned list with label +
+  // amount/count, parentLabelsInDb for reviewer context. Rendered via
+  // the existing AuditTimeline at stage 7 so a CA can decide whether
+  // to add a parent row for that year manually.
+  CONTRIBUTION_TOTAL_ORPHANED
+  CONTRIBUTION_TX_ORPHANED
+  // 2026-09-19: sync-on-403 recovery path in requireCaseAccess. Fires
+  // when the middleware's fallback resync ran but the caller STILL
+  // doesn't qualify — Zoho didn't back them up either. metadata:
+  // { userId, userEmail, caseRef, zohoTaskId, syncOutcome, zohoOwnerEmail }.
+  // Distinct action (not a CASE_UPDATED flag) so ops queries and
+  // alerts can key on it directly.
+  CASE_ACCESS_RETRY_DENIED
 }
 
 enum ContactMethod {
   PHONE
   EMAIL
   POST
+}
+
+enum ContributionTransactionType {
+  EMPLOYER
+  PERSONAL
+}
+
+enum ContributionTransactionSource {
+  AI
+  MANUAL
 }
 
 enum LOAFormat {
@@ -169,25 +210,48 @@ enum LOAFormat {
 // ─────────────────────────────────────────────
 
 model User {
-  id        String     @id @default(cuid())
-  email     String     @unique
-  name      String
-  role      UserRole
-  status    UserStatus @default(ACTIVE)
-  ssoId     String?    @unique // Zoho SSO identifier
+  id              String     @id @default(cuid())
+  email           String     @unique
+  name            String
+  role            UserRole
+  status          UserStatus @default(ACTIVE)
+  ssoId           String?    @unique // Zoho SSO identifier
   // Microsoft (Entra) refresh_token captured at SSO callback. Used by
   // POST /auth/refresh to silently mint a new app JWT when the previous one
   // expires, so users mid-extraction don't get dumped to the login screen.
   // Rotated on each refresh; nullable for users who pre-date this column.
-  ssoRefreshToken String? @db.Text
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  ssoRefreshToken String?    @db.Text
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
   // Per-user access flag for /ai-training. Deliberately not a role because
   // the grantees span CA_TEAM and ADMIN (see project note 2026-08-11).
   // Toggled from UserManagementPanel by any ADMIN; every flip writes a
   // UserAuditLog row so the grant history is reconstructable.
   canAccessAiTraining Boolean @default(false)
+
+  // Phase 1 password login (2026-09-17). Populated by admin-only actions —
+  // POST /users/:id/set-password and the withPassword branch of POST /users.
+  // Nullable so SSO-only rows carry NULL and refuse password login cleanly.
+  // A user CAN have both passwordHash AND ssoId — see the migration
+  // 20260917130000_add_password_login for the intent notes; the single
+  // kill switch across both routes is `status = 'INACTIVE'`.
+  passwordHash        String?
+  // "Temporary password set by admin, user must rotate on next sign-in."
+  // Narrow semantics — do NOT overload with a general reset-token signal
+  // in phase 2; that will be a separate field. Login endpoint returns the
+  // flag in its response so the frontend can redirect to /change-password.
+  mustChangePassword  Boolean   @default(false)
+  // Counter + timestamp implement lockout on repeated failures. Threshold
+  // and window (currently 5 attempts × 15 minutes) live in the login
+  // endpoint. Both reset on any successful login. Increments do NOT write
+  // an audit row per attempt — the counter itself is the record; a lockout
+  // is inferable from `lockedUntil > now()`.
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  // When the passwordHash was last written. Used by admin displays ("last
+  // rotated 3 months ago") and by any future age-based rotation policy.
+  passwordUpdatedAt   DateTime?
 
   // RingCentral per-user OAuth — each user connects their own RC account
   rcRefreshToken         String?
@@ -199,19 +263,22 @@ model User {
   rcConnectedAt          DateTime?
 
   // Relations
-  casesCreated     Case[]              @relation("CaseCreatedBy")
-  casesAssigned    Case[]              @relation("CaseAssignedTo")
-  casesParaplanner Case[]              @relation("CaseParaplanner")
-  casesAdviser     Case[]              @relation("CaseAdviser")
-  auditLogs        AuditLog[]
-  fieldEdits       ChecklistField[]
-  fundLineEdits    ChecklistFundLine[] @relation("FundLineEditedBy")
-  comments         Comment[]
-  notifications    Notification[]
+  casesCreated          Case[]                  @relation("CaseCreatedBy")
+  casesAssigned         Case[]                  @relation("CaseAssignedTo")
+  casesParaplanner      Case[]                  @relation("CaseParaplanner")
+  casesAdviser          Case[]                  @relation("CaseAdviser")
+  auditLogs             AuditLog[]
+  fieldEdits            ChecklistField[]
+  fundLineEdits         ChecklistFundLine[]     @relation("FundLineEditedBy")
+  // H33-followup PR5 — see ChecklistContribution.*NotApplicableBy.
+  contribEmployerNA     ChecklistContribution[] @relation("ContribEmployerNA")
+  contribPersonalNA     ChecklistContribution[] @relation("ContribPersonalNA")
+  comments              Comment[]
+  notifications         Notification[]
   // User-admin audit trail — same User appears on both sides. `Actor` is the
   // ADMIN who made the change; `Target` is the user whose row was changed.
-  userAuditLogsAsActor  UserAuditLog[] @relation("UserAuditLogActor")
-  userAuditLogsAsTarget UserAuditLog[] @relation("UserAuditLogTarget")
+  userAuditLogsAsActor  UserAuditLog[]          @relation("UserAuditLogActor")
+  userAuditLogsAsTarget UserAuditLog[]          @relation("UserAuditLogTarget")
 
   @@map("users")
 }
@@ -273,24 +340,24 @@ model Case {
   provider   Provider? @relation(fields: [providerId], references: [id])
 
   // Status & stage
-  status      CaseStatus @default(STAGE_1_LOA_PREP)
-  loaStatus   LOAStatus  @default(NOT_SENT)
-  loaSentAt   DateTime?  // exposed to UI as loa_sent_date via flattenCase
-  loaProcessedAt DateTime? // stamped when loaStatus → PROCESSED
-  loaReceivedAt  DateTime? // stamped when loaStatus → RECEIVED
+  status          CaseStatus @default(STAGE_1_LOA_PREP)
+  loaStatus       LOAStatus  @default(NOT_SENT)
+  loaSentAt       DateTime? // exposed to UI as loa_sent_date via flattenCase
+  loaProcessedAt  DateTime? // stamped when loaStatus → PROCESSED
+  loaReceivedAt   DateTime? // stamped when loaStatus → RECEIVED
   // LOA bookkeeping written from Stage 2 SendLOAWorkspace.
   // The chosen send-method (origo / email / courier) — drives which set
   // of method-scoped fields below are authoritative for the case.
-  loaMethod        String?
+  loaMethod       String?
   // Per-method notes + references. Each panel on Stage 2 owns its own
   // textarea / input, so the values don't leak across tabs when the
   // operator switches methods.
-  loaOrigoRef      String? // Origo reference (after Unipass submission)
-  loaOrigoNotes    String?
-  loaEmailNotes    String? // (no separate ref for email — recipient is canonical)
-  loaCourierRef    String? // courier tracking number
-  loaCourierNotes  String?
-  ragStatus   String? // "GREEN", "AMBER", "RED"
+  loaOrigoRef     String? // Origo reference (after Unipass submission)
+  loaOrigoNotes   String?
+  loaEmailNotes   String? // (no separate ref for email — recipient is canonical)
+  loaCourierRef   String? // courier tracking number
+  loaCourierNotes String?
+  ragStatus       String? // "GREEN", "AMBER", "RED"
 
   // Assignment
   createdById    String
@@ -308,12 +375,12 @@ model Case {
   adviser        User?   @relation("CaseAdviser", fields: [adviserId], references: [id])
 
   // Timestamps
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  readyForReviewAt DateTime?
-  approvedAt       DateTime?
-  completedAt      DateTime?
-  onHoldReason     String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  readyForReviewAt      DateTime?
+  approvedAt            DateTime?
+  completedAt           DateTime?
+  onHoldReason          String?
   // H23 (Nishant's design): stamped by the first extraction-submit on
   // this case. Used by Ship #1's guard predicate at
   // caseHasExtractionRun (backend/src/routes/cases.ts) to arm the
@@ -334,11 +401,11 @@ model Case {
   // them keeps the export deterministic and avoids the "id seems to be
   // invalid" errors that come from race conditions or stale Contact
   // field types. Run another sync to refresh.
-  zohoOwnerId          String?   // Plan.Owner ← Contact.Owner (single user)
-  zohoClientOwnerIds   String[]  // Plan.Client_Owners ← Contact.Client_Owners (multi-user)
-  zohoParaplannerId    String?   // Single paraplanner user id (fallback / convenience)
-  zohoAdviserId        String?   // Contact.Adviser (single user id) — audit trail for who the sync resolved
-  zohoProviderRecordId String?   // Plan.Provider ← Providers-module record id
+  zohoOwnerId          String? // Plan.Owner ← Contact.Owner (single user)
+  zohoClientOwnerIds   String[] // Plan.Client_Owners ← Contact.Client_Owners (multi-user)
+  zohoParaplannerId    String? // Single paraplanner user id (fallback / convenience)
+  zohoAdviserId        String? // Contact.Adviser (single user id) — audit trail for who the sync resolved
+  zohoProviderRecordId String? // Plan.Provider ← Providers-module record id
   zohoSyncedAt         DateTime? // When the cached IDs above were last refreshed
 
   // Relations
@@ -396,7 +463,7 @@ model Document {
   aiJobCompletedAt  DateTime? // idempotency guard — set once by whichever path settles first
   aiJobLastPolledAt DateTime? // cadence control for the background poller
   aiJobError        String?
-  aiJobCostUsd      Decimal? @db.Decimal(10, 6) // from BFF llm_call_meta.total_cost_usd
+  aiJobCostUsd      Decimal?  @db.Decimal(10, 6) // from BFF llm_call_meta.total_cost_usd
   aiJobTokens       Int? // from BFF llm_call_meta.total_tokens
 
   // H33 piece 1b — Reviewer-visible detection outcome. Populated by
@@ -409,8 +476,13 @@ model Document {
   aiExtractionNotes Json? @map("ai_extraction_notes")
 
   // Relations
-  checklistFields ChecklistField[]    @relation("FieldSourceDocument")
-  fundLines       ChecklistFundLine[] @relation("FundLineSourceDocument")
+  checklistFields          ChecklistField[]          @relation("FieldSourceDocument")
+  fundLines                ChecklistFundLine[]       @relation("FundLineSourceDocument")
+  // Contribution transactions cite this document as their source once
+  // piece 2b lands and the pipeline starts emitting per-row data. FK is
+  // ON DELETE SET NULL — a document delete loses the "Jump to source
+  // PDF" link on those rows but preserves the transaction history.
+  contributionTransactions ContributionTransaction[]
 
   @@index([caseId])
   @@index([aiJobStatus, aiJobSubmittedAt]) // poller candidate scan
@@ -423,19 +495,19 @@ model Document {
 // ─────────────────────────────────────────────
 
 model ChecklistTemplate {
-  id              String   @id @default(cuid())
-  planType        PlanType
-  sectionName     String // e.g. "Pension Details", "Charges", "Benefits"
-  fieldName       String
-  fieldKey        String // snake_case key used in API
-  fieldType       String // "text" | "number" | "currency" | "date" | "dropdown" | "yes_no" | "percentage" | "url" | "free_text"
-  dropdownOptions String[] // If fieldType = "dropdown"
-  isRequired      Boolean  @default(true)
-  displayOrder    Int
-  isActive        Boolean  @default(true)
-  isManualEntryOnly Boolean @default(false) // when true, AI BFF never writes this field — manual entry only
-  conditionalNote String? // Tooltip / guidance for CA team
-  metadata        Json?   // v1.1 canonical extras: typical_values, normalize_per, allows_defer_to_source, defer_examples, auto_extract_hint, parent_field, accepts_non_applicable_markers, columns, section_order
+  id                String   @id @default(cuid())
+  planType          PlanType
+  sectionName       String // e.g. "Pension Details", "Charges", "Benefits"
+  fieldName         String
+  fieldKey          String // snake_case key used in API
+  fieldType         String // "text" | "number" | "currency" | "date" | "dropdown" | "yes_no" | "percentage" | "url" | "free_text"
+  dropdownOptions   String[] // If fieldType = "dropdown"
+  isRequired        Boolean  @default(true)
+  displayOrder      Int
+  isActive          Boolean  @default(true)
+  isManualEntryOnly Boolean  @default(false) // when true, AI BFF never writes this field — manual entry only
+  conditionalNote   String? // Tooltip / guidance for CA team
+  metadata          Json? // v1.1 canonical extras: typical_values, normalize_per, allows_defer_to_source, defer_examples, auto_extract_hint, parent_field, accepts_non_applicable_markers, columns, section_order
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -466,16 +538,16 @@ model ChecklistField {
   status     FieldStatus     @default(AI_EXTRACTED)
 
   // Source citation
-  sourceDocumentId String?
-  sourceDocument   Document? @relation("FieldSourceDocument", fields: [sourceDocumentId], references: [id])
+  sourceDocumentId   String?
+  sourceDocument     Document? @relation("FieldSourceDocument", fields: [sourceDocumentId], references: [id])
   // Snapshot of the source document's filename at extraction time. Persists
   // after the FK is SET NULL by a doc-delete cascade, so the audit trail can
   // still name the (now-gone) source. Written alongside sourceDocumentId in
   // aiBffApply.applyFieldExtraction. (S5 / Decision 6 step 2.)
   sourceDocumentName String?
-  sourcePageNumber Int?
-  sourceSection    String? // Table heading or section name in document
-  sourceQuote      String? // Raw text snippet extracted
+  sourcePageNumber   Int?
+  sourceSection      String? // Table heading or section name in document
+  sourceQuote        String? // Raw text snippet extracted
 
   // Manual override tracking
   isManuallyOverridden Boolean   @default(false)
@@ -651,6 +723,13 @@ enum UserAuditAction {
   USER_PERMISSION_CHANGED
   USER_ROLE_CHANGED
   USER_STATUS_CHANGED
+  // Phase 1 password login (2026-09-17). Fires when an admin creates or
+  // resets another user's password via POST /users (withPassword=true)
+  // or POST /users/:id/set-password. Not emitted for SSO auto-provision.
+  USER_PASSWORD_SET
+  // Fires when a user changes their OWN password (target=actor) via
+  // POST /auth/change-password. Distinguishes admin resets from self-service.
+  USER_PASSWORD_CHANGED
 }
 
 model UserAuditLog {
@@ -686,11 +765,11 @@ model ChecklistFundLine {
   planType PlanType // PENSION | ISA | GIA — copied from case for fast filtering
 
   // Row data (matches Excel columns; all nullable so partial rows can be saved)
-  fundName      String
-  isinSedolCiti String? // ISIN / Sedol / Citi code
-  numberOfUnits Decimal? @db.Decimal(20, 6)
-  pricePerUnit  Decimal? @db.Decimal(20, 6)
-  value         Decimal? @db.Decimal(20, 2)
+  fundName         String
+  isinSedolCiti    String? // ISIN / Sedol / Citi code
+  numberOfUnits    Decimal? @db.Decimal(20, 6)
+  pricePerUnit     Decimal? @db.Decimal(20, 6)
+  value            Decimal? @db.Decimal(20, 2)
   // Manual-entry only — AI BFF intentionally does not populate these.
   ocf              Decimal? @db.Decimal(8, 4) // ongoing charges figure, stored as percentage e.g. 0.7500 = 0.75%
   transactionCosts Decimal? @db.Decimal(8, 4) // stored as percentage e.g. 0.0900 = 0.09%
@@ -752,12 +831,117 @@ model ChecklistContribution {
   // handles rendering). Nullable so partial data can be saved.
   amount String?
 
+  // H33-followup PR1: the AI's own totals per cell, as emitted by the
+  // pipeline once piece 2b lands. Two things this field is NOT:
+  //   - Not user-facing (the UI sums non-superseded child rows for
+  //     what it displays).
+  //   - Not touched by CA-takes-ownership. When a CA overrides AI
+  //     extractions in a cell, the AI children are stamped
+  //     supersededAt but this column is PRESERVED — it is the AI's
+  //     record of what it read from the document, and keeping it is
+  //     what lets us compare hand-entered figures against the model's
+  //     later (FH-2026-000188 pattern, forensics-only path).
+  // Nullable because (a) pre-piece-2b rows have never seen the AI
+  // pipeline emit a total, and (b) cells the AI never populated at
+  // all (e.g. an out-of-window year) legitimately have no AI total.
+  //
+  // Consumed by the conflict-derivation rule at read time (a PR3
+  // decision, not PR1): abs(AiTotal - sum(children)) > 0.01 is the
+  // naive form, but the presence of a manual (source='MANUAL') child
+  // changes what "meaningful conflict" means — the naive rule would
+  // flag every CA-corrected cell forever. PR3 decides the manual-
+  // ownership branch; PR1 must not encode a rule here that would
+  // prejudice that decision.
+  employerAiTotal Decimal? @db.Decimal(12, 2)
+  personalAiTotal Decimal? @db.Decimal(12, 2)
+
+  // H33-followup PR5: per-cell "not applicable" flags. Non-null
+  // *NotApplicableAt = cell has been explicitly marked N/A by a human
+  // (e.g. "no employer scheme, this doesn't apply"). Distinct from
+  // "cell is empty because nobody has filled it in yet" — the latter
+  // is all four columns null. Timestamps double as boolean state +
+  // provenance so no separate flag column is needed; the paired
+  // *NotApplicableById FK captures who set it.
+  //
+  // MANUAL ONLY — AI never sets these. The AI leaves a cell empty when
+  // it finds nothing; a human decides whether empty means "not
+  // applicable" or "not yet reviewed".
+  //
+  // When a cell is marked N/A, any non-superseded (contributionId,
+  // type) transactions are atomically superseded — the drill-down
+  // still shows them (audit trail preserved), the sum sees zero, and
+  // the cell renders "Not applicable". Clearing N/A leaves the
+  // superseded rows superseded — a mis-click costs a re-extraction to
+  // recover the AI transactions. Recorded as a known limitation in
+  // docs/KNOWN_ISSUES.md (KI-05).
+  employerNotApplicableAt   DateTime?
+  employerNotApplicableById String?
+  employerNotApplicableBy   User?     @relation("ContribEmployerNA", fields: [employerNotApplicableById], references: [id])
+  personalNotApplicableAt   DateTime?
+  personalNotApplicableById String?
+  personalNotApplicableBy   User?     @relation("ContribPersonalNA", fields: [personalNotApplicableById], references: [id])
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  transactions ContributionTransaction[]
 
   @@unique([caseId, position])
   @@index([caseId])
   @@map("checklist_contributions")
+}
+
+// ─────────────────────────────────────────────
+// CONTRIBUTION TRANSACTIONS (child of checklist_contributions)
+//
+// Per-transaction rows that back the two per-cell totals (EMPLOYER,
+// PERSONAL) displayed in the redesigned Stage 4 contributions grid.
+// The parent row stores no user-facing amount; the UI sums the non-
+// superseded children grouped by type. Manual entries land as
+// source='MANUAL' with a null date / documentId (honest: the CA
+// typed a number with no source). AI extractions land as source='AI'
+// with date / documentId / sourcePage / sourceRef populated when the
+// pipeline emits them (once piece 2b lands).
+//
+// Nothing is deleted. When a CA overrides AI extractions in a cell,
+// the backend stamps supersededAt on the AI rows; the matching
+// *AiTotal on the parent is PRESERVED (see the AiTotal column
+// docstring — forensics matters more than a clean derivation, and
+// the marker rule for cells that carry a manual row is a PR3
+// decision). Sums always filter WHERE supersededAt IS NULL.
+// ─────────────────────────────────────────────
+
+model ContributionTransaction {
+  id             String                @id @default(cuid())
+  contributionId String
+  contribution   ChecklistContribution @relation(fields: [contributionId], references: [id], onDelete: Cascade)
+
+  type ContributionTransactionType
+
+  // Nullable: manual entries carry no source date, and a made-up
+  // default (e.g. tax-year-end) would misrepresent the row as
+  // observed evidence. Drill-down renders NULL rows as "no date".
+  date DateTime? @db.Date
+
+  amount      Decimal @db.Decimal(12, 2)
+  description String
+
+  // Provenance — nullable because a CA-typed row has no document.
+  // FK ON DELETE SET NULL so a document delete does not cascade-
+  // delete transactions that share a cell with manual rows.
+  documentId String?
+  document   Document? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  sourcePage Int?
+  sourceRef  String?
+
+  source       ContributionTransactionSource @default(AI)
+  supersededAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([contributionId, type])
+  @@map("contribution_transactions")
 }
 
 // ─────────────────────────────────────────────

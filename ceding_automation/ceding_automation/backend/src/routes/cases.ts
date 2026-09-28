@@ -25,6 +25,7 @@ import {
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
 import { CLOSED_STATUSES, medianCycleDays, summariseStatusCounts } from "../utils/caseStats";
+import { SAFE_USER_SELECT } from "../utils/userSelects";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -402,7 +403,7 @@ router.post("/", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), async (req: Req
       assignedToId: req.user!.id,
       status: CaseStatus.STAGE_1_LOA_PREP,
     },
-    include: { provider: true, createdBy: true, assignedTo: true },
+    include: { provider: true, createdBy: { select: SAFE_USER_SELECT }, assignedTo: { select: SAFE_USER_SELECT } },
   });
 
   // H23 (Nishant's design): NO seed at case creation. Seeding is
@@ -938,7 +939,7 @@ router.patch(
       // Nothing meaningful — short-circuit with the current record.
       const current = await prisma.case.findUnique({
         where: { id: req.params.id },
-        include: { provider: true, assignedTo: true, createdBy: true },
+        include: { provider: true, assignedTo: { select: SAFE_USER_SELECT }, createdBy: { select: SAFE_USER_SELECT } },
       });
       if (!current) return res.status(404).json({ error: "Case not found" });
       return res.json(current);
@@ -991,7 +992,7 @@ router.patch(
       if (Object.keys(data).length === 0 && manualBlocked.length > 0) {
         const current = await prisma.case.findUnique({
           where: { id: req.params.id },
-          include: { provider: true, assignedTo: true, createdBy: true },
+          include: { provider: true, assignedTo: { select: SAFE_USER_SELECT }, createdBy: { select: SAFE_USER_SELECT } },
         });
         return res.status(409).json({
           error: "Locked fields cannot be changed after extraction has run. Contact an admin.",
@@ -1018,7 +1019,7 @@ router.patch(
       updated = await prisma.case.update({
         where: { id: req.params.id },
         data,
-        include: { provider: true, assignedTo: true, createdBy: true },
+        include: { provider: true, assignedTo: { select: SAFE_USER_SELECT }, createdBy: { select: SAFE_USER_SELECT } },
       });
     } catch (err) {
       const e = err as { code?: string; message?: string };
@@ -1964,7 +1965,7 @@ router.post("/:id/sync-from-zoho", requireAuth, requireCaseAccess, async (req: R
   const updated = await prisma.case.update({
     where: { id },
     data: updates,
-    include: { provider: true, assignedTo: true, createdBy: true },
+    include: { provider: true, assignedTo: { select: SAFE_USER_SELECT }, createdBy: { select: SAFE_USER_SELECT } },
   });
   const changedRealData = changes.length > 0;
 
@@ -2340,7 +2341,7 @@ router.patch(
     const updated = await prisma.case.update({
       where: { id: req.params.id },
       data: { [field]: value } as Prisma.CaseUpdateInput,
-      include: { provider: true, assignedTo: true, createdBy: true },
+      include: { provider: true, assignedTo: { select: SAFE_USER_SELECT }, createdBy: { select: SAFE_USER_SELECT } },
     });
 
     await prisma.auditLog.create({
@@ -2654,7 +2655,7 @@ router.post(
       const updated = await tx.case.update({
         where: { id: req.params.id },
         data: { planType: targetTyped },
-        include: { provider: true, assignedTo: true, createdBy: true },
+        include: { provider: true, assignedTo: { select: SAFE_USER_SELECT }, createdBy: { select: SAFE_USER_SELECT } },
       });
       return {
         deletedFieldCount: deletedFields.count,

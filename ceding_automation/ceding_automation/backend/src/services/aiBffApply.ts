@@ -277,7 +277,18 @@ export async function applyFieldExtraction(args: {
   });
   // Propagate this field's value to the Case row (provider, policy_ref,
   // plan_start_date). Fail-soft — checklist write already succeeded.
-  await mirrorChecklistToCase(args.caseId, field.template.fieldKey, newValueStr);
+  //
+  // Team rule 2026-09-23: the AI never writes to Case.policyRef.
+  // Case.policyRef is source-of-truth from Zoho, owned by the CA. The
+  // mirror function is preserved (see caseFieldMirror.ts) for CA-initiated
+  // paths — manual checklist PATCH, seed with value, N/A bulk-fill — so
+  // that a CA who spots a wrong Case.policyRef can still correct it by
+  // typing the right value into the checklist "Plan number" row. Only
+  // this single AI call site is blocked. See the reasoning in
+  // caseFieldMirror.ts's plan_number branch comment.
+  if (field.template.fieldKey !== "plan_number") {
+    await mirrorChecklistToCase(args.caseId, field.template.fieldKey, newValueStr);
+  }
   console.log(
     "[merge-outcome] outcome=applied case=%s field=%s job=%s doc=%s existingLen=%s incomingLen=%s",
     args.caseId,
@@ -347,16 +358,6 @@ export async function applyExtractionResult(
     });
   }
 
-  // Fund Details table — shared helper so the doc-status PATCH push path
-  // can persist atomically inside the SAME $transaction that flips
-  // aiJobCompletedAt. Both paths produce byte-identical writes.
-  await applyFundLines({
-    caseId: doc.caseId,
-    documentId,
-    jobId: result.jobId,
-    fundLines: result.response.fundLines,
-  });
-
   const submittedAt = doc.aiJobSubmittedAt ?? doc.uploadedAt;
   const elapsedMs = Date.now() - submittedAt.getTime();
 
@@ -367,50 +368,93 @@ export async function applyExtractionResult(
   // Only fallback-fired jobs land a non-null value here.
   const aiExtractionNotes = buildAiExtractionNotes(result);
 
-  await prisma.document.update({
-    where: { id: documentId },
-    data: {
-      status: "EXTRACTED",
-      aiJobStatus: "completed",
-      aiJobStage: "done",
-      aiJobProgress: 100,
-      aiJobCompletedAt: new Date(),
-      processedAt: new Date(),
-      extractionMs: elapsedMs,
-      aiJobCostUsd: new Prisma.Decimal(result.llmCallMeta.totalCostUsd),
-      aiJobTokens: result.llmCallMeta.totalTokens,
-      aiExtractionNotes:
-        aiExtractionNotes === null
-          ? Prisma.DbNull
-          : // DetectionOutcome is a plain data shape; the cast is safe.
-            // Prisma's InputJsonValue requires an index signature that
-            // our named interfaces don't declare — same pattern used
-            // elsewhere in this file for auditLog metadata.
-            (aiExtractionNotes as unknown as Prisma.InputJsonValue),
-    },
-  });
-
-  await prisma.auditLog.create({
-    data: {
+  // The pull path is load-bearing in prod (H16 leaves COLLEAGUE_BACKEND_URL
+  // unset on prodai so push does not run there). Fund lines, contributions,
+  // the aiJobCompletedAt flip and the batch audit all share one
+  // $transaction — matching the push path at documents.ts:1191. Without
+  // the wrapper a mid-apply failure leaves half-written child rows and
+  // aiJobCompletedAt still null; the poller then retries and the apply
+  // helpers are idempotent, but the interim state is externally visible
+  // (a partial grid at the drill-down). Wrapping was cheap: same helper
+  // signatures, both already accept an optional `tx`. Scalar
+  // applyFieldExtraction calls above stay outside the wrapper — each is
+  // independently idempotent per the field-level preservation contract,
+  // and folding them in would hold a hot transaction open for the whole
+  // ~60-field loop.
+  await prisma.$transaction(async (tx) => {
+    await applyFundLines({
       caseId: doc.caseId,
-      userId: SYSTEM_USER_ID,
-      action: "AI_EXTRACTION_RUN",
-      source: "AI",
-      newValue: `${result.response.fields.length} fields processed`,
-      metadata: {
-        jobId: result.jobId,
-        documentId,
-        elapsedMs,
-        costUsd: result.llmCallMeta.totalCostUsd,
-        tokens: result.llmCallMeta.totalTokens,
-        detectedProvider: result.response.detectedProvider,
-        detectedPlanType: result.response.detectedPlanType,
-        fieldsExtracted: result.response.summary.fieldsExtracted,
-        fieldsMissing: result.response.summary.fieldsMissing,
-        highConfidenceCount: result.response.summary.highConfidenceCount,
-        promptTemplateId: result.promptTemplateId ?? null,
-      } as Prisma.InputJsonValue,
-    },
+      documentId,
+      jobId: result.jobId,
+      fundLines: result.response.fundLines,
+      tx,
+    });
+
+    await applyContributionTransactions({
+      caseId: doc.caseId,
+      documentId,
+      jobId: result.jobId,
+      // Wire keeps date as YYYY-MM-DD string (matches completedAt precedent);
+      // convert to Date here at the persistence boundary.
+      transactions: result.response.contributionTransactions.map((c) => ({
+        type: c.type,
+        taxYearLabel: c.taxYearLabel,
+        date: c.date ? new Date(c.date) : null,
+        amount: c.amount,
+        description: c.description,
+        sourcePage: c.sourcePage,
+        sourceRef: c.sourceRef,
+        confidence: c.confidence,
+      })),
+      totals: result.response.contributionTotals,
+      tx,
+    });
+
+    await tx.document.update({
+      where: { id: documentId },
+      data: {
+        status: "EXTRACTED",
+        aiJobStatus: "completed",
+        aiJobStage: "done",
+        aiJobProgress: 100,
+        aiJobCompletedAt: new Date(),
+        processedAt: new Date(),
+        extractionMs: elapsedMs,
+        aiJobCostUsd: new Prisma.Decimal(result.llmCallMeta.totalCostUsd),
+        aiJobTokens: result.llmCallMeta.totalTokens,
+        aiExtractionNotes:
+          aiExtractionNotes === null
+            ? Prisma.DbNull
+            : // DetectionOutcome is a plain data shape; the cast is safe.
+              // Prisma's InputJsonValue requires an index signature that
+              // our named interfaces don't declare — same pattern used
+              // elsewhere in this file for auditLog metadata.
+              (aiExtractionNotes as unknown as Prisma.InputJsonValue),
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        caseId: doc.caseId,
+        userId: SYSTEM_USER_ID,
+        action: "AI_EXTRACTION_RUN",
+        source: "AI",
+        newValue: `${result.response.fields.length} fields processed`,
+        metadata: {
+          jobId: result.jobId,
+          documentId,
+          elapsedMs,
+          costUsd: result.llmCallMeta.totalCostUsd,
+          tokens: result.llmCallMeta.totalTokens,
+          detectedProvider: result.response.detectedProvider,
+          detectedPlanType: result.response.detectedPlanType,
+          fieldsExtracted: result.response.summary.fieldsExtracted,
+          fieldsMissing: result.response.summary.fieldsMissing,
+          highConfidenceCount: result.response.summary.highConfidenceCount,
+          promptTemplateId: result.promptTemplateId ?? null,
+        } as Prisma.InputJsonValue,
+      },
+    });
   });
 
   return { outcome: "applied" };
@@ -524,4 +568,390 @@ export async function applyFundLines(
   });
 
   return { count: fundLines.length };
+}
+
+// ── ChecklistContribution + ContributionTransaction persistence ─────────────
+//
+// Called from BOTH the PATCH /api/documents/:id push path AND the poller's
+// applyExtractionResult pull path (same shape, one helper). Pull-path
+// coverage is LOAD-BEARING in production: H16 leaves COLLEAGUE_BACKEND_URL
+// unset on the prodai apps so the BFF cannot push, and the poller is the
+// only functioning write-back today. If we shipped push-only, contributions
+// would emit from the pipeline and never reach Postgres — the exact H21
+// shape (silent-drop between contract layers) we're building this to avoid.
+//
+// Contract:
+//   - No-op when BOTH transactions and totals are empty / missing.
+//   - Upserts ChecklistContribution parents from totals[] keyed on
+//     (caseId, position). taxYearLabel is CREATE-only; a re-extraction
+//     does NOT overwrite a CA relabel. AI totals are written on both
+//     CREATE and UPDATE.
+//   - Supersedes (stamps supersededAt=now) any non-superseded AI rows
+//     previously inserted from THIS sourceDocumentId. MANUAL rows are
+//     never touched. Matches the schema.prisma header comment on
+//     contribution_transactions: "Nothing is deleted."
+//   - Resolves each transaction to a parent row: primary by taxYearLabel
+//     string match against DB; fallback via the pipeline's own
+//     (taxYearLabel → position) map so a CA relabel does not strand
+//     the new children. No-parent transactions are counted-and-skipped.
+//   - Per (parentId, type) cell, if any non-superseded MANUAL child
+//     exists the CA owns that cell — SKIP inserting AI children into
+//     it. The parent's *AiTotal is still written (forensics record;
+//     see schema.prisma:employerAiTotal comment — FH-2026-000188). PR3
+//     decides whether a manually-owned cell renders a conflict marker.
+//   - Inserts surviving transactions as source='AI' with documentId,
+//     sourcePage, sourceRef populated.
+//   - Writes ONE audit row per batch — action CONTRIBUTION_TRANSACTION_ADDED
+//     (enum reused; the manual path uses the same action with
+//     source='MANUAL'), source='AI', metadata carries counts AND the
+//     list of skipped cells so the trail records WHICH cells were held
+//     back by manual ownership, not just how many. Row-level audit is
+//     intentionally omitted for parity with applyFundLines's batch audit
+//     — same asymmetry-with-manual-path exists there.
+type ContributionsTx = Pick<
+  PrismaClient,
+  "checklistContribution" | "contributionTransaction" | "auditLog"
+> | Prisma.TransactionClient;
+
+export interface WireContributionTransaction {
+  type: "EMPLOYER" | "PERSONAL";
+  taxYearLabel: string;
+  /** Nullable — a total-without-breakdown synthetic row carries no date. */
+  date: Date | null;
+  amount: number;
+  description: string;
+  sourcePage?: number | null;
+  sourceRef?: string | null;
+  /** Accepted from the pipeline but not persisted today — no column exists
+   *  on ContributionTransaction. Reserved for a future migration; keeping
+   *  it in the interface avoids a signature churn when that lands. */
+  confidence?: string | null;
+}
+
+export interface WireContributionTotal {
+  position: number;
+  taxYearLabel: string;
+  employerAiTotal: number | null;
+  personalAiTotal: number | null;
+}
+
+export interface ApplyContributionsArgs {
+  caseId: string;
+  documentId: string;
+  jobId: string;
+  transactions?: WireContributionTransaction[] | null;
+  totals?: WireContributionTotal[] | null;
+  /** Optional transaction client. Falls back to the module-level prisma. */
+  tx?: ContributionsTx;
+}
+
+/**
+ * Normalise a taxYearLabel for lookup purposes only. Displayed labels
+ * (audit metadata, DB rows) always use the ORIGINAL string; this
+ * function's output is a lookup key, never persisted.
+ *
+ * Normalised:
+ *   - Leading / trailing / internal whitespace: "2025 / 26" → "2025/26"
+ *   - Four-digit end year: "2025/2026" → "2025/26" (only when the second
+ *     year is arithmetically start+1; otherwise left untouched so a
+ *     nonsense pair like "2025/2030" does not silently match "2025/26")
+ *
+ * Deliberately NOT normalised (would be fuzzy matching on tax years,
+ * its own hazard):
+ *   - Hyphen separators ("2025-26") — different convention, might mean
+ *     something else in a CA's mental model; keep as free text.
+ *   - Free-text date ranges ("6 April 2025 – 5 April 2026") — a CA
+ *     relabel intended to look human; the AI path orphans it and the
+ *     reviewer sees the orphan audit.
+ *   - Case / accents / Unicode homoglyphs on the digits.
+ *   - Adjacent-year fuzzing ("2025/26" ≠ "2024/25"). Tax years are
+ *     off-by-one hazards; a fuzzy rule here would produce silent
+ *     misattribution one year off, which is exactly the class of bug
+ *     this rewrite closed.
+ */
+function normaliseTaxYearLabelKey(label: string): string {
+  const s = label.trim().replace(/\s+/g, "");
+  const m = s.match(/^(\d{4})\/(\d{4})$/);
+  if (m) {
+    const start = parseInt(m[1], 10);
+    const end = parseInt(m[2], 10);
+    if (end === start + 1) {
+      return `${m[1]}/${String(end).slice(-2)}`;
+    }
+  }
+  return s;
+}
+
+export interface ApplyContributionsResult {
+  /** Parents whose AI totals were UPDATED because the pipeline label matched
+   *  an existing parent's taxYearLabel. Never counts creation — parents are
+   *  a case-lifecycle concern seeded on case creation, not something the AI
+   *  path extends. */
+  parentsUpdated: number;
+  supersededPriorAiCount: number;
+  transactionsInserted: number;
+  cellsSkippedManuallyOwned: number;
+  /** Pipeline totals whose taxYearLabel had no matching parent → dropped;
+   *  a CONTRIBUTION_TOTAL_ORPHANED audit row is written for the batch. */
+  orphanedTotals: number;
+  /** Pipeline transactions whose taxYearLabel had no matching parent →
+   *  dropped; a CONTRIBUTION_TX_ORPHANED audit row is written for the batch. */
+  orphanedTransactions: number;
+}
+
+/**
+ * Apply contribution totals and transactions from a completed extraction.
+ *
+ * Matches parent rows by taxYearLabel — never by position. The position-based
+ * upsert and the position-fallback used before 2026-09-16 could silently
+ * misattribute a document's older tax years to a case's newer parent rows
+ * when the two coordinate systems disagreed (Postgres = rolling 4-year
+ * window; Cosmos = positions 1..N relative to the document). Label-only
+ * matching means a document whose contributions predate the case's parent
+ * window is reported to the reviewer via an orphan audit rather than
+ * quietly landed in the wrong year.
+ *
+ * The AI path NEVER creates parent rows. Parents are seeded once at case
+ * creation and represent the case's window. When the pipeline sends totals
+ * or transactions for a year the case doesn't have, those rows are dropped
+ * and a CONTRIBUTION_TOTAL_ORPHANED / CONTRIBUTION_TX_ORPHANED audit fires
+ * with the offending label(s) + amounts + counts + the labels the case does
+ * have, so a CA can decide whether to extend the parent set manually.
+ */
+export async function applyContributionTransactions(
+  args: ApplyContributionsArgs,
+): Promise<ApplyContributionsResult> {
+  const client: ContributionsTx = args.tx ?? prisma;
+  const totals = args.totals ?? [];
+  const txs = args.transactions ?? [];
+  const empty: ApplyContributionsResult = {
+    parentsUpdated: 0,
+    supersededPriorAiCount: 0,
+    transactionsInserted: 0,
+    cellsSkippedManuallyOwned: 0,
+    orphanedTotals: 0,
+    orphanedTransactions: 0,
+  };
+  if (totals.length === 0 && txs.length === 0) return empty;
+
+  // (1) Read parents once. Everything else keys off this snapshot.
+  //     No modifications yet — we need to know which labels the case
+  //     actually has before deciding what to write.
+  const parents = await client.checklistContribution.findMany({
+    where: { caseId: args.caseId },
+    select: { id: true, position: true, taxYearLabel: true },
+  });
+  // Lookup map is keyed on the NORMALISED label so "2025/26", "2025/2026",
+  // and "2025 / 26" all match one parent. The value keeps the ORIGINAL
+  // stored label so audit metadata and downstream displays are unchanged.
+  const parentByLabel = new Map<
+    string,
+    { id: string; position: number; originalLabel: string }
+  >();
+  for (const p of parents) {
+    parentByLabel.set(normaliseTaxYearLabelKey(p.taxYearLabel), {
+      id: p.id,
+      position: p.position,
+      originalLabel: p.taxYearLabel,
+    });
+  }
+  const parentLabelsInDb = parents.map((p) => p.taxYearLabel);
+
+  // (2) Update parent AI totals by label. Never create a parent row here —
+  //     if the label has no match, the total is orphaned and reported below.
+  //     taxYearLabel itself is intentionally not written (CA relabel authority
+  //     preserved — same discipline as the pre-2026-09-16 path).
+  const orphanedTotalDetails: Array<{
+    label: string;
+    employerAiTotal: number | null;
+    personalAiTotal: number | null;
+  }> = [];
+  let parentsUpdated = 0;
+  for (const t of totals) {
+    const parent = parentByLabel.get(normaliseTaxYearLabelKey(t.taxYearLabel));
+    if (!parent) {
+      orphanedTotalDetails.push({
+        label: t.taxYearLabel,
+        employerAiTotal: t.employerAiTotal,
+        personalAiTotal: t.personalAiTotal,
+      });
+      continue;
+    }
+    await client.checklistContribution.update({
+      where: { id: parent.id },
+      data: {
+        employerAiTotal:
+          t.employerAiTotal != null ? new Prisma.Decimal(t.employerAiTotal) : null,
+        personalAiTotal:
+          t.personalAiTotal != null ? new Prisma.Decimal(t.personalAiTotal) : null,
+      },
+    });
+    parentsUpdated += 1;
+  }
+
+  // (3) Supersede prior AI rows from THIS document. Idempotent. Runs even
+  //     when every transaction ends up orphaned — that still means the doc
+  //     is being reprocessed and its prior AI children should not linger.
+  const superseded = await client.contributionTransaction.updateMany({
+    where: {
+      documentId: args.documentId,
+      source: "AI",
+      supersededAt: null,
+    },
+    data: { supersededAt: new Date() },
+  });
+
+  // (4) Identify manually-owned (parentId, type) cells. Single bulk read.
+  const manuallyOwned = await client.contributionTransaction.findMany({
+    where: {
+      contribution: { caseId: args.caseId },
+      source: "MANUAL",
+      supersededAt: null,
+    },
+    select: { contributionId: true, type: true },
+  });
+  const manualCells = new Set<string>(
+    manuallyOwned.map((r) => `${r.contributionId}::${r.type}`),
+  );
+
+  // (5) Route transactions by label only. No position fallback — that was
+  //     the corruption path removed on 2026-09-16. Orphans are aggregated
+  //     for the audit metadata so a CA can see labels + counts + totals
+  //     rather than just an anonymous "N were skipped" count.
+  const rowsToInsert: Prisma.ContributionTransactionCreateManyInput[] = [];
+  const skippedCells = new Set<string>();
+  // totalAmount is a Prisma.Decimal, not a JS number — a float sum of the
+  // usual three-row batch produces values like "135.65000000000001" which
+  // then land verbatim in audit metadata. Decimal.add() keeps the audit
+  // readable and the sum arithmetically correct.
+  const orphanAggByKey = new Map<
+    string,
+    { label: string; type: "EMPLOYER" | "PERSONAL"; count: number; totalAmount: Prisma.Decimal }
+  >();
+  for (const t of txs) {
+    const parent = parentByLabel.get(normaliseTaxYearLabelKey(t.taxYearLabel));
+    if (!parent) {
+      const key = `${t.taxYearLabel}::${t.type}`;
+      const bucket = orphanAggByKey.get(key) ?? {
+        label: t.taxYearLabel,
+        type: t.type,
+        count: 0,
+        totalAmount: new Prisma.Decimal(0),
+      };
+      bucket.count += 1;
+      bucket.totalAmount = bucket.totalAmount.add(new Prisma.Decimal(t.amount));
+      orphanAggByKey.set(key, bucket);
+      continue;
+    }
+    const cellKey = `${parent.id}::${t.type}`;
+    if (manualCells.has(cellKey)) {
+      skippedCells.add(cellKey);
+      continue;
+    }
+    rowsToInsert.push({
+      contributionId: parent.id,
+      type: t.type,
+      date: t.date,
+      amount: new Prisma.Decimal(t.amount),
+      description: t.description,
+      documentId: args.documentId,
+      sourcePage: t.sourcePage ?? null,
+      sourceRef: t.sourceRef ?? null,
+      source: "AI",
+    });
+  }
+  if (rowsToInsert.length > 0) {
+    await client.contributionTransaction.createMany({ data: rowsToInsert });
+  }
+
+  const orphanedTxCount = Array.from(orphanAggByKey.values()).reduce(
+    (n, b) => n + b.count,
+    0,
+  );
+
+  const result: ApplyContributionsResult = {
+    parentsUpdated,
+    supersededPriorAiCount: superseded.count,
+    transactionsInserted: rowsToInsert.length,
+    cellsSkippedManuallyOwned: skippedCells.size,
+    orphanedTotals: orphanedTotalDetails.length,
+    orphanedTransactions: orphanedTxCount,
+  };
+
+  // (6) Batch audits. One CONTRIBUTION_TRANSACTION_ADDED row every time
+  //     the function actually did work — same shape callers already read.
+  //     Two additional rows only when there is something orphaned; empty
+  //     orphan lists produce no audit so the trail is not noisy.
+  await client.auditLog.create({
+    data: {
+      caseId: args.caseId,
+      userId: SYSTEM_USER_ID,
+      action: "CONTRIBUTION_TRANSACTION_ADDED",
+      source: "AI",
+      newValue:
+        `${result.transactionsInserted} contribution rows extracted ` +
+        `(${result.cellsSkippedManuallyOwned} cell(s) preserved as manual` +
+        `${result.orphanedTransactions > 0 ? `, ${result.orphanedTransactions} orphaned by year` : ""})`,
+      metadata: {
+        jobId: args.jobId,
+        documentId: args.documentId,
+        parentsUpdated: result.parentsUpdated,
+        supersededPriorAiCount: result.supersededPriorAiCount,
+        transactionsInserted: result.transactionsInserted,
+        cellsSkippedManuallyOwned: result.cellsSkippedManuallyOwned,
+        orphanedTotals: result.orphanedTotals,
+        orphanedTransactions: result.orphanedTransactions,
+        skippedCells: Array.from(skippedCells).map((k) => {
+          const [contributionId, type] = k.split("::");
+          return { contributionId, type };
+        }),
+      } as Prisma.InputJsonValue,
+    },
+  });
+
+  if (orphanedTotalDetails.length > 0) {
+    await client.auditLog.create({
+      data: {
+        caseId: args.caseId,
+        userId: SYSTEM_USER_ID,
+        action: "CONTRIBUTION_TOTAL_ORPHANED",
+        source: "AI",
+        newValue:
+          `${orphanedTotalDetails.length} contribution total row(s) could not ` +
+          `be placed — document carried tax year(s) [${orphanedTotalDetails
+            .map((o) => o.label)
+            .join(", ")}] the case does not have`,
+        metadata: {
+          jobId: args.jobId,
+          documentId: args.documentId,
+          orphanedTotals: orphanedTotalDetails,
+          parentLabelsInDb,
+        } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  if (orphanAggByKey.size > 0) {
+    const orphanedByLabel = Array.from(orphanAggByKey.values());
+    const uniqueLabels = Array.from(new Set(orphanedByLabel.map((o) => o.label)));
+    await client.auditLog.create({
+      data: {
+        caseId: args.caseId,
+        userId: SYSTEM_USER_ID,
+        action: "CONTRIBUTION_TX_ORPHANED",
+        source: "AI",
+        newValue:
+          `${orphanedTxCount} contribution transaction(s) could not be placed ` +
+          `— document carried tax year(s) [${uniqueLabels.join(", ")}] the case does not have`,
+        metadata: {
+          jobId: args.jobId,
+          documentId: args.documentId,
+          orphanedByLabel,
+          parentLabelsInDb,
+        } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  return result;
 }

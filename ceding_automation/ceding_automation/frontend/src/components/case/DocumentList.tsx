@@ -35,6 +35,10 @@ interface Props {
   // pair. Skips ExtractingStatusBadge entirely — no crawl, no timer, no %.
   // Stage 4 omits this and keeps the live extraction-progress badge.
   simplifiedBadge?: boolean;
+  // Loading flag from useDocuments — gates the empty-state message so
+  // we don't tell the user "No documents yet" while the fetch is still
+  // in flight (misleading — says "none" when it means "don't know yet").
+  loading?: boolean;
 }
 
 // Maps Prisma DocumentStatus enum values to display labels/styles
@@ -127,6 +131,7 @@ export function DocumentList({
   showExtractButton = true,
   showViewButton = true,
   simplifiedBadge = false,
+  loading = false,
 }: Props) {
   const [extractingId, setExtractingId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -171,6 +176,17 @@ export function DocumentList({
       setCancellingId(null);
     }
   };
+
+  // First fetch in flight: show a spinner, NOT the "No documents yet"
+  // empty state — the latter reads as "none exist" when it means "don't
+  // know yet". Only surface the empty guidance once we're certain.
+  if (loading && documents.length === 0) {
+    return (
+      <div className="flex items-center gap-2 justify-center py-8 text-xs text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" /> Loading documents…
+      </div>
+    );
+  }
 
   if (documents.length === 0) {
     return (

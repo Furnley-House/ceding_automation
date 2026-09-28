@@ -7,9 +7,15 @@
 // are just cached projections we keep in sync.
 //
 // Currently mirrored:
-//   provider_name → Case.providerId  (creates a Provider record if needed)
-//   plan_number   → Case.policyRef      (first-fill only — see below)
-//   start_date    → Case.planStartDate
+//   provider_name → Case.providerId    (fill-when-empty, sticky operator pick)
+//   plan_number   → Case.policyRef     (always mirror when called — BUT the
+//                                       AI merge caller in aiBffApply skips
+//                                       this fieldKey entirely, so only
+//                                       manual CA paths propagate. See
+//                                       services/aiBffApply.ts and the
+//                                       inline comment in the plan_number
+//                                       branch below for the reasoning.)
+//   start_date    → Case.planStartDate (always overwrite on difference)
 //
 // Called from:
 //   - applyFieldExtraction (AI write-back, both poller + PATCH path)
@@ -105,27 +111,34 @@ export async function mirrorChecklistToCase(
         return { changed: true, column: "providerId" };
       }
 
+      // plan_number → Case.policyRef mirror. Restored to its pre-2026-09-23
+      // behaviour (always mirror when called) BUT the AI merge caller in
+      // services/aiBffApply.ts:applyFieldExtraction now skips calling this
+      // function when the fieldKey is "plan_number". That single-line
+      // conditional at the caller enforces the team rule from 2026-09-23:
+      // the AI never writes to Case.policyRef, but CA-initiated edits
+      // (manual checklist PATCH, seed with value, N/A bulk-fill) do
+      // propagate as they did before — so a CA who spots a wrong
+      // Case.policyRef on the case header can still correct it by typing
+      // the right value into the checklist "Plan number" row.
+      //
+      // Historical context (2026-09-01 → 2026-09-23):
+      //   - Until 33b309e (2026-09-23), every extraction where AI's
+      //     plan_number differed from Case.policyRef silently overwrote
+      //     the case column, bypassing guardLockedFields(). 15 confirmed
+      //     prod cases had their CA-sourced Zoho value replaced by an AI
+      //     reading; review pack held outside the repo.
+      //   - 33b309e removed this branch entirely. That stopped the AI
+      //     writes as intended but also broke the CA correction path —
+      //     manual checklist edits to plan_number no longer updated the
+      //     header. Regression named plainly against post-extraction
+      //     cases.
+      //   - This restoration reinstates the mirror for all callers and
+      //     narrows the block to the single AI call site. Semantics land
+      //     where the team rule wanted them: CA can propagate, AI cannot.
       case "plan_number": {
         const trimmed = value.trim();
-        // Sticky, same rule as provider_name above: the Zoho TASK's
-        // Plan_reference is the source of truth for the case's policy ref
-        // (the CRM process is one ceding task per plan). We only populate
-        // when the case has nothing yet — i.e. the task carried no
-        // reference — and never overwrite a task-derived value with a
-        // document-derived one.
-        //
-        // Why this guard exists: this service updates the Case row
-        // directly, so it bypasses guardLockedFields(). That made it the
-        // only writer able to corrupt a LOCKED policyRef, after which the
-        // Zoho sync could no longer heal it back from the task. Observed
-        // on FH-2026-000074 — the task carried "106568" but the case was
-        // left permanently holding "5596422 & Scheme number: 106568", so
-        // every Policy_Ref:equals lookup against the Plans module missed,
-        // and Stage 9 export (which pushes Policy_Ref back to CRM) would
-        // have written that combined string onto the Plans record.
-        if (caseRow.policyRef !== null && caseRow.policyRef.trim() !== "") {
-          return { changed: false };
-        }
+        if (caseRow.policyRef === trimmed) return { changed: false };
         await prisma.case.update({
           where: { id: caseId },
           data: { policyRef: trimmed },

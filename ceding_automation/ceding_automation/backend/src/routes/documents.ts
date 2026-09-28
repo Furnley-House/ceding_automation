@@ -9,7 +9,12 @@ import { requireInternalKey } from "../middleware/internalKey";
 import { uploadToAzureBlob, generateSasUrl, downloadBlobAsBuffer } from "../services/storage";
 import { extractDocumentWithAI } from "../services/aiExtraction";
 import * as aiBff from "../services/aiBffClient";
-import { applyFundLines } from "../services/aiBffApply";
+import {
+  applyFundLines,
+  applyContributionTransactions,
+  type WireContributionTransaction,
+  type WireContributionTotal,
+} from "../services/aiBffApply";
 import { compareFieldValues } from "../utils/compareFieldValues";
 
 const router = Router();
@@ -929,6 +934,38 @@ const fundLineWireSchema = z.object({
   confidence: z.enum(["HIGH", "MEDIUM", "LOW", "MISSING"]).optional(),
 });
 
+// Pipeline PR-B ships contribution_transactions[] + contribution_totals[] on
+// the same doc-status PATCH once the Stage 4 sysprompt block lands (H21-style:
+// both together or neither). This PR (backend PR-A) accepts them dark so the
+// pipeline flip cannot silently drop the payload. Both keys optional at the
+// body level; a non-pension document, or a pension doc with no contribution
+// section, simply omits both.
+//
+// date is date-only ISO (YYYY-MM-DD) matching @db.Date on the column. Explicit
+// `.nullable()` because a total-without-breakdown synthetic row carries no
+// date. The regex is deliberately loose — a malformed value fails validation
+// with a clear error rather than being coerced by `new Date()` into 1970.
+const contributionTransactionWireSchema = z.object({
+  type: z.enum(["EMPLOYER", "PERSONAL"]),
+  tax_year_label: z.string(),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD")
+    .nullable(),
+  amount: z.number(),
+  description: z.string(),
+  source_page: z.number().int().optional().nullable(),
+  source_ref: z.string().optional().nullable(),
+  confidence: z.enum(["HIGH", "MEDIUM", "LOW", "MISSING"]).optional().nullable(),
+});
+
+const contributionTotalWireSchema = z.object({
+  position: z.number().int().min(1).max(4),
+  tax_year_label: z.string(),
+  employer_ai_total: z.number().nullable(),
+  personal_ai_total: z.number().nullable(),
+});
+
 const aiDocWriteBackSchema = z.object({
   job_id: z.string().regex(/^bff-[0-9a-f]{8,16}$/),
   status: z.enum(["queued", "processing", "completed", "failed"]),
@@ -975,6 +1012,12 @@ const aiDocWriteBackSchema = z.object({
   // the doc and retries via applyExtractionResult (which calls the SAME
   // applyFundLines helper).
   fund_lines: z.array(fundLineWireSchema).optional(),
+  // Pension contribution rows, piggy-backed on the same PATCH as fund_lines
+  // for the same reason (one atomic write with aiJobCompletedAt). Both blocks
+  // optional; either / both / neither may be present. See
+  // applyContributionTransactions for the preservation contract.
+  contribution_transactions: z.array(contributionTransactionWireSchema).optional(),
+  contribution_totals: z.array(contributionTotalWireSchema).optional(),
 });
 
 function bffStatusToDocumentStatus(s: string): DocumentStatus {
@@ -1067,6 +1110,33 @@ internalRouter.patch(
           }))
         : null;
 
+    // Same mapping shape for contributions. Snake_case → helper's camelCase.
+    const mappedContributionTxs: WireContributionTransaction[] | null =
+      body.contribution_transactions && body.contribution_transactions.length > 0
+        ? body.contribution_transactions.map((c) => ({
+            type: c.type,
+            taxYearLabel: c.tax_year_label,
+            // YYYY-MM-DD parses as UTC midnight — matches @db.Date semantics.
+            date: c.date ? new Date(c.date) : null,
+            amount: c.amount,
+            description: c.description,
+            sourcePage: c.source_page ?? null,
+            sourceRef: c.source_ref ?? null,
+            confidence: c.confidence ?? null,
+          }))
+        : null;
+    const mappedContributionTotals: WireContributionTotal[] | null =
+      body.contribution_totals && body.contribution_totals.length > 0
+        ? body.contribution_totals.map((t) => ({
+            position: t.position,
+            taxYearLabel: t.tax_year_label,
+            employerAiTotal: t.employer_ai_total,
+            personalAiTotal: t.personal_ai_total,
+          }))
+        : null;
+    const hasContributionData =
+      mappedContributionTxs !== null || mappedContributionTotals !== null;
+
     // Audit-log entry — fields identical to the prior inline write. Pulled
     // into a builder so both branches (with-tx, without-tx) can reuse it.
     const buildAuditCreate = (): Prisma.AuditLogCreateArgs["data"] => ({
@@ -1092,11 +1162,14 @@ internalRouter.patch(
       } as Prisma.InputJsonValue,
     });
 
-    if (mappedFundLines) {
-      // Fund-lines path: persist funds + flip aiJobCompletedAt atomically.
-      // If applyFundLines throws, the whole tx rolls back, aiJobCompletedAt
-      // stays null, and the poller picks the doc up to retry via
-      // applyExtractionResult (which uses the SAME applyFundLines helper).
+    if (mappedFundLines || hasContributionData) {
+      // Extraction-payload path: persist child rows + flip aiJobCompletedAt
+      // atomically. If any helper throws, the whole tx rolls back and
+      // aiJobCompletedAt stays null. The poller then picks the doc up and
+      // retries via applyExtractionResult, which re-runs BOTH applyFundLines
+      // AND applyContributionTransactions from the same Cosmos doc — so both
+      // self-heal identically. (H16: push is currently dead in prod;
+      // this branch is here for the day push comes back.)
       await prisma.$transaction(async (tx) => {
         await tx.document.update({
           where: { id: doc.id },
@@ -1105,19 +1178,31 @@ internalRouter.patch(
         if (isTerminal && !doc.aiJobCompletedAt) {
           await tx.auditLog.create({ data: buildAuditCreate() });
         }
-        await applyFundLines({
-          caseId: doc.caseId,
-          documentId: doc.id,
-          jobId: body.job_id,
-          fundLines: mappedFundLines,
-          tx,
-        });
+        if (mappedFundLines) {
+          await applyFundLines({
+            caseId: doc.caseId,
+            documentId: doc.id,
+            jobId: body.job_id,
+            fundLines: mappedFundLines,
+            tx,
+          });
+        }
+        if (hasContributionData) {
+          await applyContributionTransactions({
+            caseId: doc.caseId,
+            documentId: doc.id,
+            jobId: body.job_id,
+            transactions: mappedContributionTxs,
+            totals: mappedContributionTotals,
+            tx,
+          });
+        }
       });
     } else {
-      // No fund_lines on the body — preserves the EXACT pre-refactor path
-      // for every caller (non-fund docs + the existing scalar-only flow).
-      // Same two writes, same order, NO transaction wrapping, NO behavior
-      // change.
+      // No child-row payload — preserves the EXACT pre-refactor path for
+      // every caller (non-fund / non-pension docs + the existing scalar-only
+      // flow). Same two writes, same order, NO transaction wrapping, NO
+      // behavior change.
       await prisma.document.update({
         where: { id: doc.id },
         data: updateData,
