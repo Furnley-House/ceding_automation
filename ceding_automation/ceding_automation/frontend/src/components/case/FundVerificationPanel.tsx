@@ -8,7 +8,7 @@
 // here and never looks the figures up again, because the CA signs these off
 // at stage 6 and CRM has to carry the numbers somebody actually approved.
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -337,6 +337,13 @@ export function FundVerificationPanel({
   const scaleKey = scaleIssues.map((c) => c.row.id).join("|");
   const [dismissedScaleKey, setDismissedScaleKey] = useState<string | null>(null);
   const showScaleDialog = scaleKey !== "" && dismissedScaleKey !== scaleKey;
+
+  // Once nothing is wrong the dismissal has served its purpose. Without this,
+  // fixing a holding and then putting it back the way it was would go
+  // unwarned, because the key it was dismissed under has come round again.
+  useEffect(() => {
+    if (scaleKey === "") setDismissedScaleKey(null);
+  }, [scaleKey]);
 
   const lastVerified = useMemo(() => {
     const stamps = rows.map((r) => r.verifiedAt).filter(Boolean) as string[];
