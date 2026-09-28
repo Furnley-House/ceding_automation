@@ -81,7 +81,7 @@ export async function applyFieldExtraction(args: {
     return { outcome: "skipped-manual-only", fieldId: field.id };
   }
 
-  // (1) Preservation guard — never stomp CA-Team edits or adviser approvals.
+  // (1) Preservation guard — never stomp CA-Team edits or paraplanner approvals.
   if (field.isApproved || field.isManuallyOverridden) {
     console.log(
       "[merge-outcome] outcome=preserved case=%s field=%s job=%s doc=%s",

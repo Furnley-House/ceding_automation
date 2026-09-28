@@ -97,11 +97,11 @@ const steps = [
     icon: CheckCircle,
     systems: ["ProviderHub"],
     description:
-      "The Ops team verifies AI-extracted data against the checklist. Advisers and paraplanners can review, approve, or comment on individual fields.",
+      "The Ops team verifies AI-extracted data against the checklist. Paraplanners review, approve, or comment on individual fields (an adviser can step in when the paraplanner is unavailable).",
     details: [
       "Ops team reviews each extracted field against expected values",
       "Confidence scores highlight fields needing attention",
-      "Advisers / paraplanners can approve, reject, or add comments",
+      "Paraplanners approve, reject, or add comments (adviser as back-up)",
       "Full audit trail of who reviewed what and when",
     ],
   },

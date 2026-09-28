@@ -47,8 +47,8 @@ interface AppUser {
 
 const ROLES: { value: UserRole; label: string; helper: string }[] = [
   { value: "CA_TEAM", label: "CA Team", helper: "Chennai · Data capture" },
-  { value: "PARAPLANNER", label: "Paraplanner", helper: "UK · Review & approval" },
-  { value: "ADVISER", label: "Adviser", helper: "UK · Final sign-off" },
+  { value: "PARAPLANNER", label: "Paraplanner", helper: "UK · Review & final approval" },
+  { value: "ADVISER", label: "Adviser", helper: "UK · Suitability reports · back-up approval" },
   { value: "ADMIN", label: "Admin", helper: "Full access · user management" },
 ];
 

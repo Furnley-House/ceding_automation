@@ -45,7 +45,10 @@ enum CaseStatus {
   STAGE_6_DOCUMENT_UPLOAD
   STAGE_7_MISSING_INFO
   STAGE_8_VERIFY_CHECKLIST
-  STAGE_9_ADVISER_REVIEW
+  // Paraplanner sign-off (adviser only as back-up). Renamed in code from
+  // STAGE_9_ADVISER_REVIEW; @map keeps the stored DB value so no migration
+  // is needed and existing rows keep working.
+  STAGE_9_PARAPLANNER_REVIEW @map("STAGE_9_ADVISER_REVIEW")
   STAGE_10_COMPLETE
   ON_HOLD
   IN_REVIEW
@@ -480,7 +483,7 @@ model ChecklistField {
   manualEditedBy       User?     @relation(fields: [manualEditedById], references: [id])
   manualEditedAt       DateTime?
 
-  // Adviser review
+  // Paraplanner review (adviser as back-up)
   isApproved        Boolean   @default(false)
   approvedAt        DateTime?
   reviewComment     String?

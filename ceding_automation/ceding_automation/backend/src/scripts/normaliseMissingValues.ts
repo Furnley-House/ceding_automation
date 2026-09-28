@@ -15,7 +15,7 @@ async function main() {
   console.log(`Found ${candidates.length} fields with value === "MISSING".`);
   if (candidates.length === 0) return;
 
-  // Don't stomp adviser/CA decisions: preserve approved + manually-overridden rows.
+  // Don't stomp paraplanner/CA decisions: preserve approved + manually-overridden rows.
   const safe = await prisma.checklistField.findMany({
     where: {
       id: { in: candidates.map((c) => c.id) },

@@ -277,7 +277,7 @@ const slides: React.FC[] = [
       <div className="grid grid-cols-3 gap-8 w-full max-w-4xl mb-8">
         {[
           { phase: "Phase 1 (MVP)", items: ["Case pipeline + LOA tracking", "AI PDF extraction + checklist auto-fill", "Evidence links + confidence scoring", "Top 10–20 providers"] },
-          { phase: "Phase 2", items: ["Missing-fields workflow", "Provider Directory rules UI", "Chase automation templates", "Adviser review & comments"] },
+          { phase: "Phase 2", items: ["Missing-fields workflow", "Provider Directory rules UI", "Chase automation templates", "Paraplanner review & comments"] },
           { phase: "Phase 3", items: ["RingCentral call assist", "Transcript → field auto-fill", "Analytics & Founder dashboard", "Origo integration (research)"] },
         ].map((p, i) => (
           <div key={i} className="rounded-xl bg-white/10 backdrop-blur p-6">

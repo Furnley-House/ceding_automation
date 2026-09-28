@@ -691,7 +691,7 @@ const STAGE_TO_STATUS: Record<number, CaseStatus> = {
   6: CaseStatus.STAGE_6_DOCUMENT_UPLOAD,
   7: CaseStatus.STAGE_7_MISSING_INFO,
   8: CaseStatus.STAGE_8_VERIFY_CHECKLIST,
-  9: CaseStatus.STAGE_9_ADVISER_REVIEW,
+  9: CaseStatus.STAGE_9_PARAPLANNER_REVIEW,
   10: CaseStatus.STAGE_10_COMPLETE,
 };
 const UI_STATUS_TO_PRISMA: Record<string, CaseStatus> = {
@@ -710,7 +710,7 @@ const UI_STATUS_TO_PRISMA: Record<string, CaseStatus> = {
 //   - ensure a paraplanner is linked (auto-assign first active one if not)
 //   - notify them so the case lands in their inbox
 function isAwaitingReview(s: CaseStatus | undefined | null): boolean {
-  return s === CaseStatus.IN_REVIEW || s === CaseStatus.STAGE_9_ADVISER_REVIEW;
+  return s === CaseStatus.IN_REVIEW || s === CaseStatus.STAGE_9_PARAPLANNER_REVIEW;
 }
 
 /**
@@ -835,7 +835,7 @@ router.patch(
         });
         const locked =
           currentCase?.status === CaseStatus.IN_REVIEW ||
-          currentCase?.status === CaseStatus.STAGE_9_ADVISER_REVIEW ||
+          currentCase?.status === CaseStatus.STAGE_9_PARAPLANNER_REVIEW ||
           currentCase?.status === CaseStatus.APPROVED ||
           currentCase?.status === CaseStatus.STAGE_10_COMPLETE;
         if (!locked) {
@@ -1180,7 +1180,7 @@ router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADM
     where: { id: req.params.id },
     data: {
       paralPlannerId,
-      status: CaseStatus.STAGE_9_ADVISER_REVIEW,
+      status: CaseStatus.STAGE_9_PARAPLANNER_REVIEW,
       readyForReviewAt: new Date(),
     },
   });
@@ -2496,7 +2496,7 @@ router.post(
 
     // Safety guard: refuse the delete when any orphan row carries
     // real content — a non-null value, a manual override, or an
-    // adviser approval. The caller must pass { force: true } to
+    // paraplanner approval. The caller must pass { force: true } to
     // proceed; with force, we snapshot every row into audit_logs
     // BEFORE the tx that deletes them.
     //

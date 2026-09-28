@@ -175,7 +175,7 @@ const CedingChecklist = () => {
                   : "border border-border text-muted-foreground hover:bg-muted"
               }`}
             >
-              Adviser Review
+              Paraplanner Review
             </button>
           </div>
         }

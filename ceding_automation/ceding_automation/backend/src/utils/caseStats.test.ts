@@ -24,7 +24,7 @@ describe("summariseStatusCounts", () => {
 
   it("counts Stage 9 and legacy IN_REVIEW as in review, and keeps them active", () => {
     const s = summariseStatusCounts([
-      { status: CaseStatus.STAGE_9_ADVISER_REVIEW, count: 2 },
+      { status: CaseStatus.STAGE_9_PARAPLANNER_REVIEW, count: 2 },
       { status: CaseStatus.IN_REVIEW, count: 1 },
     ]);
     expect(s).toMatchObject({ inReview: 3, active: 3 });

@@ -192,7 +192,7 @@ router.delete(
     const { revertedFieldCount, deletedFundCount } = await prisma.$transaction(
       async (tx) => {
         // 1) Revert AI-only checklist fields whose source just vanished.
-        //    Preserves human-edited (isManuallyOverridden) and adviser-approved
+        //    Preserves human-edited (isManuallyOverridden) and paraplanner-approved
         //    (isApproved) fields — those survive even when their citation does.
         const revertedFields = await tx.checklistField.updateMany({
           where: {

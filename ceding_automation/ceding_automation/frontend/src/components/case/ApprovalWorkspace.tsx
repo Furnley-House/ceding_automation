@@ -258,7 +258,7 @@ export function ApprovalWorkspace({ caseItem }: Props) {
           <ShieldCheck className="h-4 w-4 text-warning" /> Reviewer access required
         </p>
         <p className="text-xs text-muted-foreground mt-1">
-          Switch to the Paraplanner or Adviser role to approve fields and sign off this case.
+          Only a Paraplanner can approve fields and sign off this case (or an Adviser, when the paraplanner is unavailable).
         </p>
       </div>
     );

@@ -731,7 +731,7 @@ export function StageApproval({ caseItem }: StageProps) {
     <StagePanel
       num={8}
       icon={CheckCircle2}
-      title="Paraplanner / Adviser Approval"
+      title="Paraplanner Approval"
       description="Per-field approve, request review with comment, then sign off the whole case once every field is approved."
     >
       <ApprovalWorkspace caseItem={caseItem} />

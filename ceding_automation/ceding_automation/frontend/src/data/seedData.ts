@@ -333,7 +333,7 @@ export const automationRules: AutomationRule[] = [
   { id: 'auto-1', name: 'LOA Processing Check', trigger: 'LOA sent + 10 business days', action: 'Create "Check LOA processed" task', enabled: true, lastTriggered: '2026-02-14' },
   { id: 'auto-2', name: 'PDF Chase Reminder', trigger: 'Day 14 + no PDF received', action: 'Generate chase email draft', enabled: true, lastTriggered: '2026-02-15' },
   { id: 'auto-3', name: 'Missing Fields Alert', trigger: 'Ceding checklist has missing critical fields', action: 'Create call pack task for CA team', enabled: true },
-  { id: 'auto-4', name: 'Adviser Review Reminder', trigger: 'Ceding checklist 90%+ complete for 2 days', action: 'Notify adviser for review', enabled: true },
+  { id: 'auto-4', name: 'Paraplanner Review Reminder', trigger: 'Ceding checklist 90%+ complete for 2 days', action: 'Notify paraplanner for review', enabled: true },
   { id: 'auto-5', name: 'SLA Breach Warning', trigger: 'Case open > 30 days', action: 'Escalate to Ops Manager', enabled: false },
 ];
 

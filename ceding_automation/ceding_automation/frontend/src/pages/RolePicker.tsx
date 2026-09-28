@@ -41,9 +41,9 @@ const roles: { id: Role; icon: React.ElementType; tagline: string; perms: string
     icon: FileSearch,
     tagline: "UK · Review & Approval",
     perms: [
+      "Final case approval",
       "Review extracted data",
       "Approve fields or request review",
-      "Comment on cases",
     ],
   },
   {
@@ -51,9 +51,9 @@ const roles: { id: Role; icon: React.ElementType; tagline: string; perms: string
     icon: UserCheck,
     tagline: "UK · Client Recommendations",
     perms: [
-      "Final case approval",
-      "Edit values (audit-logged)",
       "Prepare suitability reports",
+      "Back-up approval when the paraplanner is unavailable",
+      "Edit values (audit-logged)",
     ],
   },
   {

@@ -257,7 +257,7 @@ router.post(
   }
 );
 
-// ── Adviser: Approve field ────────────────────────────────
+// ── Paraplanner (adviser as back-up): Approve field ─────
 router.post(
   "/:caseId/checklist/:fieldId/approve",
   requireAuth,
@@ -296,7 +296,7 @@ router.post(
   }
 );
 
-// ── Adviser: Request review on field ─────────────────────
+// ── Paraplanner (adviser as back-up): Request review ────
 router.post(
   "/:caseId/checklist/:fieldId/request-review",
   requireAuth,
@@ -419,7 +419,7 @@ router.post(
       if (found && !isEmptyOrMissingValue(found.value) && found.confidence !== "MISSING") {
         continue;
       }
-      // Already approved → also skip. Adviser / paraplanner explicitly signed
+      // Already approved → also skip. Paraplanner (or back-up adviser) explicitly signed
       // off; don't quietly rewrite that with N/A.
       if (found && found.status === "APPROVED") continue;
 
