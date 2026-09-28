@@ -133,7 +133,7 @@ function scaleNote(factor: 100 | 0.01 | null, unit: "price" | "charge"): string 
     // The usual case: the statement quoted pence, the CA typed it as read.
     // CRM wants pounds, so the reference figure is the one to keep.
     return factor === 0.01
-      ? "Same price, different units — the checklist figure looks like pence. CRM expects pounds, so the reference figure is the one to push."
+      ? "Same price, different units - the checklist figure looks like pence. CRM expects pounds, so the reference figure is the one to push."
       : "The checklist figure is 100x smaller than the reference — check for a misplaced decimal point.";
   }
   return factor === 0.01
