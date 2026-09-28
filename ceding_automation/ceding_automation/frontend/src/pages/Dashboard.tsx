@@ -17,11 +17,14 @@ import {
   Upload,
   Users,
   Wand2,
+  Info,
 } from "lucide-react";
 import { getCases, getCaseStats, type CaseStats } from "@/services/api";
 import { auditApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Portal as TooltipPortal } from "@radix-ui/react-tooltip";
 
 // ────────────────────────────────────────────────────────────
 // Helpers
@@ -346,7 +349,7 @@ const Dashboard = () => {
       { key: "pending_loa", label: "Send LOAs", count: n(["DRAFT", "STAGE_1_LOA_PREP", "STAGE_2_COLLECT_DETAILS", "STAGE_3_CRM_SETUP"]) },
       { key: "awaiting_documents", label: "Chase provider documents", count: n(["STAGE_4_PROVIDER_REQUEST", "STAGE_5_CHASING", "STAGE_6_DOCUMENT_UPLOAD"]) },
       { key: "extraction_complete", label: "Verify extracted checklists", count: n(["STAGE_7_MISSING_INFO", "STAGE_8_VERIFY_CHECKLIST"]) },
-      { key: "in_review", label: reviewer ? "Sign off reviews" : "Awaiting sign-off", count: n(["STAGE_9_ADVISER_REVIEW", "IN_REVIEW"]) },
+      { key: "in_review", label: reviewer ? "Sign off reviews" : "Awaiting sign-off", count: n(["STAGE_9_PARAPLANNER_REVIEW", "IN_REVIEW"]) },
       { key: "approved", label: "Export approved cases to WorkDrive", count: n(["APPROVED"]) },
       { key: "on_hold", label: "Cases on hold", count: n(["ON_HOLD"]) },
     ].filter((i) => i.count > 0);
@@ -503,6 +506,7 @@ const Dashboard = () => {
           icon={<Briefcase className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=active")}
           index={0}
+          info={TILE_INFO.active}
         />
         <KpiTile
           tone="green"
@@ -521,6 +525,7 @@ const Dashboard = () => {
           icon={<CheckCircle2 className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=complete&completed=week")}
           index={1}
+          info={TILE_INFO.doneWeek}
         />
         <KpiTile
           tone="blue"
@@ -530,6 +535,7 @@ const Dashboard = () => {
           icon={<Clock className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=in_review")}
           index={2}
+          info={TILE_INFO.inReview}
         />
         <KpiTile
           tone="navy"
@@ -546,6 +552,7 @@ const Dashboard = () => {
           }
           icon={<Clock className="h-4 w-4" />}
           index={3}
+          info={TILE_INFO.cycleTime}
         />
       </div>
 
@@ -559,6 +566,7 @@ const Dashboard = () => {
           eyebrow="Caseflow"
           title="Cases moving through phases"
           subtitle="· last 5 weeks"
+          info={TILE_INFO.caseflow}
           legend={
             <>
               <LegendDot color="#63B1BC" /> Cases opened
@@ -570,7 +578,7 @@ const Dashboard = () => {
         </ChartCard>
 
         {/* Donut — cases by provider */}
-        <ChartCard eyebrow="Mix" title="Cases by provider">
+        <ChartCard eyebrow="Mix" title="Cases by provider" info={TILE_INFO.providerMix}>
           {providerTotal === 0 ? (
             <EmptyChart label="No cases yet" />
           ) : (
@@ -601,6 +609,7 @@ const Dashboard = () => {
             icon={<Briefcase className="h-4 w-4" />}
             eyebrow="Caseload"
             title="Cases by client"
+            info={TILE_INFO.caseload}
             titleMeta={`· ${stats?.active ?? "…"} active`}
             rightPill={
               <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-teal/15 text-teal">
@@ -763,6 +772,7 @@ const Dashboard = () => {
             icon={<Clock className="h-4 w-4" />}
             eyebrow="Live"
             title="Activity"
+            info={TILE_INFO.activity}
             titleMeta="· last 24 hours"
             rightPill={
               <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-overdue">
@@ -807,9 +817,10 @@ const Dashboard = () => {
         <div className="flex flex-col gap-4">
           {/* TODAY paper card */}
           <div
-            className="rounded-2xl p-6 relative overflow-hidden border border-border"
+            className="group rounded-2xl p-6 relative overflow-hidden border border-border"
             style={{ background: "#faf9f6" }}
           >
+            <InfoTip text={TILE_INFO.today} className="absolute top-4 right-4 text-muted-foreground" />
             <div
               className="absolute -right-5 -bottom-5 w-32 h-32 rounded-full pointer-events-none"
               style={{
@@ -864,6 +875,7 @@ const Dashboard = () => {
             icon={<Sparkles className="h-4 w-4" />}
             eyebrow="Weekly"
             title="This week, at a glance"
+            info={TILE_INFO.weekly}
             defaultOpen={accordion.insights}
             onToggle={() =>
               setAccordion((v) => ({ ...v, insights: !v.insights }))
@@ -891,6 +903,7 @@ const Dashboard = () => {
             icon={<Users className="h-4 w-4" />}
             eyebrow="Workload"
             title="Team load"
+            info={TILE_INFO.teamLoad}
             titleMeta={`· ${teamLoad.length} ${teamLoad.length === 1 ? "person" : "people"}`}
             rightPill={
               stats && stats.unassigned > 0 ? (
@@ -1017,6 +1030,63 @@ const KPI_TONES: Record<string, { bg: string; text: string; iconBg: string }> = 
   green: { bg: "linear-gradient(135deg, #B7BF10, #cbd239)", text: "#1f2305", iconBg: "rgba(0,0,0,0.10)" },
 };
 
+// ── Tile explanations (ⓘ tooltips) ────────────────────────
+// Keep in sync with GET /cases/stats (backend/src/routes/cases.ts) and
+// backend/src/utils/caseStats.ts.
+const TILE_INFO = {
+  active:
+    "Cases still in progress: everything except Ceding Complete (Stage 10) and Cancelled. Approved cases count as active until they're exported. \"% done\" = completed ÷ (total − cancelled).",
+  doneWeek:
+    "Cases that reached Ceding Complete (Stage 10) since Monday 00:00, compared with the whole of last week (Mon–Sun).",
+  inReview: "Cases waiting for paraplanner sign-off — status In Review or Paraplanner Review. An adviser signs off only when the paraplanner is unavailable.",
+  cycleTime:
+    "Median number of days from a case being created to Ceding Complete, for cases completed in the last 90 days. Includes time waiting on providers, so it's elapsed time rather than hands-on effort.",
+  caseflow:
+    "For each of the last 5 weeks (Mon–Sun): teal = cases created that week; purple = cases that reached Ceding Complete that week.",
+  providerMix:
+    "Share of cases by provider, across open and completed cases. The top 3 providers are shown; the rest are grouped as Other.",
+  caseload:
+    "Cases grouped by client. Each client is shown by their most recently updated open case; progress = stages completed out of 10. Sorted by progress, top 4 shown. The header count is active cases.",
+  activity:
+    "The latest audit-log events (up to 10) from the last 24 hours, across the whole team — uploads, extractions, edits, approvals, exports. Visible to Paraplanners, Advisers and Admins.",
+  today:
+    "Your to-do list: how many cases sit at each stage that needs action (send LOAs, chase documents, verify checklists, sign off, export). \"Next\" is the open case closest to completion. Click an item to open those cases.",
+  weekly:
+    "Cases closed this month: cases that reached Ceding Complete since the 1st of this month. Cases opened by advisers: all-time count of cases created by a user with the Adviser role.",
+  teamLoad:
+    "Open cases per person across the whole team (not only yours). Owner = the assigned task owner, or the creator if no one is assigned. \"Unassigned\" = open cases with no owner.",
+} as const;
+
+// ⓘ icon that fades in when its tile is hovered/focused and explains the
+// tile on hover. Sits inside clickable tiles, so it swallows clicks/keys to
+// avoid navigating or toggling the tile. A <span>, not a <button>: KpiTile
+// is itself a <button> and buttons can't nest.
+function InfoTip({ text, className = "" }: { text: string; className?: string }) {
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  return (
+    <Tooltip delayDuration={150}>
+      <TooltipTrigger asChild>
+        <span
+          role="img"
+          tabIndex={0}
+          aria-label={text}
+          onClick={stop}
+          onKeyDown={stop}
+          className={`inline-flex align-middle cursor-help rounded-full opacity-0 transition-opacity group-hover:opacity-60 hover:!opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal ${className}`}
+        >
+          <Info className="h-3.5 w-3.5" />
+        </span>
+      </TooltipTrigger>
+      {/* Portal: every tile is overflow-hidden, which would clip the tooltip. */}
+      <TooltipPortal>
+        <TooltipContent side="top" className="max-w-[280px] text-xs leading-relaxed">
+          {text}
+        </TooltipContent>
+      </TooltipPortal>
+    </Tooltip>
+  );
+}
+
 function KpiTile({
   tone,
   label,
@@ -1027,6 +1097,7 @@ function KpiTile({
   icon,
   onClick,
   index = 0,
+  info,
 }: {
   tone: keyof typeof KPI_TONES;
   label: string;
@@ -1037,6 +1108,7 @@ function KpiTile({
   icon: React.ReactNode;
   onClick?: () => void;
   index?: number;
+  info?: string;
 }) {
   const t = KPI_TONES[tone];
   // Stagger each tile by ~120ms so the counters fire in a wave on page load.
@@ -1046,7 +1118,7 @@ function KpiTile({
       type="button"
       onClick={onClick}
       disabled={!onClick}
-      className="rounded-2xl p-4 text-left relative overflow-hidden min-h-[112px] flex flex-col justify-between transition-transform hover:-translate-y-0.5 hover:shadow-lg disabled:cursor-default disabled:hover:translate-y-0"
+      className="group rounded-2xl p-4 text-left relative overflow-hidden min-h-[112px] flex flex-col justify-between transition-transform hover:-translate-y-0.5 hover:shadow-lg disabled:cursor-default disabled:hover:translate-y-0"
       style={{ background: t.bg, color: t.text }}
     >
       <div className="flex items-start justify-between gap-2">
@@ -1055,6 +1127,7 @@ function KpiTile({
           style={{ opacity: tone === "teal" ? 0.7 : tone === "green" || tone === "gold" ? 0.8 : 0.85 }}
         >
           {label}
+          {info ? <InfoTip text={info} className="ml-1.5 -mt-px" /> : null}
         </span>
         <span
           className="h-7 w-7 rounded-lg flex items-center justify-center shrink-0"
@@ -1085,16 +1158,18 @@ function ChartCard({
   title,
   subtitle,
   legend,
+  info,
   children,
 }: {
   eyebrow: string;
   title: string;
   subtitle?: string;
   legend?: React.ReactNode;
+  info?: string;
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-2xl border border-border bg-card p-5 flex flex-col">
+    <div className="group rounded-2xl border border-border bg-card p-5 flex flex-col">
       <div className="flex items-start justify-between mb-2.5 gap-2">
         <div>
           <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-muted-foreground">
@@ -1107,6 +1182,7 @@ function ChartCard({
                 {subtitle}
               </small>
             ) : null}
+            {info ? <InfoTip text={info} className="ml-1.5 text-muted-foreground" /> : null}
           </div>
         </div>
         {legend ? (
@@ -1337,6 +1413,7 @@ function AccordionCard({
   rightLink,
   defaultOpen = false,
   onToggle,
+  info,
   children,
 }: {
   iconTone: "teal" | "violet" | "coral" | "gold" | "blue";
@@ -1348,6 +1425,7 @@ function AccordionCard({
   rightLink?: React.ReactNode;
   defaultOpen?: boolean;
   onToggle?: () => void;
+  info?: string;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -1363,7 +1441,7 @@ function AccordionCard({
     onToggle?.();
   };
   return (
-    <div className="rounded-2xl border border-border bg-card overflow-hidden">
+    <div className="group rounded-2xl border border-border bg-card overflow-hidden">
       {/* div[role=button], not <button>: the header hosts its own buttons
           (View all, Show older) and a <button> can't contain another. */}
       <div
@@ -1393,6 +1471,7 @@ function AccordionCard({
           <div className="text-sm font-bold tracking-tight">
             {title}
             {titleMeta ? <small className="ml-1 text-muted-foreground font-medium">{titleMeta}</small> : null}
+            {info ? <InfoTip text={info} className="ml-1.5 text-muted-foreground" /> : null}
           </div>
         </div>
         {rightPill}
