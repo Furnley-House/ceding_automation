@@ -258,8 +258,14 @@ export interface ExportContributionRow {
   position: number;
   /** Human tax-year label, e.g. "2025/26" or "06/04/2025 – 05/04/2026". */
   taxYearLabel: string;
-  /** Free-text amount as saved on the row. Blank if unset. */
+  /** Legacy single-total free-text amount (pre-H33 grid). Only used when
+   *  neither employer nor personal has anything to show. */
   amount: string | null;
+  /** Employer cell as the Stage 4 grid renders it: "£1,234.56", "£0.00",
+   *  "N/A" (marked not applicable) or null (nothing entered). */
+  employer?: string | null;
+  /** Personal cell, same rules as `employer`. */
+  personal?: string | null;
 }
 
 export interface ExportInput {
@@ -393,6 +399,25 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
     keep.getCell(`B${targetRow}`).value = value;
   }
 
+  // ── Valuation dates ─────────────────────────────────────────────────────
+  // The template's "Current Value (with date)" / "Transfer Value" rows have
+  // no date column, so the *_as_of date goes on its own line inside the
+  // answer cell: "£167,162.29" + newline + "As at 01/06/2026".
+  for (const [valueKey, dateKey] of [
+    ["current_value", "current_value_as_of"],
+    ["transfer_value", "transfer_value_as_of"],
+  ] as const) {
+    const m = mapping.find((x) => x.fieldKey === valueKey);
+    const asOf = formatAsOfDate(byKey.get(dateKey)?.value ?? null);
+    if (!m || !asOf) continue;
+    const r = m.row >= shiftThreshold ? m.row + extraRows : m.row;
+    const cell = keep.getCell(`B${r}`);
+    const current = typeof cell.value === "string" ? cell.value : "";
+    cell.value = current ? `${current}\nAs at ${asOf}` : `As at ${asOf}`;
+    cell.style = { ...cell.style, alignment: { ...cell.alignment, wrapText: true, vertical: "top" } };
+    keep.getRow(r).height = Math.max(keep.getRow(r).height ?? 15, 30);
+  }
+
   // ── Pension row 20/21 (Contributions) ───────────────────────────────
   // The template lays out row 20 as four tax-year date-range headers
   // (B20, C20, D20:E20, F20:G20) and row 21 as four "£" placeholders
@@ -404,13 +429,18 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
   // row 21 into one wide cell (B21:G21) and write the AI's raw
   // "YYYY/YYYY: £X; YYYY/YYYY: £Y" string into it — the pre-structured-
   // table behaviour. Legacy cases fall here.
+  let pensionGridRow: number | null = null;
   if (input.planType === "PENSION") {
     const contribs = (input.contributions ?? [])
-      .filter((c) => c.taxYearLabel || c.amount) // ignore fully-empty auto-seeded rows
+      .filter((c) => c.taxYearLabel || c.amount || c.employer || c.personal) // ignore fully-empty auto-seeded rows
       .sort((a, b) => a.position - b.position);
-    const hasStructured = contribs.length > 0;
+    // Only take the structured path when at least one year has real data —
+    // four auto-seeded tax-year labels with nothing in them would otherwise
+    // hide the legacy free-text contributions_4yr_history value.
+    const hasStructured = contribs.some((c) => c.amount || c.employer || c.personal);
 
     if (hasStructured) {
+      pensionGridRow = 21;
       // Structured path: per-year cells across rows 20 and 21. Anchors
       // are B/C/D/F (D and F are the merge anchors for D:E and F:G).
       const anchors = ["B", "C", "D", "F"] as const;
@@ -420,19 +450,19 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
         keep.getCell(`${col}20`).value = "";
         keep.getCell(`${col}21`).value = "";
       }
+      // Row 21 is labelled "BREAKDOWN OF EMPLOYER & PERSONAL", so each
+      // year's cell carries both lines. The written values also replace the
+      // free-text contributions_4yr_history the scalar loop put in B21.
       contribs.slice(0, 4).forEach((c) => {
         const anchor = anchors[c.position - 1];
         if (!anchor) return;
         keep.getCell(`${anchor}20`).value = c.taxYearLabel;
-        keep.getCell(`${anchor}21`).value = c.amount ?? "";
+        const cell = keep.getCell(`${anchor}21`);
+        cell.value = contributionCellText(c);
+        cell.style = { ...cell.style, alignment: { ...cell.alignment, wrapText: true, vertical: "top" } };
       });
-      // Suppress the fallback scalar mapping that would otherwise
-      // overwrite B21 with the free-text contributions_4yr_history value.
-      // Handled here rather than earlier by clearing it after the
-      // mapping loop wrote (order-of-ops).
-      keep.getCell("B21").value = anchors[0]
-        ? (contribs.find((c) => c.position === 1)?.amount ?? "")
-        : "";
+      // Two lines (Employer / Personal) need a taller row than the template's.
+      keep.getRow(21).height = Math.max(keep.getRow(21).height ?? 15, 32);
     } else if (byKey.get("contributions_4yr_history")) {
       // Legacy fallback: collapse row 21 into one wide cell and write the
       // AI's raw string. Undoes the per-cell merges before merging B21:G21.
@@ -447,6 +477,39 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
 
   // ── Populate Fund Details ───────────────────────────────────────────────
   if (block) writeFundLines(keep, block, input.fundLines);
+
+  // ── Merge every answer cell across B..G ─────────────────────────────────
+  // Most answer rows in the template are merged B:G, but a handful aren't
+  // (Pension 6, 7, 25, 26, 47, 51; ISA 34; GIA 48, 49), which rendered as
+  // six separately-bordered boxes instead of one answer cell. Pension row
+  // 21 is excluded when it holds the per-year contributions grid.
+  for (const m of mapping) {
+    const r = m.row >= shiftThreshold ? m.row + extraRows : m.row;
+    if (r === pensionGridRow) continue;
+    if (keep.getCell(`B${r}`).isMerged) continue;
+    for (const col of ["C", "D", "E", "F", "G"] as const) keep.getCell(`${col}${r}`).value = null;
+    try { keep.mergeCells(`B${r}:G${r}`); } catch { /* overlaps an existing merge — leave as-is */ }
+  }
+
+  // ── One colour for everything right of the question column ──────────────
+  // The template mixes red (B11, B79, H79), black and slate-blue text on the
+  // answer side. Use the template's own answer colour everywhere from
+  // column B rightwards so answers, table headers and guidance notes all
+  // read uniformly. Only the colour changes — bold, size and font stay as
+  // the template has them. Column A (the questions) is left untouched.
+  keep.eachRow({ includeEmpty: false }, (row) => {
+    row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
+      if (colNumber < 2) return;
+      // Replace the whole style object, not just .font: ExcelJS shares one
+      // style object between cells with the same template formatting, so
+      // mutating .font here would also recolour the column-A question cell
+      // that shares it.
+      cell.style = {
+        ...cell.style,
+        font: { ...cell.font, color: { argb: ANSWER_TEXT_ARGB } },
+      };
+    });
+  });
 
   // ── Append Audit Trail sheet ─────────────────────────────────────────────
   const auditWs = wb.addWorksheet("Audit Trail");
@@ -472,6 +535,26 @@ export async function buildStyledExport(input: ExportInput): Promise<Uint8Array>
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/** "2026-06-01" / ISO datetime → "01/06/2026". Anything unparseable is
+ *  passed through trimmed (a CA may have typed "June 2026"). */
+function formatAsOfDate(v: string | null): string | null {
+  if (!v || !v.trim()) return null;
+  const t = v.trim();
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(t);
+  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
+  return t;
+}
+
+/** Answer-side text colour — the template's own answer slate-blue. */
+const ANSWER_TEXT_ARGB = "FF4B4777";
+
+/** Row-21 text for one tax year: "Employer: £X\nPersonal: £Y". Falls back
+ *  to the legacy single amount when neither type has anything. */
+function contributionCellText(c: ExportContributionRow): string {
+  if (!c.employer && !c.personal) return c.amount ?? "";
+  return `Employer: ${c.employer ?? "—"}\nPersonal: ${c.personal ?? "—"}`;
+}
 
 function capitalise(s: string): string {
   if (!s) return s;

@@ -18,6 +18,8 @@ import { getTemplate } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
 import type { CaseRow } from "@/lib/caseHelpers";
 import { buildStyledExport, type ExportInput } from "@/lib/exportTemplate";
+import { cellState, type ContributionType } from "@/lib/contributionsDerivation";
+import type { ContributionRow } from "@/hooks/useContributions";
 
 interface AuditRow {
   id: string;
@@ -171,13 +173,25 @@ export function ExportWorkspace({ caseItem }: Props) {
     let contributions: ExportInput["contributions"] = [];
     try {
       const res = await contributionsApi.list(caseItem.id);
-      const data = res.data as { rows?: Array<{ position: number; taxYearLabel: string; amount: string | null }> };
+      const data = res.data as { rows?: ContributionRow[] };
+      // Employer / Personal per tax year, resolved with the same cellState()
+      // the Stage 4 grid uses, so the export shows exactly what the CA saw:
+      // a £ total, £0.00, "N/A" (marked not applicable) or null (empty).
+      const cellText = (row: ContributionRow, type: ContributionType): string | null => {
+        const st = cellState({ ...row, transactions: row.transactions ?? [] }, type);
+        if (st.kind === "amount") return formatGbp(st.total);
+        if (st.kind === "zero") return formatGbp(0);
+        if (st.kind === "notApplicable") return "N/A";
+        return null;
+      };
       contributions = (data.rows ?? [])
         .sort((a, b) => a.position - b.position)
         .map((r) => ({
           position: r.position,
           taxYearLabel: r.taxYearLabel,
           amount: r.amount ?? null,
+          employer: cellText(r, "EMPLOYER"),
+          personal: cellText(r, "PERSONAL"),
         }));
     } catch {
       /* contributions unavailable — export falls back to the legacy text field */
@@ -583,4 +597,8 @@ function PushedFieldsTable({ fields }: { fields: Record<string, unknown> }) {
       </table>
     </div>
   );
+}
+
+function formatGbp(n: number): string {
+  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(n);
 }
