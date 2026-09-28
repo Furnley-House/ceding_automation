@@ -66,6 +66,18 @@ interface ExportReceipt {
     fields?: Record<string, unknown>;
   };
   zohoError?: string | null;
+  /**
+   * Outcome of the Holdings subform push. Summarised rather than dumped:
+   * the raw payload is a wall of JSON that hides whether anything actually
+   * changed, which is the only thing the CA needs from it.
+   */
+  holdings?: {
+    added: number;
+    updated: number;
+    kept: number;
+    skipped: string[];
+  } | null;
+  holdingsError?: string | null;
   cacheWarning?: string | null;
 }
 
@@ -122,6 +134,8 @@ export function ExportWorkspace({ caseItem }: Props) {
           workdriveError: (m.workdriveError as string | null) ?? null,
           zohoUpdate: (m.zohoUpdate as ExportReceipt["zohoUpdate"]) ?? undefined,
           zohoError: (m.zohoError as string | null) ?? null,
+          holdings: (m.holdings as ExportReceipt["holdings"]) ?? null,
+          holdingsError: (m.holdingsError as string | null) ?? null,
           cacheWarning: (m.cacheWarning as string | null) ?? null,
         });
       } catch {
@@ -259,6 +273,8 @@ export function ExportWorkspace({ caseItem }: Props) {
         workdriveError?: string | null;
         zohoUpdate?: { ok: boolean; fieldsUpdated: number };
         zohoError?: string | null;
+        holdings?: { added: number; updated: number; kept: number; skipped: string[] } | null;
+        holdingsError?: string | null;
         exportedAt: string;
       };
 
@@ -273,6 +289,23 @@ export function ExportWorkspace({ caseItem }: Props) {
       else if (data.workdriveError) lines.push(`WorkDrive upload failed: ${data.workdriveError}`);
       if (data.zohoUpdate?.ok) lines.push(`Updated ${data.zohoUpdate.fieldsUpdated} fields in Zoho CRM ✓`);
       else if (data.zohoError) lines.push(`Zoho update failed: ${data.zohoError}`);
+
+      // Holdings get their own line — they are the part a CA is most likely
+      // to want confirmed, and the field count above does not distinguish
+      // "the subform was sent" from "the subform changed anything".
+      if (data.holdingsError) {
+        lines.push("Fund holdings were not sent — could not read the existing rows");
+      } else if (data.zohoUpdate?.ok && data.holdings) {
+        const { added, updated } = data.holdings;
+        if (added > 0 || updated > 0) {
+          const parts: string[] = [];
+          if (updated > 0) parts.push(`${updated} updated`);
+          if (added > 0) parts.push(`${added} added`);
+          lines.push(`Fund holdings: ${parts.join(", ")} ✓`);
+        } else {
+          lines.push("Fund holdings: no changes");
+        }
+      }
 
       const allOk = !!data.workdrive && !!data.zohoUpdate?.ok;
       if (allOk) {
@@ -546,6 +579,15 @@ function ExportReceiptPanel({
           )}
         </dd>
 
+        <dt className="text-muted-foreground">Holdings</dt>
+        <dd>
+          <HoldingsOutcome
+            holdings={receipt.holdings}
+            error={receipt.holdingsError}
+            zohoOk={zohoOk}
+          />
+        </dd>
+
         {receipt.cacheWarning && (
           <>
             <dt className="text-muted-foreground">Note</dt>
@@ -561,8 +603,91 @@ function ExportReceiptPanel({
 // Zoho Plans row so the receipt is self-contained — no need to open the
 // Zoho record to verify each value. Lookup fields show as "linked · {id}";
 // scalars / pick-list / dates show their literal value.
+/**
+ * What happened to the fund holdings, in a sentence.
+ *
+ * This used to render as the raw Holdings_List payload — several hundred
+ * characters of JSON in which the one thing that matters, whether the rows
+ * actually changed, was invisible. The counts say it directly.
+ */
+function HoldingsOutcome({
+  holdings,
+  error,
+  zohoOk,
+}: {
+  holdings: ExportReceipt["holdings"];
+  error?: string | null;
+  zohoOk: boolean;
+}) {
+  if (error) {
+    return (
+      <span className="inline-flex items-start gap-1 text-warning">
+        <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />
+        <span>
+          Could not read the existing holdings, so none were sent. The rest of the export went
+          through — run it again to push them.
+        </span>
+      </span>
+    );
+  }
+
+  // The Plan update failed as a whole, so the subform never landed either.
+  // Saying "3 updated" here would contradict the row above it.
+  if (!zohoOk) {
+    return (
+      <span className="inline-flex items-center gap-1 text-warning">
+        <XCircle className="h-3 w-3" /> Not sent — the Zoho update failed
+      </span>
+    );
+  }
+
+  if (!holdings) {
+    return <span className="text-muted-foreground">—</span>;
+  }
+
+  const { added, updated, kept, skipped } = holdings;
+
+  if (added === 0 && updated === 0) {
+    return (
+      <span className="inline-flex items-center gap-1 text-muted-foreground">
+        <CheckCircle2 className="h-3 w-3" />
+        {kept > 0
+          ? `No changes — ${kept} existing row${kept === 1 ? "" : "s"} left as they were`
+          : "No fund holdings on this case"}
+      </span>
+    );
+  }
+
+  const parts: string[] = [];
+  if (updated > 0) parts.push(`${updated} updated`);
+  if (added > 0) parts.push(`${added} added`);
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="inline-flex items-center gap-1 text-success">
+        <CheckCircle2 className="h-3 w-3" /> {parts.join(" · ")}
+      </span>
+      {kept > 0 && (
+        <span className="text-muted-foreground text-[11px]">
+          {kept} other row{kept === 1 ? "" : "s"} on the plan left untouched
+        </span>
+      )}
+      {skipped.length > 0 && (
+        <span className="text-warning text-[11px]">
+          Not sent (nothing to identify {skipped.length === 1 ? "it" : "them"} by):{" "}
+          {skipped.join(", ")}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// The subform is summarised in its own row above, so it is left out of the
+// field-by-field table — its payload is JSON that would swamp the panel.
+const RECEIPT_HIDDEN_FIELDS = new Set(["Holdings_List"]);
+
 function PushedFieldsTable({ fields }: { fields: Record<string, unknown> }) {
-  const entries = Object.entries(fields);
+  const entries = Object.entries(fields).filter(([k]) => !RECEIPT_HIDDEN_FIELDS.has(k));
   return (
     <div className="mt-2 rounded-md border border-success/30 bg-background/60 overflow-hidden">
       <table className="w-full text-[11px]">
