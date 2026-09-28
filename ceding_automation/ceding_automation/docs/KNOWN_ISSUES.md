@@ -5,6 +5,116 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-08 — `recordingWatcher` retries every case every tick with no backoff
+
+**Filed:** 2026-09-28
+**Owner:** Srinath (author of `services/recordingWatcher.ts`)
+**Status:** Fixed on `fix/recording-watcher-backoff`, 2026-09-28 — awaiting
+review and a staging soak before `WATCH_RECORDING_FOLDER` goes back on.
+**Severity:** Medium — silent today because the feature is disabled on staging
+(`WATCH_RECORDING_FOLDER=false` as of 2026-09-28), but must be fixed before it
+is re-enabled anywhere, and cannot ship to prod in its current shape.
+
+### What was done
+
+New `services/watcherBackoff.ts` carries the failure memory the watcher had
+none of: per-target exponential backoff (5m doubling to 1h, with jitter),
+error classification, and a tick-level circuit breaker. `recordingWatcher.ts`
+consults it per case and per folder. 24 tests in `watcherBackoff.test.ts`.
+
+Two amendments to the report above:
+
+- **Fix direction 1 says permanent failures should be marked unwatchable in
+  the DB.** They are parked for 6 hours in memory instead. A 404 today is a
+  folder nobody has mapped yet, and a CA mapping it should not have to wait
+  for someone to clear a database flag. Six hours is long enough to stop the
+  hammering and short enough to pick the case up the same working day.
+- **The note about `palindromePoller` having the same shape is not correct.**
+  Its catch block at `palindromePoller.ts:264-272` already stamps
+  `lastPolledAt` on failure, so a failing row is not re-polled for
+  `POLL_FRESHNESS_MS`, and rows settle as `Timed Out` after `JOB_TIMEOUT_MS`
+  and stop being candidates. The throttle is flat rather than exponential and
+  the caller set is bounded, so it cannot run away the way the watcher did.
+  Left alone.
+
+### The shape
+
+`services/recordingWatcher.ts:75-118` — every `POLL_INTERVAL_MS` (default 120s)
+the tick calls `scanOnce()`, which:
+
+1. Loads up to `PER_TICK_CASE_CAP=20` non-terminal cases from Postgres.
+2. For each case, calls `ensureCaseCallFolders(clientZohoId, caseRef)` — one
+   WorkDrive round-trip per case.
+3. On failure, catches at line 112, logs `[recording-watcher] {caseRef}:
+   cannot resolve folder — …`, moves on to the next case.
+
+No state is kept between ticks. There is no per-case failure counter, no
+exponential backoff on cases that have been failing, no circuit breaker on
+"most cases in this tick failed" (a signal that the downstream service, not
+the case, is the problem). The next tick re-tries every case from scratch
+against the same failing service.
+
+### Evidence
+
+Staging revision `ca-cedingai-backend-staging--0000070`, 2026-09-28 12:09Z → 12:20Z:
+every tick emitted ~20 `Request failed with status code 429` warns from
+WorkDrive. Same 20 case refs, every 2 minutes, indefinitely. Approximately 600
+rate-limit hits per hour against a single Zoho tenant, with zero convergence and
+zero useful signal in the logs — after the first tick you cannot tell whether
+the situation is getting better or worse.
+
+The root cause of the specific 429 may be auth-adjacent (staging's
+`zoho-refresh-token` is CRM-scoped; WorkDrive may soft-deny) or genuine
+rate-limiting — but the defect exists independently of which one it is. The
+watcher would hammer any downstream service having a bad day in exactly the
+same shape.
+
+### Why it slipped through
+
+The code already knows WorkDrive rate-limits hard — line 44 has:
+
+> `PER_TICK_CASE_CAP keeps the WorkDrive load bounded (it rate-limits hard: F7008).`
+
+That defends against a burst per tick. It does not defend against a
+persistent-failure loop across ticks. The comment is accurate for the burst-
+sized concern the author had in mind; the failure mode that showed up on
+staging is the temporal one it doesn't cover.
+
+### Fix direction
+
+1. **Per-case exponential backoff.** Track consecutive failures per `(caseId,
+   caller)` — either in a `recording_watcher_state` table or an in-memory map
+   keyed by `caseId` (acceptable because the process is single-instance today).
+   A case that failed N ticks in a row is skipped for `min(2^N × base_delay,
+   max_delay)`. Reset on success. Log the state transition
+   ("backing off case X for Y minutes") once, not per-tick.
+2. **Tick-level circuit breaker.** If >50% of cases in a tick fail with the same
+   error class (429, 5xx, network), halve the tick cadence for the next K
+   ticks. Emit one "watcher throttled: {reason}" log line instead of the current
+   per-case wall of text. Recover when a subsequent tick shows a healthy ratio.
+3. **Classify the error before logging.** `err.message.slice(0, 120)` masks the
+   HTTP status. Distinguish auth (401/403), rate-limit (429), transient (5xx,
+   ECONNRESET), and permanent (404) — the first three should back off; the last
+   should mark the case unwatchable in DB and stop retrying entirely until a CA
+   fixes the folder mapping.
+4. **Jitter.** All ~20 requests inside a tick fire in a tight loop. Even a
+   small `Promise.all` chunk with a stagger would smooth the WorkDrive burst
+   rather than concentrating it in a ~1s window.
+
+### Notes for whoever picks this up
+
+- Same class as H31 (DLQ observability) — "silent no-op == invisible" is the
+  hygiene principle; add "silent-loop-on-failure == invisible until it isn't"
+  as the sibling rule.
+- Palindrome-poller (`services/palindromePoller.ts:57-65`) has the same shape
+  risk — its per-tick DB queries can't fail in the same way, but the Creator API
+  calls inside can. Worth a matching backoff pass in the same PR.
+- **Do not re-enable `WATCH_RECORDING_FOLDER=true` on any environment until
+  this is fixed.** The staging disable on 2026-09-28 was to unblock Srinath's
+  Palindrome UI-flow testing; the feature itself is unshippable in this shape.
+
+---
+
 ## KI-07 — Two-store drift between `useAuthStore` and `useRole`
 
 **Filed:** 2026-09-18

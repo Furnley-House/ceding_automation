@@ -117,3 +117,18 @@ Your commit adds `backend/w.ts` (+22 lines). It looks like a debug scratch file 
 `develop` was fast-forwarded to `main` today. From today onwards, work is expected to merge to `develop` first, then `develop` → `main` for the prod cutover. If you push directly to `main`, you overwrite that arrangement and Revathy/I both end up pushing to the branch that deploys prod. Please target `develop`.
 
 If any of the above is wrong or missing context, tell me and I'll amend the note.
+
+## Follow-up filed against your work (2026-09-28)
+
+Filed [KI-08](../KNOWN_ISSUES.md#ki-08--recordingwatcher-retries-every-case-every-tick-with-no-backoff)
+against `services/recordingWatcher.ts`. Surfaced on the 2026-09-28 staging
+enablement: the watcher retries every case every tick with no backoff, so a
+persistent downstream error (in this case Zoho WorkDrive 429s) turns into a
+permanent hammer on whatever it is calling. The defect exists independently of
+what the 429 root cause turns out to be — the same shape would hit any
+downstream service having a bad day.
+
+`WATCH_RECORDING_FOLDER` is disabled on staging until this is addressed.
+Palindrome itself (`TRANSCRIPT_VIA_PALINDROME=true`) stays enabled — the
+UI-triggered flow is unaffected and you can test that today. Fix the backoff
+before re-enabling the folder-watcher, and before either flag reaches prod.
