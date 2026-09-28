@@ -5,6 +5,201 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-10 — Zoho Plans export fails on `Valuation` with more than 2 decimal places
+
+**Filed:** 2026-09-29
+**Owner:** unassigned
+**Severity:** Medium — blocks Stage 9 export write-back to Zoho Plans for any
+case whose extracted or entered `Valuation` carries more than 2 decimal places.
+Distinct from the plan-resolution failure fixed in `5799f48`; both symptoms can
+co-occur on the same case.
+
+### The shape
+
+Zoho CRM's Plans module enforces `maximum_decimal_place: 2` on the `Valuation`
+field. When our Stage 9 export PUT includes higher-precision decimals, Zoho
+rejects the entire payload:
+
+```
+Zoho Plans/<id> PUT failed (400): {"code":"INVALID_DATA",
+  "details":{"api_name":"Valuation","maximum_decimal_place":2,
+             "json_path":"$.data[0].Valuation"},
+  "message":"invalid data","status":"error"}
+```
+
+Real prod evidence — `FH-2026-000234` (Guy Stanton) on 2026-09-24: exports at
+`10:00:47Z` and `10:18:09Z` both failed with this exact error. The 2026-09-28
+plan-resolution fix (`5799f48`) does not address this — a case with the plan
+correctly resolved will still fail here on the PUT if `Valuation` has too many
+decimals. Surfaced during the read-only forensic pass for `5799f48` on both
+Guy Stanton cases (2026-09-29).
+
+### Fix direction
+
+Normalise `Valuation` to 2 dp at the **write** site (not at extraction —
+upstream loses no precision, only the outbound PUT needs the constraint). Grep
+for `Valuation` in `backend/src/services/aiBffApply.ts`,
+`backend/src/services/zohoCrm.ts`, and `backend/src/routes/export.ts` — the fix
+belongs at whichever of those builds the Zoho-CRM update payload.
+
+```ts
+Valuation: Math.round(parseFloat(v) * 100) / 100
+```
+
+Choose between:
+- **Round** — matches accountant-expected behaviour, drops sub-penny precision
+  silently. Recommended default.
+- **Truncate** — under-reports; probably wrong for financial data.
+- **Reject with an actionable error at the app level** — only if the sub-penny
+  precision carries meaning downstream, which it doesn't in Zoho.
+
+Extracted values from PDFs are typically 2 or 3 significant digits after the
+decimal, so rounding to 2 doesn't create a user-visible discrepancy on any
+case we've seen.
+
+### Notes for whoever picks this up
+
+- **Systematic sweep.** Other Zoho fields likely have similar constraints
+  (`Plan_Type` enum values, date formats, `Policy_Ref` length). Grep the
+  export payload builder for hard-coded strings that go verbatim into Zoho
+  and confirm each has a defensive coercion at the write site.
+- **Test with FH-2026-000234's own Valuation** — reproduce the failure locally
+  (Zoho sandbox) with the pre-fix code, confirm the fix resolves it, before
+  shipping. That case's history is the reference implementation.
+- **Cross-refs.** Shipped alongside `5799f48` in the 2026-09-28 prod deploy
+  (see `.prod-pitr-log` entry for `f69e97d`) — if Guy Stanton exports still
+  fail after that deploy, it's this bug, not the plan-resolution one.
+
+---
+
+## KI-09 — `PATCH /:id/status` accepts CA_TEAM for terminal transitions with no approval invariant
+
+**Filed:** 2026-09-29
+**Owner:** unassigned
+**Severity:** Medium — the current audit trail shows 84 prod cases in a
+terminal state with unapproved fields; ≥4 of them show the extreme "zero
+approvals ever" pattern. Not a data-loss bug (fields keep their values), but
+a governance one — "APPROVED" and "STAGE_10_COMPLETE" statuses currently do
+not guarantee the approvals they claim to represent.
+
+### The shape
+
+Two role gates on the checklist path disagree:
+
+| Endpoint | Roles allowed |
+|---|---|
+| `PATCH /api/cases/:id/status` (advance status, including → APPROVED / STAGE_10_COMPLETE) | `["CA_TEAM", "ADMIN", "PARAPLANNER", "ADVISER"]` |
+| `POST /api/cases/:caseId/checklist/:fieldId/approve` (per-field approve) | `["ADVISER", "PARAPLANNER", "ADMIN"]` |
+
+A CA_TEAM user can end-run per-field approval by promoting case status
+directly. On staging that manifested as Callum (CA_TEAM) advancing
+`FH-2026-000092` to `STAGE_10_COMPLETE` with 71 fields, 0 approved. On prod:
+**84 cases** in the same class as of 2026-09-28 read-only forensic query, of
+which ≥4 have 0 field approvals ever.
+
+Two distinct shapes in that 84:
+- **"Extreme"** (≥4 cases: FH-2026-000237, 000270, 000205, 000131, 000164 —
+  Callum's shape): 0 approved, dozens of fields with values. Almost certainly
+  the loophole being exercised.
+- **"Trailing three"** (~11 of top 15 including Guy Stanton FH-2026-000234):
+  68/71 fields approved, the same 3 unapproved every time. Reads like a
+  template quirk (three specific fields the paraplanner isn't asked to sign
+  off on) rather than the loophole. Worth understanding before shipping the
+  guard — those three field keys should be identified and the guard's
+  invariant should account for them intentionally, not incidentally.
+
+### Fix direction
+
+Enforce a write-path invariant, agnostic to role:
+
+> A case cannot be at `STAGE_10_COMPLETE` or `APPROVED` while any of its
+> checklist fields has a value and isn't approved.
+
+Design decisions locked with the user 2026-09-29:
+
+**(a) Do NOT exempt `value = "N/A"`.** Rachel's bulk "Mark 71 missing as N/A"
+on FH-2026-000092 was exactly the shape this guard should catch. Exempting
+N/A gives the guard a trivial workaround ("just mark everything N/A"). The
+paraplanner still confirms N/A decisions.
+
+**(b) Gate BOTH `STAGE_10_COMPLETE` AND `APPROVED`.** APPROVED means "the
+paraplanner has signed off"; you shouldn't enter that state without
+approvals either. Gating both closes the "set APPROVED first, then
+STAGE_10_COMPLETE" loophole.
+
+**(c) Ignore `showIf` template filtering in the backend.** A DB row with a
+value is a field the CA populated; it should be reviewed regardless of the
+frontend's conditional-display rules. Backend stays a cheap COUNT; no
+template-aware complexity.
+
+### Fix shape (~50 lines impl + ~30 lines tests)
+
+1. **New `backend/src/utils/completionInvariant.ts`** — pure predicate:
+   ```ts
+   export async function checkCompletionInvariant(caseId: string) {
+     const unapprovedCount = await prisma.checklistField.count({
+       where: {
+         caseId,
+         isApproved: false,
+         value: { not: null },
+         NOT: { value: "" },
+       },
+     });
+     return { blocked: unapprovedCount > 0, unapprovedCount };
+   }
+   ```
+
+2. **Modify `backend/src/routes/cases.ts` `PATCH /:id/status`** — before the
+   `prisma.case.update` (~line 940), when target status ∈ {`STAGE_10_COMPLETE`,
+   `APPROVED`}: run the invariant check, if `blocked` return `409` with
+   `code: "COMPLETION_UNAPPROVED_FIELDS"`, and emit an audit row
+   `action: "COMPLETION_BLOCKED"` with metadata
+   `{ unapprovedCount, attemptedStatus }`. Do NOT modify the role gate —
+   the invariant subsumes it.
+
+3. **Frontend `components/case/stages.tsx` + case-level Mark Complete** —
+   new hook `useCompletionReadiness(caseId)` fetches the same count; disable
+   the Mark Complete button and show a tooltip ("N fields still need
+   paraplanner approval before this case can be completed"). Backend
+   enforces regardless; frontend is UX.
+
+4. **Tests** — 5-8 covering:
+   - Blocks when 1 field has value + `!isApproved`
+   - Blocks when field has `value = "N/A"` + `!isApproved` (decision (a))
+   - Passes when all valued fields are `isApproved`
+   - Passes when only empty/null-valued fields are unapproved
+   - Passes when target status isn't `APPROVED`/`STAGE_10_COMPLETE`
+   - Blocks on either `APPROVED` or `STAGE_10_COMPLETE` (decision (b))
+   - Emits `COMPLETION_BLOCKED` audit row on rejection
+   - Does not filter by `showIf` (decision (c))
+   - Also add a new `AuditAction` enum value `COMPLETION_BLOCKED` in the
+     Prisma migration (schema.prisma + one-line migration)
+
+### Backfill note — 84 existing prod cases
+
+The guard operates on **transitions**, so those 84 cases stay put after the
+fix ships. Retroactive cleanup is a separate decision — most likely not
+worth it (no wrong data, just an unusual audit shape). Whoever picks up the
+guard should first investigate the "trailing 3 unapproved" pattern (~11 of
+top 15): identify which 3 field keys, and decide whether they should be
+exempted (probably not) or the template should be corrected to include
+them as approvable (probably yes). That analysis belongs in the PR, not
+this KI.
+
+### Notes for whoever picks this up
+
+- Cross-refs `bd9b693 feat(access): let CA Team and Paraplanners work on
+  every case`. That commit intentionally opened case *visibility* for
+  CA_TEAM but its message overstated the delivery — it did not (and should
+  not) open per-field *approval*. This guard makes the approval intent
+  enforceable via the invariant rather than trying to fix it via role
+  gating.
+- Related but distinct from KI-04 (batch vs per-row audit granularity on
+  AI writes) — different concern, but touches the same audit-legibility
+  surface.
+
+---
+
 ## KI-08 — `recordingWatcher` retries every case every tick with no backoff
 
 **Filed:** 2026-09-28
