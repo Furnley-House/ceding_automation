@@ -294,7 +294,7 @@ export function ExportWorkspace({ caseItem }: Props) {
       // to want confirmed, and the field count above does not distinguish
       // "the subform was sent" from "the subform changed anything".
       if (data.holdingsError) {
-        lines.push("Fund holdings were not sent — could not read the existing rows");
+        lines.push("Fund holdings were not sent — please run the export again");
       } else if (data.zohoUpdate?.ok && data.holdings) {
         const { added, updated } = data.holdings;
         if (added > 0 || updated > 0) {
@@ -624,8 +624,8 @@ function HoldingsOutcome({
       <span className="inline-flex items-start gap-1 text-warning">
         <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />
         <span>
-          Could not read the existing holdings, so none were sent. The rest of the export went
-          through — run it again to push them.
+          Fund holdings were not sent. Everything else exported fine — please run the export
+          again.
         </span>
       </span>
     );
@@ -645,37 +645,33 @@ function HoldingsOutcome({
     return <span className="text-muted-foreground">—</span>;
   }
 
-  const { added, updated, kept, skipped } = holdings;
+  const { added, updated, skipped } = holdings;
 
+  // Only what this export did to this case's funds. What else happens to sit
+  // on the plan is not the CA's business and naming it just raises questions
+  // they have no way to answer.
   if (added === 0 && updated === 0) {
     return (
       <span className="inline-flex items-center gap-1 text-muted-foreground">
-        <CheckCircle2 className="h-3 w-3" />
-        {kept > 0
-          ? `No changes — ${kept} existing row${kept === 1 ? "" : "s"} left as they were`
-          : "No fund holdings on this case"}
+        <CheckCircle2 className="h-3 w-3" /> No changes
       </span>
     );
   }
 
   const parts: string[] = [];
-  if (updated > 0) parts.push(`${updated} updated`);
-  if (added > 0) parts.push(`${added} added`);
+  if (updated > 0) parts.push(`${updated} fund${updated === 1 ? "" : "s"} updated`);
+  if (added > 0) parts.push(`${added} fund${added === 1 ? "" : "s"} added`);
 
   return (
     <div className="flex flex-col gap-0.5">
       <span className="inline-flex items-center gap-1 text-success">
-        <CheckCircle2 className="h-3 w-3" /> {parts.join(" · ")}
+        <CheckCircle2 className="h-3 w-3" /> {parts.join(", ")}
       </span>
-      {kept > 0 && (
-        <span className="text-muted-foreground text-[11px]">
-          {kept} other row{kept === 1 ? "" : "s"} on the plan left untouched
-        </span>
-      )}
+      {/* Worth saying, because these funds will not be in CRM and nothing
+          else on this screen would tell them. */}
       {skipped.length > 0 && (
         <span className="text-warning text-[11px]">
-          Not sent (nothing to identify {skipped.length === 1 ? "it" : "them"} by):{" "}
-          {skipped.join(", ")}
+          Not sent: {skipped.join(", ")} — add a fund name or ISIN on the checklist first.
         </span>
       )}
     </div>
