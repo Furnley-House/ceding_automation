@@ -18,6 +18,7 @@ import { getTemplate } from "@/lib/checklistTemplates";
 import { Button } from "@/components/ui/button";
 import type { CaseRow } from "@/lib/caseHelpers";
 import { buildStyledExport, type ExportInput } from "@/lib/exportTemplate";
+import { buildExportFileName } from "@/lib/exportFileName";
 import { cellState, type ContributionType } from "@/lib/contributionsDerivation";
 import type { ContributionRow } from "@/hooks/useContributions";
 
@@ -239,7 +240,14 @@ export function ExportWorkspace({ caseItem }: Props) {
     return buildStyledExport(input);
   };
 
-  const fileName = `${caseItem.case_ref}_${caseItem.client_name.replace(/\s+/g, "_")}_ceding.xlsx`;
+  // "Ceding Checklist – <Provider> – <Client> – <Policy number>.xlsx" — the
+  // team's pre-app naming convention. Same name for download + WorkDrive.
+  const fileName = buildExportFileName({
+    providerName: caseItem.Provider_group,
+    clientName: caseItem.client_name,
+    policyNumber: caseItem.plan_number,
+    caseRef: caseItem.case_ref,
+  });
 
   // One-shot Stage 9 action:
   //   1. Build the XLSX in the browser.
