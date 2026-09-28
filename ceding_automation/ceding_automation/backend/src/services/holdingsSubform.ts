@@ -206,8 +206,12 @@ export interface MergeResult {
   updated: number;
   /** Rows on the Plan that are nothing to do with this case, left alone. */
   kept: number;
+  /** Rows this case put there previously and has since deleted. */
+  removed: string[];
   /** Incoming rows with nothing to identify them by, so not written. */
   skipped: string[];
+  /** The keys this export owns, to store against the case for next time. */
+  ownedKeys: string[];
 }
 
 /**
@@ -234,7 +238,22 @@ export interface MergeResult {
  * round, because the checklist is where the holding is reviewed and signed
  * off, but it does mean corrections belong on the checklist and not in CRM.
  */
-export function mergeHoldings(existing: HoldingRow[], incoming: HoldingRow[]): MergeResult {
+export function mergeHoldings(
+  existing: HoldingRow[],
+  incoming: HoldingRow[],
+  /**
+   * Keys this case wrote to the Plan on its last successful export.
+   *
+   * The ONLY rows this function will delete. A row whose key is in here but
+   * which the case no longer holds was deleted from the checklist, so it goes
+   * from the Plan too. Anything absent from this list is somebody else's and
+   * is echoed back untouched, whatever it looks like.
+   *
+   * Empty on a case that has not exported since this was introduced, so the
+   * first run after deployment deletes nothing.
+   */
+  previouslyExported: readonly string[] = [],
+): MergeResult {
   // Index what we are pushing, so each existing row can find its counterpart.
   const byKey = new Map<string, HoldingRow>();
   const skipped: string[] = [];
@@ -250,14 +269,25 @@ export function mergeHoldings(existing: HoldingRow[], incoming: HoldingRow[]): M
     if (!byKey.has(key)) byKey.set(key, row);
   }
 
+  const previouslyOurs = new Set(previouslyExported);
   const rows: HoldingRow[] = [];
   const matched = new Set<string>();
+  const removed: string[] = [];
   let updated = 0;
   let kept = 0;
 
   for (const row of existing) {
     const base = echoable(row);
     const key = holdingKey(row);
+
+    // We put this row here, and the case no longer holds that fund — so the
+    // CA deleted it from the checklist. Leaving it out of the payload is how
+    // a subform row is deleted.
+    if (key && previouslyOurs.has(key) && !byKey.has(key)) {
+      removed.push(String(row.security_name ?? key));
+      continue;
+    }
+
     const ours = key ? byKey.get(key) : undefined;
     if (ours) {
       matched.add(key!);
@@ -285,7 +315,11 @@ export function mergeHoldings(existing: HoldingRow[], incoming: HoldingRow[]): M
     added: added.length,
     updated,
     kept,
+    removed,
     skipped,
+    // Everything this export is now responsible for on the Plan. Stored
+    // against the case so the next run knows what it may delete.
+    ownedKeys: [...byKey.keys()],
   };
 }
 

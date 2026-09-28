@@ -348,6 +348,17 @@ model Case {
   zohoProviderRecordId String? // Plan.Provider ← Providers-module record id
   zohoSyncedAt         DateTime? // When the cached IDs above were last refreshed
 
+  // Which Holdings_List rows THIS case put on the Plan, as the identity keys
+  // the export matches on (isin:GB00... / name:RLS DEPOSIT PN). Written after
+  // each successful export.
+  //
+  // It exists so a holding deleted from the checklist can be deleted from the
+  // Plan as well. A subform PUT replaces the whole list, so removing a row
+  // means leaving it out — and without this there is no way to tell a row we
+  // wrote from one another team or a workflow added, which we must never
+  // touch. Only a key recorded here is ever dropped.
+  zohoHoldingKeys String[] @default([])
+
   // Relations
   documents       Document[]
   checklistFields ChecklistField[]

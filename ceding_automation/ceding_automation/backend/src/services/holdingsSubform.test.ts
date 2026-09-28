@@ -370,3 +370,81 @@ describe("field precision", () => {
     expect(toFieldScale("gbp_valuation", null)).toBeNull();
   });
 });
+
+// Deleting a holding on the checklist has to delete it from the Plan too,
+// or the CA has to raise a ticket to get someone to remove it by hand. The
+// danger is deleting a row we did not put there, so only keys recorded from
+// a previous successful export are ever dropped.
+describe("deleting a holding", () => {
+  const onPlan = [
+    { id: "row-1", isin: "GB1", security_name: "Kept Fund" },
+    { id: "row-2", isin: "GB2", security_name: "Deleted Fund" },
+  ];
+
+  it("removes a row this case put there and no longer holds", () => {
+    const result = mergeHoldings(
+      onPlan,
+      [{ isin: "GB1", security_name: "Kept Fund" }],
+      ["isin:GB1", "isin:GB2"],
+    );
+    expect(result.removed).toEqual(["Deleted Fund"]);
+    expect(result.rows.map((r) => r.id)).toEqual(["row-1"]);
+  });
+
+  // The manual row from the live test. Never exported by us, so never ours
+  // to delete, however much it looks like a holding.
+  it("never removes a row this case did not put there", () => {
+    const result = mergeHoldings(
+      [{ id: "row-9", isin: "gfghh666", security_name: "gfg" }],
+      [],
+      ["isin:GB1"], // we once wrote GB1; the manual row is not in our list
+    );
+    expect(result.removed).toEqual([]);
+    expect(result.kept).toBe(1);
+    expect(result.rows).toHaveLength(1);
+  });
+
+  // A case that has not exported since this shipped owns nothing yet, so
+  // the first run afterwards must not delete the rows it put there earlier.
+  it("deletes nothing when the case has no recorded keys", () => {
+    const result = mergeHoldings(onPlan, [], []);
+    expect(result.removed).toEqual([]);
+    expect(result.rows).toHaveLength(2);
+  });
+
+  it("removes every holding when the CA has deleted them all", () => {
+    const result = mergeHoldings(onPlan, [], ["isin:GB1", "isin:GB2"]);
+    expect(result.removed).toHaveLength(2);
+    expect(result.rows).toEqual([]);
+  });
+
+  it("reports the keys it now owns, for the next export", () => {
+    const result = mergeHoldings(
+      onPlan,
+      [{ isin: "GB1", security_name: "Kept Fund" }, { security_name: "No ISIN Fund" }],
+      ["isin:GB1", "isin:GB2"],
+    );
+    expect(result.ownedKeys).toEqual(["isin:GB1", "name:NO ISIN FUND"]);
+  });
+
+  it("matches a deleted holding on the fund name when it had no ISIN", () => {
+    const result = mergeHoldings(
+      [{ id: "row-1", security_name: "With Profits Fund" }],
+      [],
+      ["name:WITH PROFITS FUND"],
+    );
+    expect(result.removed).toEqual(["With Profits Fund"]);
+    expect(result.rows).toEqual([]);
+  });
+
+  // Re-adding the same fund must resurrect the row rather than delete it.
+  it("does not remove a holding that has come back", () => {
+    const result = mergeHoldings(
+      onPlan,
+      [{ isin: "GB2", security_name: "Deleted Fund" }],
+      ["isin:GB2"],
+    );
+    expect(result.removed).toEqual([]);
+    expect(result.updated).toBe(1);
+  });
+});

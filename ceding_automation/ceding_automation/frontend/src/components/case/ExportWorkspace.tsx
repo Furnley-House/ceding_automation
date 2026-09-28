@@ -75,6 +75,8 @@ interface ExportReceipt {
     added: number;
     updated: number;
     kept: number;
+    /** Funds deleted from the checklist, and so removed from the plan. */
+    removed?: string[];
     skipped: string[];
   } | null;
   holdingsError?: string | null;
@@ -298,7 +300,13 @@ export function ExportWorkspace({ caseItem }: Props) {
         workdriveError?: string | null;
         zohoUpdate?: { ok: boolean; fieldsUpdated: number };
         zohoError?: string | null;
-        holdings?: { added: number; updated: number; kept: number; skipped: string[] } | null;
+        holdings?: {
+          added: number;
+          updated: number;
+          kept: number;
+          removed?: string[];
+          skipped: string[];
+        } | null;
         holdingsError?: string | null;
         exportedAt: string;
       };
@@ -322,10 +330,12 @@ export function ExportWorkspace({ caseItem }: Props) {
         lines.push("Fund holdings were not sent — please run the export again");
       } else if (data.zohoUpdate?.ok && data.holdings) {
         const { added, updated } = data.holdings;
-        if (added > 0 || updated > 0) {
+        const removedCount = data.holdings.removed?.length ?? 0;
+        if (added > 0 || updated > 0 || removedCount > 0) {
           const parts: string[] = [];
           if (updated > 0) parts.push(`${updated} updated`);
           if (added > 0) parts.push(`${added} added`);
+          if (removedCount > 0) parts.push(`${removedCount} removed`);
           lines.push(`Fund holdings: ${parts.join(", ")} ✓`);
         } else {
           lines.push("Fund holdings: no changes");
@@ -749,11 +759,12 @@ function HoldingsOutcome({
   }
 
   const { added, updated, skipped } = holdings;
+  const removed = holdings.removed ?? [];
 
   // Only what this export did to this case's funds. What else happens to sit
   // on the plan is not the CA's business and naming it just raises questions
   // they have no way to answer.
-  if (added === 0 && updated === 0) {
+  if (added === 0 && updated === 0 && removed.length === 0) {
     return (
       <span className="inline-flex items-center gap-1 text-muted-foreground">
         <CheckCircle2 className="h-3 w-3" /> No changes
@@ -764,6 +775,9 @@ function HoldingsOutcome({
   const parts: string[] = [];
   if (updated > 0) parts.push(`${updated} fund${updated === 1 ? "" : "s"} updated`);
   if (added > 0) parts.push(`${added} fund${added === 1 ? "" : "s"} added`);
+  if (removed.length > 0) {
+    parts.push(`${removed.length} fund${removed.length === 1 ? "" : "s"} removed`);
+  }
 
   return (
     <div className="flex flex-col gap-0.5">

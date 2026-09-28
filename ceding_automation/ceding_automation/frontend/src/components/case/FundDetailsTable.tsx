@@ -316,7 +316,18 @@ export function FundDetailsTable({ caseId, readOnly = false, onChanged }: Props)
   };
 
   const handleDelete = async (row: FundLine) => {
-    if (!confirm(`Remove ${row.fundName}?`)) return;
+    // Says what will actually happen. The row goes for good here, and it
+    // leaves the CRM plan on the next export — but not before, so the CA
+    // needs to know CRM is only in step once they have exported again.
+    if (
+      !confirm(
+        `Remove ${row.fundName}?\n\n` +
+          "This cannot be undone. It will also be removed from the plan in CRM " +
+          "the next time you run the export.",
+      )
+    ) {
+      return;
+    }
     try {
       await deleteRow(row.id);
       onChanged?.();

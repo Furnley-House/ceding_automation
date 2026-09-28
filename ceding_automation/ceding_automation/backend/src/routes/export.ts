@@ -32,7 +32,10 @@ import {
 } from "../services/holdingsSubform";
 
 /** What the receipt reports about the Holdings subform. */
-type HoldingsOutcome = Pick<MergeResult, "added" | "updated" | "kept" | "skipped">;
+type HoldingsOutcome = Pick<
+  MergeResult,
+  "added" | "updated" | "kept" | "removed" | "skipped"
+>;
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -418,19 +421,27 @@ router.post(
           // then failed sends the CA to CRM looking for rows that were never
           // created.
           let pending: HoldingsOutcome | null = null;
+          let pendingKeys: string[] | null = null;
           try {
             const plan = await findPlanRecordById(id);
             const existing = plan ? readExistingHoldings(plan.record) : [];
-            const merged = mergeHoldings(existing, holdingRows);
-            if (merged.rows.length > 0) {
-              payload[HOLDINGS_SUBFORM] = merged.rows;
-            }
+            const merged = mergeHoldings(
+              existing,
+              holdingRows,
+              caseRecord.zohoHoldingKeys ?? [],
+            );
+            // An empty list is meaningful: it means every holding this case
+            // had on the Plan has been deleted, and the payload has to carry
+            // the remaining rows (possibly none) for that to take effect.
+            payload[HOLDINGS_SUBFORM] = merged.rows;
             pending = {
               added: merged.added,
               updated: merged.updated,
               kept: merged.kept,
+              removed: merged.removed,
               skipped: merged.skipped,
             };
+            pendingKeys = merged.ownedKeys;
           } catch (err) {
             holdingsError = err instanceof Error ? err.message : String(err);
             console.warn(
@@ -442,6 +453,16 @@ router.post(
           const resp = await updatePlanRecord(id, payload);
           // Only now did the rows actually land.
           holdingsResult = pending;
+          // Record what this case now owns on the Plan, so a holding deleted
+          // later can be deleted from CRM too. Written only after the PUT
+          // succeeds: claiming rows we failed to write would let the next
+          // export delete rows we never put there.
+          if (pendingKeys) {
+            await prisma.case.update({
+              where: { id: caseId },
+              data: { zohoHoldingKeys: pendingKeys },
+            });
+          }
           console.log(
             "[plan-provider] updatePlanRecord ok case=%s record=%s respKeys=%s",
             caseId,
