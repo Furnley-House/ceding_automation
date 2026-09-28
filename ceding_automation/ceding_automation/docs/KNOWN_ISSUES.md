@@ -9,9 +9,33 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 **Filed:** 2026-09-28
 **Owner:** Srinath (author of `services/recordingWatcher.ts`)
+**Status:** Fixed on `fix/recording-watcher-backoff`, 2026-09-28 — awaiting
+review and a staging soak before `WATCH_RECORDING_FOLDER` goes back on.
 **Severity:** Medium — silent today because the feature is disabled on staging
 (`WATCH_RECORDING_FOLDER=false` as of 2026-09-28), but must be fixed before it
 is re-enabled anywhere, and cannot ship to prod in its current shape.
+
+### What was done
+
+New `services/watcherBackoff.ts` carries the failure memory the watcher had
+none of: per-target exponential backoff (5m doubling to 1h, with jitter),
+error classification, and a tick-level circuit breaker. `recordingWatcher.ts`
+consults it per case and per folder. 24 tests in `watcherBackoff.test.ts`.
+
+Two amendments to the report above:
+
+- **Fix direction 1 says permanent failures should be marked unwatchable in
+  the DB.** They are parked for 6 hours in memory instead. A 404 today is a
+  folder nobody has mapped yet, and a CA mapping it should not have to wait
+  for someone to clear a database flag. Six hours is long enough to stop the
+  hammering and short enough to pick the case up the same working day.
+- **The note about `palindromePoller` having the same shape is not correct.**
+  Its catch block at `palindromePoller.ts:264-272` already stamps
+  `lastPolledAt` on failure, so a failing row is not re-polled for
+  `POLL_FRESHNESS_MS`, and rows settle as `Timed Out` after `JOB_TIMEOUT_MS`
+  and stop being candidates. The throttle is flat rather than exponential and
+  the caller set is bounded, so it cannot run away the way the watcher did.
+  Left alone.
 
 ### The shape
 

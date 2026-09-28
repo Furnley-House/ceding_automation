@@ -27,6 +27,13 @@
 import { PrismaClient, CaseStatus } from '@prisma/client';
 import { ensureCaseCallFolders, submitCallForTranscription, isPalindromeEnabled } from './palindrome';
 import { listWorkDriveFiles } from './workdrive';
+import {
+  FailureTracker,
+  TickBreaker,
+  classifyFailure,
+  dominantKind,
+  type FailureKind,
+} from './watcherBackoff';
 
 const prisma = new PrismaClient();
 
@@ -46,7 +53,71 @@ const TERMINAL_STATUSES: CaseStatus[] = ['STAGE_10_COMPLETE', 'APPROVED', 'CANCE
 
 const SYSTEM_USER_ID = 'system-ai-bff';
 
+// Gap between per-case WorkDrive calls. The loop is sequential, so this is
+// not about concurrency — it is about not firing twenty calls inside a second
+// against a service that rate-limits hard. Zero under test.
+const REQUEST_STAGGER_MS =
+  process.env.NODE_ENV === 'test' ? 0 : Number(process.env.RECORDING_WATCH_STAGGER_MS ?? 150);
+
+const pause = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
+
 let handle: NodeJS.Timeout | null = null;
+
+// Failure memory, the thing KI-08 was actually about. Module-level so it
+// survives between ticks; reset() exists for tests and for the restart case.
+const failures = new FailureTracker();
+const breaker = new TickBreaker();
+
+// Where the last tick stopped. PER_TICK_CASE_CAP bounds a tick, so without a
+// cursor `take` returns the same arbitrary page for ever and every case past
+// the cap is never scanned at all — their recordings would sit in WorkDrive
+// unnoticed. Ordering by id and walking forward gives every case a turn.
+let scanCursor: string | null = null;
+
+/** Test seam: forget every backoff and start the rotation again. */
+export function resetWatcherState(): void {
+  failures.reset();
+  breaker.reset();
+  scanCursor = null;
+}
+
+/**
+ * One page of cases to try this tick, oldest id first, wrapping at the end.
+ *
+ * Wrapping matters when the tail of the list is shorter than the cap: without
+ * it the last page would be short and the cursor would reset, so the cases at
+ * the start of the alphabet would be scanned twice as often as those at the
+ * end.
+ */
+async function nextCasePage() {
+  const select = { id: true, caseRef: true, clientZohoId: true } as const;
+  const where = { status: { notIn: TERMINAL_STATUSES } };
+
+  const page = await prisma.case.findMany({
+    where: scanCursor ? { ...where, id: { gt: scanCursor } } : where,
+    select,
+    orderBy: { id: 'asc' as const },
+    take: PER_TICK_CASE_CAP,
+  });
+
+  if (page.length === PER_TICK_CASE_CAP) {
+    scanCursor = page[page.length - 1].id;
+    return page;
+  }
+
+  // Ran off the end — wrap and top up from the beginning.
+  const seen = new Set(page.map((c) => c.id));
+  const wrapped = await prisma.case.findMany({
+    where,
+    select,
+    orderBy: { id: 'asc' as const },
+    take: PER_TICK_CASE_CAP,
+  });
+
+  const combined = [...page, ...wrapped.filter((c) => !seen.has(c.id))].slice(0, PER_TICK_CASE_CAP);
+  scanCursor = combined.length > 0 ? combined[combined.length - 1].id : null;
+  return combined;
+}
 
 export function startRecordingWatcher(): void {
   if (String(process.env.WATCH_RECORDING_FOLDER).toLowerCase() !== 'true') {
@@ -82,15 +153,23 @@ async function tick(): Promise<void> {
 }
 
 /** Exported so a script can run one pass without waiting for the timer. */
-export async function scanOnce(): Promise<{ scanned: number; submitted: number; skipped: number }> {
-  const cases = await prisma.case.findMany({
-    where: { status: { notIn: TERMINAL_STATUSES } },
-    select: { id: true, caseRef: true, clientZohoId: true },
-    take: PER_TICK_CASE_CAP,
-  });
+export async function scanOnce(): Promise<{
+  scanned: number;
+  submitted: number;
+  skipped: number;
+  deferred: number;
+}> {
+  if (breaker.shouldSkipTick()) {
+    return { scanned: 0, submitted: 0, skipped: 0, deferred: 0 };
+  }
+
+  const cases = await nextCasePage();
 
   let submitted = 0;
   let skipped = 0;
+  let deferred = 0;
+  let attempted = 0;
+  const tickFailures: FailureKind[] = [];
 
   // One client folder can serve several cases, so scanning per-case would
   // list the same folder repeatedly. Group by folder and resolve ownership
@@ -98,8 +177,18 @@ export async function scanOnce(): Promise<{ scanned: number; submitted: number; 
   const byFolder = new Map<string, { folderId: string; transcriptsFolderId: string; cases: typeof cases }>();
 
   for (const c of cases) {
+    if (failures.shouldSkip(c.id)) {
+      deferred++;
+      continue;
+    }
+
+    attempted++;
+    if (attempted > 1) await pause(REQUEST_STAGGER_MS);
     try {
       const folders = await ensureCaseCallFolders(c.clientZohoId, c.caseRef);
+      if (failures.recordSuccess(c.id)) {
+        console.log(`[recording-watcher] ${c.caseRef}: folder resolved again, backoff cleared`);
+      }
       const key = folders.recordingsFolderId;
       const existing = byFolder.get(key);
       if (existing) existing.cases.push(c);
@@ -110,22 +199,51 @@ export async function scanOnce(): Promise<{ scanned: number; submitted: number; 
           cases: [c],
         });
     } catch (err) {
-      // A case with no resolvable client folder simply isn't watchable.
-      console.warn(
-        `[recording-watcher] ${c.caseRef}: cannot resolve folder — ${(err as Error).message.slice(0, 120)}`,
-      );
+      // A case with no resolvable client folder isn't watchable right now.
+      // How long we wait before asking again depends on why it failed: a 429
+      // clears on its own, a missing folder needs a human.
+      const kind = classifyFailure(err);
+      tickFailures.push(kind);
+      const state = failures.recordFailure(c.id, kind);
+      if (state.shouldLog) {
+        console.warn(
+          `[recording-watcher] ${c.caseRef}: cannot resolve folder (${kind}) — ` +
+            `${(err as Error).message.slice(0, 120)}; ` +
+            `retrying in ${Math.round(state.delayMs / 60_000)}m`,
+        );
+      }
     }
   }
 
+  const tripped = breaker.record(attempted, tickFailures.length, dominantKind(tickFailures));
+  if (tripped) console.error(`[recording-watcher] ${tripped}`);
+  if (deferred > 0) {
+    console.log(`[recording-watcher] ${deferred} case(s) in backoff, not retried this tick`);
+  }
+
   for (const [, group] of byFolder) {
+    // Folder listings get their own backoff, keyed on the folder rather than
+    // the case: one folder can serve several cases, and it is the folder the
+    // call is against.
+    if (failures.shouldSkip(group.folderId)) {
+      deferred++;
+      continue;
+    }
+
     let files;
     try {
       files = await listWorkDriveFiles(group.folderId, { extensions: AUDIO_EXTENSIONS });
+      failures.recordSuccess(group.folderId);
     } catch (err) {
-      console.error(
-        `[recording-watcher] listing ${group.folderId} failed:`,
-        (err as Error).message.slice(0, 160),
-      );
+      const kind = classifyFailure(err);
+      const state = failures.recordFailure(group.folderId, kind);
+      if (state.shouldLog) {
+        console.error(
+          `[recording-watcher] listing ${group.folderId} failed (${kind}): ` +
+            `${(err as Error).message.slice(0, 160)}; ` +
+            `retrying in ${Math.round(state.delayMs / 60_000)}m`,
+        );
+      }
       continue;
     }
 
@@ -199,7 +317,7 @@ export async function scanOnce(): Promise<{ scanned: number; submitted: number; 
     }
   }
 
-  return { scanned: byFolder.size, submitted, skipped };
+  return { scanned: byFolder.size, submitted, skipped, deferred };
 }
 
 /**
