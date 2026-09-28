@@ -571,6 +571,15 @@ export function FundVerificationPanel({
                     </table>
                   )}
 
+                  {/* Both the valuation and the unit price go to CRM, so if
+                      they contradict each other the plan record does too. */}
+                  {cmp.valuationWarning && (
+                    <p className="text-[11px] text-warning mt-1.5 px-1 flex items-start gap-1">
+                      <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+                      <span>{cmp.valuationWarning}</span>
+                    </p>
+                  )}
+
                   {cmp.verified && row.holdingRag === "RED" && (
                     <p className="text-[11px] text-muted-foreground mt-1.5 px-1">
                       Red: this holding could not be both named and priced from the reference data.

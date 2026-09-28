@@ -272,3 +272,61 @@ describe("inline editing", () => {
     expect(Object.keys(EDIT_FIELD_KEY)).toHaveLength(4);
   });
 });
+
+// The valuation and the unit price BOTH go to CRM, so if they contradict
+// each other the plan record contradicts itself. The usual cause is a value
+// derived from a pence price while the price pushed is in pounds.
+describe("valuation consistency", () => {
+  const warn = (row: FundLine) => compareFundLine(row).valuationWarning;
+
+  it("says nothing when units x price matches the value", () => {
+    expect(warn(line({ numberOfUnits: "1000", pricePerUnit: "4.2237", value: "4223.70" })))
+      .toBeUndefined();
+  });
+
+  it("absorbs the provider's rounding", () => {
+    expect(warn(line({ numberOfUnits: "1000", pricePerUnit: "4.2237", value: "4225.00" })))
+      .toBeUndefined();
+  });
+
+  // The real case: 1000 units of a fund priced at £13.66 is £13,660, but a
+  // value worked out from the pence price would read £1,376,777.
+  it("catches a value derived from the pence price", () => {
+    const w = warn(
+      line({
+        numberOfUnits: "1000",
+        pricePerUnit: "1376.7774",
+        resolvedUnitPrice: "13.655552",
+        priceSource: "LOOKUP",
+        value: "1376777.40",
+      }),
+    );
+    expect(w).toMatch(/does not match/i);
+    expect(w).toMatch(/13,655\.55|13,655/);
+  });
+
+  // Which price is in force depends on the toggle, so the same row can be
+  // consistent one way and not the other.
+  it("checks against the price actually being pushed", () => {
+    const base = {
+      numberOfUnits: "100",
+      pricePerUnit: "1376.7774",
+      resolvedUnitPrice: "13.655552",
+      value: "137677.74",
+    } as Partial<FundLine>;
+    expect(warn(line({ ...base, priceSource: "CEDING" }))).toBeUndefined();
+    expect(warn(line({ ...base, priceSource: "LOOKUP" }))).toMatch(/does not match/i);
+  });
+
+  it("says nothing when there are no units to check against", () => {
+    expect(warn(line({ numberOfUnits: null, value: "4223.70" }))).toBeUndefined();
+  });
+
+  it("says nothing when there is no value to check", () => {
+    expect(warn(line({ numberOfUnits: "1000", value: null }))).toBeUndefined();
+  });
+
+  it("does not trip on a zero holding", () => {
+    expect(warn(line({ numberOfUnits: "0", value: "0" }))).toBeUndefined();
+  });
+});

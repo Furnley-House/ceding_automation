@@ -119,7 +119,7 @@ export function buildHoldingRow(line: ChecklistFundLine): HoldingRow {
     num(line.transactionCosts),
   );
 
-  const row: HoldingRow = {
+  return {
     security_name: name ?? line.fundName,
     // The resolved ISIN where we have one, else whatever the CA typed — a RED
     // holding still carries its identifier across, which is what makes it
@@ -133,13 +133,43 @@ export function buildHoldingRow(line: ChecklistFundLine): HoldingRow {
     Transaction_Cost: toFieldScale("Transaction_Cost", txCost),
     RAG: ragLabel(line.holdingRag),
   };
+}
 
-  // Send only what we have. A null on a Zoho field clears it, and clearing a
-  // figure somebody entered in CRM is not ours to do.
-  for (const k of Object.keys(row)) {
-    if (row[k] === null || row[k] === undefined) delete row[k];
+/**
+ * The fields this export is the authority on.
+ *
+ * Every key buildHoldingRow produces. On an update these are written even
+ * when empty, so a figure the CA deletes on the checklist is cleared in CRM
+ * rather than left behind — before this, deleting a wrong OCF made it vanish
+ * from ceding and stay in Zoho for ever, with nothing to say so.
+ *
+ * Fields NOT in here — Asset_Class, Weighting, anything a workflow adds — are
+ * none of our business and survive untouched.
+ */
+const OWNED_FIELDS = [
+  "security_name",
+  "isin",
+  "position",
+  "gbp_valuation",
+  "Holdings_Valuation",
+  "valuation_date",
+  "OCF",
+  "Transaction_Cost",
+  "RAG",
+] as const;
+
+/**
+ * A new row, carrying only the fields we actually have.
+ *
+ * An insert omits empties rather than sending nulls: there is nothing there
+ * to clear, and a subform row full of explicit nulls is noise.
+ */
+function forInsert(row: HoldingRow): HoldingRow {
+  const out: HoldingRow = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (v !== null && v !== undefined) out[k] = v;
   }
-  return row;
+  return out;
 }
 
 /**
@@ -232,8 +262,12 @@ export function mergeHoldings(existing: HoldingRow[], incoming: HoldingRow[]): M
     if (ours) {
       matched.add(key!);
       updated += 1;
-      // Our fields overlay theirs; the id keeps it the same row.
-      rows.push({ ...base, ...ours });
+      // Every field we own is written, empty ones included, so a value the
+      // CA deleted is cleared rather than left stale. The id keeps it the
+      // same row, and anything we do not own is carried over from `base`.
+      const overlay: HoldingRow = {};
+      for (const f of OWNED_FIELDS) overlay[f] = ours[f] ?? null;
+      rows.push({ ...base, ...overlay });
     } else {
       kept += 1;
       rows.push(base);
@@ -243,7 +277,7 @@ export function mergeHoldings(existing: HoldingRow[], incoming: HoldingRow[]): M
   const added: HoldingRow[] = [];
   for (const [key, row] of byKey) {
     if (matched.has(key)) continue;
-    added.push(row);
+    added.push(forInsert(row));
   }
 
   return {

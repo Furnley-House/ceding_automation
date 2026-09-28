@@ -185,12 +185,46 @@ function resolveChoice(
   }
 }
 
+// Units x price rarely lands exactly on the stated valuation — the provider
+// rounds, and the price may be a day out. 1% is wide enough to absorb that
+// and narrow enough to catch a figure derived from the wrong unit.
+const VALUATION_TOLERANCE = 0.01;
+
+/**
+ * Does the stated valuation agree with units x the price being pushed?
+ *
+ * Both go to CRM — the valuation as Holdings_Valuation, the price as
+ * gbp_valuation — so if they disagree the plan record contradicts itself.
+ * The usual cause is the CA deriving the value from a pence price while the
+ * reference price is in pounds, which leaves a holding 100x out.
+ *
+ * Returns null when any of the three is missing, or when the price in force
+ * is the reference one and no units are recorded: there is nothing to check.
+ */
+export function valuationCheck(row: FundLine, priceInForce: number | null): string | undefined {
+  const units = toNumber(row.numberOfUnits);
+  const value = toNumber(row.value);
+  if (units === null || value === null || priceInForce === null) return undefined;
+  if (units === 0 || value === 0) return undefined;
+
+  const implied = units * priceInForce;
+  if (Math.abs(implied - value) <= Math.abs(value) * VALUATION_TOLERANCE) return undefined;
+
+  return (
+    `Value does not match units x unit price: ${units} x ${fmtPrice(priceInForce)} is ` +
+    `${fmtPrice(implied)}, but the checklist says ${fmtPrice(value)}. ` +
+    `Both figures go to CRM, so check which is right.`
+  );
+}
+
 export interface RowComparison {
   fields: FieldComparison[];
   /** True when at least one field has two figures that disagree. */
   hasDisagreement: boolean;
   /** Verification has run against this row. */
   verified: boolean;
+  /** Set when the stated valuation contradicts units x the chosen price. */
+  valuationWarning?: string;
 }
 
 export function compareFundLine(row: FundLine): RowComparison {
@@ -276,10 +310,16 @@ export function compareFundLine(row: FundLine): RowComparison {
     },
   ];
 
+  // Checked against the price actually being pushed, not against whichever
+  // one happens to be larger — swapping the toggle can fix or cause this.
+  const priceField = fields.find((f) => f.field === "price")!;
+  const priceInForce = priceField.chosen === "LOOKUP" ? lookupPrice : cedingPrice;
+
   return {
     fields,
     hasDisagreement: fields.some((f) => f.status === "differs"),
     verified: Boolean(row.verifiedAt),
+    valuationWarning: valuationCheck(row, priceInForce),
   };
 }
 

@@ -88,9 +88,12 @@ describe("buildHoldingRow", () => {
     expect(row.OCF).toBe(0.9);
   });
 
-  it("omits a field neither side has rather than sending null", () => {
+  // The builder now keeps empties, because an UPDATE has to write them to
+  // clear a value the CA deleted. Whether they are sent is decided per
+  // insert / update in mergeHoldings, covered below.
+  it("reports a field neither side has as empty", () => {
     const row = buildHoldingRow(fundLine({ transactionCosts: null, resolvedTxCost: null }));
-    expect("Transaction_Cost" in row).toBe(false);
+    expect(row.Transaction_Cost).toBeNull();
   });
 
   // A red holding still reaches CRM carrying what the CA typed — that is what
@@ -120,9 +123,9 @@ describe("buildHoldingRow", () => {
     expect("Weighting" in buildHoldingRow(fundLine())).toBe(false);
   });
 
-  it("leaves the picklist alone on an unverified holding", () => {
+  it("has no RAG for an unverified holding", () => {
     expect(ragLabel(null)).toBeNull();
-    expect("RAG" in buildHoldingRow(fundLine({ holdingRag: null }))).toBe(false);
+    expect(buildHoldingRow(fundLine({ holdingRag: null })).RAG).toBeNull();
   });
 });
 
@@ -182,21 +185,41 @@ describe("mergeHoldings", () => {
     expect(result.rows[0]).toMatchObject({ id: "row-1", OCF: 9.9 });
   });
 
-  // Our values win on the fields we populate; anything else a workflow or a
+  // Our values win on the fields we own; anything else a workflow or a
   // person put on the row survives.
   it("overlays our fields without discarding the rest of the row", () => {
     const result = mergeHoldings(
       [{ id: "row-1", isin: "GB1", security_name: "Old name", Asset_Class: "Equity", Weighting: 25 }],
       [{ isin: "GB1", security_name: "New name", OCF: 1.08 }],
     );
-    expect(result.rows[0]).toEqual({
+    expect(result.rows[0]).toMatchObject({
       id: "row-1",
-      isin: "GB1",
       security_name: "New name",
-      Asset_Class: "Equity",
-      Weighting: 25,
       OCF: 1.08,
+      Asset_Class: "Equity", // not ours — untouched
+      Weighting: 25, // not ours — untouched
     });
+  });
+
+  // Before this, deleting a wrong OCF on the checklist made it disappear
+  // from ceding and stay in CRM for ever, with nothing to say so.
+  it("clears a figure the CA deleted from the checklist", () => {
+    const result = mergeHoldings(
+      [{ id: "row-1", isin: "GB1", security_name: "Fund", OCF: 1.08 }],
+      [{ isin: "GB1", security_name: "Fund" }], // OCF gone
+    );
+    expect(result.rows[0].OCF).toBeNull();
+  });
+
+  // Nothing to clear on a brand new row, and a subform row full of explicit
+  // nulls is noise.
+  it("omits empty fields on a row being added, rather than sending nulls", () => {
+    const result = mergeHoldings([], [buildHoldingRow(fundLine({
+      transactionCosts: null, resolvedTxCost: null, holdingRag: null,
+    }))]);
+    expect("Transaction_Cost" in result.rows[0]).toBe(false);
+    expect("RAG" in result.rows[0]).toBe(false);
+    expect(result.rows[0].security_name).toBeTruthy();
   });
 
   // The manual row from the live test. Nothing to do with this case, so it is

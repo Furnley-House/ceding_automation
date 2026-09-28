@@ -247,3 +247,42 @@ describe("PATCH /:caseId/fund-lines/:lineId/source", () => {
     expect(findUniqueMock).not.toHaveBeenCalled();
   });
 });
+
+// A holding of -1 units reached CRM during live testing, from a stray click
+// on a number input's spinner. These figures go onto a client's plan record.
+describe("figures that cannot be negative", () => {
+  const patch = (body: Record<string, unknown>) =>
+    request(app).patch(`/api/cases/${CASE}/fund-lines/${LINE}`).send(body);
+
+  it.each([["numberOfUnits"], ["pricePerUnit"], ["value"]])(
+    "rejects a negative %s",
+    async (field) => {
+      const res = await patch({ [field]: "-1" });
+      expect(res.status).toBe(400);
+      expect(updateMock).not.toHaveBeenCalled();
+    },
+  );
+
+  // Ex-ante transaction costs are legitimately negative — the EMT
+  // methodology nets slippage, and 1,344 fund-master rows are below zero.
+  it("allows a negative transaction cost", async () => {
+    findUniqueMock.mockResolvedValueOnce({ id: LINE, caseId: CASE, fundName: "F" });
+    updateMock.mockResolvedValueOnce({ id: LINE, caseId: CASE, fundName: "F" });
+    const res = await patch({ transactionCosts: "-0.1841" });
+    expect(res.status).toBe(200);
+  });
+
+  it("still accepts zero", async () => {
+    findUniqueMock.mockResolvedValueOnce({ id: LINE, caseId: CASE, fundName: "F" });
+    updateMock.mockResolvedValueOnce({ id: LINE, caseId: CASE, fundName: "F" });
+    const res = await patch({ numberOfUnits: "0" });
+    expect(res.status).toBe(200);
+  });
+
+  it("still accepts an empty value, which clears the field", async () => {
+    findUniqueMock.mockResolvedValueOnce({ id: LINE, caseId: CASE, fundName: "F" });
+    updateMock.mockResolvedValueOnce({ id: LINE, caseId: CASE, fundName: "F" });
+    const res = await patch({ pricePerUnit: null });
+    expect(res.status).toBe(200);
+  });
+});

@@ -18,12 +18,29 @@ const prisma = new PrismaClient();
 // ── Schemas ──────────────────────────────────────────────
 const decimalString = z.union([z.string(), z.number()]).optional().nullable();
 
+/**
+ * A figure that cannot sensibly be negative.
+ *
+ * A holding of -1 units reached CRM during testing, straight from a stray
+ * click on a number input's spinner, and nothing anywhere questioned it.
+ * These go to a client's plan record, so the nonsense is worth catching at
+ * the point of entry rather than explaining later.
+ *
+ * Charges are deliberately NOT constrained: ex-ante transaction costs are
+ * legitimately negative under the EMT methodology, and 1,344 rows in the
+ * fund master are below zero.
+ */
+const nonNegativeDecimal = decimalString.refine(
+  (v) => v === null || v === undefined || v === "" || Number(v) >= 0,
+  { message: "Cannot be negative" },
+);
+
 const fundLineCreateSchema = z.object({
   fundName: z.string().min(1, "Fund name is required"),
   isinSedolCiti: z.string().optional().nullable(),
-  numberOfUnits: decimalString,
-  pricePerUnit: decimalString,
-  value: decimalString,
+  numberOfUnits: nonNegativeDecimal,
+  pricePerUnit: nonNegativeDecimal,
+  value: nonNegativeDecimal,
   ocf: decimalString,
   transactionCosts: decimalString,
   isWithProfits: z.boolean().optional().default(false),

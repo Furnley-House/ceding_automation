@@ -311,6 +311,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
     verify: verifyFundLines,
     setSource: setFundLineSource,
     updateRow: updateFundLine,
+    refresh: refreshFundLines,
   } = useFundLines(caseItem.id);
   const fundStatus = useMemo(() => fundDetailsStatus(fundLines), [fundLines]);
 
@@ -575,9 +576,21 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
           </div>
         )}
 
-        {/* Fund Details sub-table — read-only at Stage 6.
-            CA can still edit it back on Stage 4 if anything needs a tweak. */}
-        <FundDetailsTable caseId={caseItem.id} readOnly />
+        {/* Fund Details — editable here for the CA, at the team's request.
+            The verification panel below only exposes the four fields it
+            compares; Units, Value and the identifier are only reachable
+            from this table, and sending someone back to Stage 4 to fix a
+            unit count they are looking at is busywork.
+
+            onChanged refreshes this screen's own copy of the fund lines, so
+            the panel and the hand-off gate react to the edit. Editing the
+            identifier clears that row's verification server-side, which is
+            what re-closes the gate until it is re-checked. */}
+        <FundDetailsTable
+          caseId={caseItem.id}
+          readOnly={!(isCA || isAdmin)}
+          onChanged={refreshFundLines}
+        />
 
         {/* Check the holdings against the fund master + FE Fund Info, and
             record which figure goes to CRM where the two disagree. */}

@@ -54,9 +54,18 @@ interface Props {
   caseId: string;
   /** When false (default), users can add / edit / delete rows. */
   readOnly?: boolean;
+  /**
+   * Called after any change to the rows.
+   *
+   * This component holds its own copy of the fund lines, so a screen that
+   * also reads them — stage 6, where the verification panel and the
+   * hand-off gate both do — would otherwise carry on showing figures the CA
+   * has just changed underneath it.
+   */
+  onChanged?: () => void;
 }
 
-export function FundDetailsTable({ caseId, readOnly = false }: Props) {
+export function FundDetailsTable({ caseId, readOnly = false, onChanged }: Props) {
   const { rows, summary, loading, error, refresh, addRow, updateRow, deleteRow } = useFundLines(caseId);
   const [draft, setDraft] = useState<FundLineDraft | null>(null);
   const [saving, setSaving] = useState(false);
@@ -103,6 +112,7 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
       };
       await updateRow(editing.rowId, patch);
       setEditing(null);
+      onChanged?.();
     } catch (err) {
       toast.error("Failed to update fund row", {
         description: err instanceof Error ? err.message : String(err),
@@ -205,6 +215,7 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
     try {
       await addRow(draft);
       setDraft(null);
+      onChanged?.();
       toast.success("Fund row added");
     } catch (err) {
       toast.error("Failed to add fund row", {
@@ -219,6 +230,7 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
     if (!confirm(`Remove ${row.fundName}?`)) return;
     try {
       await deleteRow(row.id);
+      onChanged?.();
       toast.success("Fund row removed");
     } catch (err) {
       toast.error("Failed to remove", {
@@ -433,7 +445,10 @@ export function FundDetailsTable({ caseId, readOnly = false }: Props) {
         <FundDetailsImportDialog
           caseId={caseId}
           onClose={() => setImportOpen(false)}
-          onImported={refresh}
+          onImported={() => {
+            void refresh();
+            onChanged?.();
+          }}
         />
       )}
     </div>
