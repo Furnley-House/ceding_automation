@@ -30,12 +30,30 @@ import {
   type HoldingRow,
   type MergeResult,
 } from "../services/holdingsSubform";
+import { detectPriceScaleIssues, describeScaleIssue } from "../services/holdingsScale";
 
 /** What the receipt reports about the Holdings subform. */
 type HoldingsOutcome = Pick<
   MergeResult,
   "added" | "updated" | "kept" | "removed" | "skipped"
 >;
+
+/**
+ * The 409 the export answers with when the holdings are exportable but should
+ * not be exported without someone saying so. One code for every reason, so
+ * the client shows one dialog however many things are wrong.
+ */
+export const HOLDINGS_CONFIRM_CODE = "HOLDINGS_NEED_CONFIRMATION";
+
+interface GateIssue {
+  kind: "unverified" | "price-scale";
+  /** Dialog heading. */
+  title: string;
+  /** One sentence saying what is wrong and what to do about it. */
+  message: string;
+  /** The holdings at fault, already phrased for display. */
+  holdings: string[];
+}
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -177,7 +195,11 @@ router.post(
       fieldsByKey.set(f.template.fieldKey, { value: f.value });
     }
 
-    // ── Verification gate ─────────────────────────────────
+    // ── Holdings gate ─────────────────────────────────────
+    // Two reasons to stop: holdings nobody checked, and holdings whose price
+    // is a clean 100x from the reference (pence typed where CRM wants
+    // pounds). Both are decisions for the CA, so both raise the same dialog.
+    //
     // Enforced here rather than only on stage 6, because the stage stepper
     // lets a CA jump straight to stage 9 and the figures go to CRM from this
     // endpoint, not from the hand-off.
@@ -194,25 +216,59 @@ router.post(
     // the warning without reading it.
     const fundLinesForGate = await prisma.checklistFundLine.findMany({
       where: { caseId },
-      select: { id: true, fundName: true, verifiedAt: true },
+      select: {
+        id: true,
+        fundName: true,
+        verifiedAt: true,
+        priceSource: true,
+        pricePerUnit: true,
+        resolvedUnitPrice: true,
+      },
     });
     const unverified = fundLinesForGate.filter((l) => !l.verifiedAt);
+    const scaleIssues = detectPriceScaleIssues(fundLinesForGate);
     const overrideRequested = String(req.body?.confirmUnverified ?? "") === "true";
-    const gateApplies = isVerificationConfigured() && unverified.length > 0;
 
-    if (gateApplies && !overrideRequested) {
-      return res.status(409).json({
-        code: "HOLDINGS_UNVERIFIED",
-        error:
+    const gateIssues: GateIssue[] = [];
+
+    if (isVerificationConfigured() && unverified.length > 0) {
+      gateIssues.push({
+        kind: "unverified",
+        title: "Fund holdings have not been checked",
+        message:
           `${unverified.length} of ${fundLinesForGate.length} fund holding` +
           `${fundLinesForGate.length === 1 ? " has" : "s have"} not been checked against the ` +
           `fund data. Verify them on Review Checklist, or confirm to export them as they are.`,
-        unverified: unverified.length,
-        total: fundLinesForGate.length,
         holdings: unverified.map((l) => l.fundName),
       });
     }
-    const unverifiedOverride = gateApplies && overrideRequested;
+
+    // Not gated on isVerificationConfigured: a scale issue can only be
+    // detected where a reference price exists, so the check disappears on its
+    // own where verification never ran.
+    if (scaleIssues.length > 0) {
+      gateIssues.push({
+        kind: "price-scale",
+        title: "A price looks like pence, not pounds",
+        message:
+          `${scaleIssues.length} holding${scaleIssues.length === 1 ? "" : "s"} ` +
+          `${scaleIssues.length === 1 ? "has" : "have"} a checklist price 100x away from the ` +
+          `reference price. UK statements usually quote pence and CRM stores pounds, so this ` +
+          `is normally a unit mix-up rather than a different price.`,
+        holdings: scaleIssues.map(describeScaleIssue),
+      });
+    }
+
+    if (gateIssues.length > 0 && !overrideRequested) {
+      return res.status(409).json({
+        code: HOLDINGS_CONFIRM_CODE,
+        error: gateIssues.map((i) => i.message).join(" "),
+        issues: gateIssues,
+        unverified: unverified.length,
+        total: fundLinesForGate.length,
+      });
+    }
+    const gateOverride = gateIssues.length > 0 && overrideRequested;
 
     // Production model: all Zoho IDs were already cached on the case at
     // last sync. The export does NOT re-fetch from CRM. If the cache is
@@ -548,8 +604,13 @@ router.post(
           workdriveError,
           zohoUpdate,
           zohoError,
-          unverifiedOverride,
-          unverifiedHoldings: unverifiedOverride ? unverified.map((l) => l.fundName) : undefined,
+          // What the CA was warned about and chose to export anyway. Recorded
+          // in full: "they clicked through" is not answerable later, "they
+          // clicked through a pence warning on these two holdings" is.
+          gateOverride,
+          gateOverrideIssues: gateOverride
+            ? gateIssues.map((i) => ({ kind: i.kind, holdings: i.holdings }))
+            : undefined,
           holdings: holdingsResult,
           holdingsError,
           cacheWarning,
@@ -570,7 +631,7 @@ router.post(
       workdriveError,
       zohoUpdate,
       zohoError,
-      unverifiedOverride,
+      gateOverride,
       holdings: holdingsResult,
       holdingsError,
       cacheWarning,

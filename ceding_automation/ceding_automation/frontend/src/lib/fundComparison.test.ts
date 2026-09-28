@@ -195,6 +195,72 @@ describe("evaluateGate", () => {
     });
     expect(evaluateGate([red]).satisfied).toBe(true);
   });
+
+  // Unlike an ordinary disagreement, this one is a wrong number rather than a
+  // judgement call, and both ways out are on the same screen.
+  it("blocks while a chosen checklist price is a clean 100x out", () => {
+    const pence = line({
+      priceSource: "CEDING",
+      pricePerUnit: "422.37",
+      resolvedUnitPrice: "4.2237",
+    });
+    const gate = evaluateGate([pence]);
+    expect(gate.satisfied).toBe(false);
+    expect(gate.scaleIssues).toEqual(["Aviva Pen My Future Focus Growth Pn"]);
+  });
+
+  it("unblocks as soon as the reference price is chosen", () => {
+    const fixed = line({
+      priceSource: "LOOKUP",
+      pricePerUnit: "422.37",
+      resolvedUnitPrice: "4.2237",
+    });
+    const gate = evaluateGate([fixed]);
+    expect(gate.satisfied).toBe(true);
+    expect(gate.scaleIssues).toEqual([]);
+  });
+
+  it("does not block on a price difference that is not a clean 100x", () => {
+    const gate = evaluateGate([
+      line({ priceSource: "CEDING", pricePerUnit: "3.90" }),
+    ]);
+    expect(gate.satisfied).toBe(true);
+    expect(gate.scaleIssues).toEqual([]);
+  });
+
+  it("names every affected holding", () => {
+    const bad = (id: string, fundName: string) =>
+      line({ id, fundName, priceSource: "CEDING", pricePerUnit: "422.37" });
+    expect(evaluateGate([bad("l1", "One"), line({ id: "l2" }), bad("l3", "Two")]).scaleIssues)
+      .toEqual(["One", "Two"]);
+  });
+});
+
+describe("priceScaleFactor", () => {
+  it("is set only while the checklist figure is the one being pushed", () => {
+    const over = { pricePerUnit: "422.37", resolvedUnitPrice: "4.2237" };
+    expect(compareFundLine(line({ ...over, priceSource: "CEDING" })).priceScaleFactor).toBe(0.01);
+    expect(compareFundLine(line({ ...over, priceSource: "LOOKUP" })).priceScaleFactor)
+      .toBeUndefined();
+  });
+
+  it("is 100 when the checklist figure is the smaller one", () => {
+    const row = line({
+      priceSource: "CEDING",
+      pricePerUnit: "0.042237",
+      resolvedUnitPrice: "4.2237",
+    });
+    expect(compareFundLine(row).priceScaleFactor).toBe(100);
+  });
+
+  it("is unset when the two prices agree", () => {
+    expect(compareFundLine(line({ priceSource: "CEDING" })).priceScaleFactor).toBeUndefined();
+  });
+
+  it("is unset when there is no reference price", () => {
+    const row = line({ priceSource: "CEDING", resolvedUnitPrice: null });
+    expect(compareFundLine(row).priceScaleFactor).toBeUndefined();
+  });
 });
 
 // Most UK funds are quoted to the investor in pence (30,450 of 33,500 GB

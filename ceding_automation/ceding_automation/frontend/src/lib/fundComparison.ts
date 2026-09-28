@@ -225,6 +225,12 @@ export interface RowComparison {
   verified: boolean;
   /** Set when the stated valuation contradicts units x the chosen price. */
   valuationWarning?: string;
+  /**
+   * Set when the price bound for CRM is the checklist one and it sits a clean
+   * 100x from the reference. 0.01 means the checklist figure is the larger —
+   * pence where CRM wants pounds, the common case.
+   */
+  priceScaleFactor?: 100 | 0.01;
 }
 
 export function compareFundLine(row: FundLine): RowComparison {
@@ -315,11 +321,20 @@ export function compareFundLine(row: FundLine): RowComparison {
   const priceField = fields.find((f) => f.field === "price")!;
   const priceInForce = priceField.chosen === "LOOKUP" ? lookupPrice : cedingPrice;
 
+  // Only worth raising while the checklist figure is the one being pushed.
+  // Picking the reference resolves it, which is exactly what the toggle is
+  // for, so the warning should disappear the moment they do.
+  const priceScaleFactor =
+    priceField.chosen === "CEDING" && cedingPrice !== null && lookupPrice !== null
+      ? scaleFactorBetween(cedingPrice, lookupPrice, pricesAgree)
+      : null;
+
   return {
     fields,
     hasDisagreement: fields.some((f) => f.status === "differs"),
     verified: Boolean(row.verifiedAt),
     valuationWarning: valuationCheck(row, priceInForce),
+    priceScaleFactor: priceScaleFactor ?? undefined,
   };
 }
 
@@ -355,12 +370,14 @@ export const SOURCE_FIELD_KEY: Record<ComparisonField, keyof SourceChoice> = {
 };
 
 export interface VerificationGate {
-  /** Rows exist and every one of them has been verified. */
+  /** Rows exist, every one is verified, and none is about to push pence. */
   satisfied: boolean;
   /** Rows carrying no verification yet. */
   unverified: number;
   total: number;
   disagreements: number;
+  /** Names of the holdings whose chosen price is a clean 100x out. */
+  scaleIssues: string[];
 }
 
 /**
@@ -369,14 +386,24 @@ export interface VerificationGate {
  * A case with no holdings has nothing to verify and is never blocked by this
  * — the gate exists to stop unchecked fund figures reaching CRM, and there
  * are none.
+ *
+ * A 100x price blocks as firmly as an unverified row, because this is the
+ * stage where it can be fixed in one click. Both ways out are on this screen:
+ * switch the price to the reference figure, or correct the checklist entry.
  */
 export function evaluateGate(rows: FundLine[]): VerificationGate {
   const unverified = rows.filter((r) => !r.verifiedAt).length;
-  const disagreements = rows.filter((r) => compareFundLine(r).hasDisagreement).length;
+  const comparisons = rows.map((r) => ({ row: r, cmp: compareFundLine(r) }));
+  const disagreements = comparisons.filter((c) => c.cmp.hasDisagreement).length;
+  const scaleIssues = comparisons
+    .filter((c) => c.cmp.priceScaleFactor !== undefined)
+    .map((c) => c.row.fundName);
+
   return {
-    satisfied: rows.length === 0 || unverified === 0,
+    satisfied: rows.length === 0 || (unverified === 0 && scaleIssues.length === 0),
     unverified,
     total: rows.length,
     disagreements,
+    scaleIssues,
   };
 }

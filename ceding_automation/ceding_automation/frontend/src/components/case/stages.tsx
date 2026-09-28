@@ -608,7 +608,7 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
             hand-off (the paraplanner sees the gaps and can send them back),
             but unverified fund figures do: those get pushed to CRM, and
             nobody downstream re-checks them. */}
-        {!canSend && (
+        {!canSend && fundGate.unverified > 0 && (
           <div className="rounded-md border border-warning/40 bg-warning/10 p-3 flex items-start gap-3">
             <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
             <div className="flex-1">
@@ -621,6 +621,29 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
                 been checked against the fund master and FE Fund Info. These figures go straight
                 to CRM on export and nobody checks them again — use{" "}
                 <strong className="text-foreground">Verify fund details</strong> above.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Blocks the hand-off, unlike the other price disagreements below:
+            a 100x gap is a wrong number rather than a judgement call, and
+            both ways out are on this screen. */}
+        {fundGate.scaleIssues.length > 0 && (
+          <div className="rounded-md border border-warning/40 bg-warning/10 p-3 flex items-start gap-3">
+            <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-foreground">
+                Check the price units before sending
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {fundGate.scaleIssues.length} holding
+                {fundGate.scaleIssues.length === 1 ? "" : "s"}{" "}
+                {fundGate.scaleIssues.length === 1 ? "has" : "have"} a checklist price 100x away
+                from the reference price — normally pence where CRM stores pounds:{" "}
+                <strong className="text-foreground">{fundGate.scaleIssues.join(", ")}</strong>.
+                Set the price to <strong className="text-foreground">Reference</strong>, or edit
+                the checklist figure to pounds.
               </p>
             </div>
           </div>
