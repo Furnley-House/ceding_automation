@@ -1,30 +1,3 @@
-// backend/src/services/fundMaster.ts
-//
-// Read-only access to the fund master (fund_master_feed on the Superbia
-// Postgres, production@FUNDS). Supplies the reference fund name, OCF and
-// transaction costs that stage-6 verification compares against what the CA
-// entered. Prices do NOT come from here — see feFundInfo.ts.
-//
-// Separate physical database from ceding's own, so this uses `pg` directly
-// rather than Prisma.
-//
-// READ-ONLY IS ENFORCED HERE, NOT BY THE GRANT. The credential we have been
-// given (superbiateam) holds INSERT/UPDATE/DELETE on a 94k-row production
-// table belonging to another team. Until a read-only role exists, the only
-// thing standing between a future bug in this file and their live data is
-// this file, so it makes the restriction explicit in two places:
-//
-//   1. every connection is put into default_transaction_read_only, so the
-//      SERVER rejects any write — including one issued by code that never
-//      went through assertReadOnly;
-//   2. assertReadOnly refuses to send anything but a single SELECT, which
-//      fails fast and loudly during development rather than at the database.
-//
-// Neither is a substitute for the grant. Ask for the read-only role.
-//
-// Configuration is optional at boot. Without FUND_DB_* the app starts fine and
-// verification reports itself unavailable, rather than crashing every request.
-
 import { Pool, type PoolConfig } from "pg";
 import type { LookupKeys } from "../utils/fundIdentifier";
 
@@ -39,24 +12,8 @@ export interface FundMasterRow {
   transactionCosts: number | null;
 }
 
-// The fund master stores charges as DECIMAL FRACTIONS; ceding's checklist and
-// the Zoho subform both use PERCENT. Converted here, at the boundary, so
-// everything downstream speaks one scale.
-//
-// Evidence, not assumption: Vanguard LifeStrategy (GB00B3ZHN960) publishes an
-// OCF of 0.22% and the table holds 0.002000. Across all 65,348 populated rows
-// the maximum is 0.12 and not one value exceeds 1 — impossible for a column
-// of percentages, where a typical active fund would read 0.75 to 1.50.
-//
-// Getting this wrong is a 100x error in a figure that reaches CRM, so it is
-// covered by a test rather than left to this comment.
 const CHARGE_FRACTION_TO_PERCENT = 100;
 
-/**
- * The same row reachable by whichever identifier the CA happened to type.
- * Built once per case so a holding is matched in memory rather than by a
- * query each.
- */
 export interface FundMasterIndex {
   byIsin: Map<string, FundMasterRow>;
   bySedol: Map<string, FundMasterRow>;
@@ -93,11 +50,6 @@ function getPool(): Pool {
     application_name: "ceding-automation (read-only)",
   };
   pool = new Pool(cfg);
-
-  // Every new connection is made read-only before it is used. pg queues
-  // queries per client in order, so this runs ahead of whatever the caller
-  // issues on a freshly-connected client. A write then fails at the server
-  // with "cannot execute INSERT in a read-only transaction".
   pool.on("connect", (client) => {
     client
       .query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
@@ -115,14 +67,6 @@ function getPool(): Pool {
   return pool;
 }
 
-/**
- * Refuse to send anything that is not a single SELECT.
- *
- * Deliberately blunt: one leading SELECT, and no statement separator that
- * could smuggle a second statement in behind it. It is not a SQL parser and
- * does not try to be — it exists so that a write added to this file is caught
- * here, in a unit test, rather than by someone else's audit log.
- */
 export function assertReadOnly(sql: string): void {
   const stripped = sql
     .replace(/--[^\n]*/g, " ") // line comments
@@ -144,33 +88,12 @@ function toNumber(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/**
- * Fraction -> percent, rounded to 4dp.
- *
- * The rounding is there because 0.0077 * 100 is 0.7699999999999999 in binary
- * floating point, and a charge that renders as 0.77% on one screen and
- * 0.7699999999999999% on another undermines the whole point of showing the CA
- * two figures to compare. 4dp is well inside anything a charge is quoted to.
- *
- * Negative transaction costs are real — the EMT ex-ante methodology nets
- * slippage and 1,344 rows in the table are below zero — so they are kept.
- */
 function toPercent(v: unknown): number | null {
   const n = toNumber(v);
   if (n === null) return null;
   return Math.round(n * CHARGE_FRACTION_TO_PERCENT * 10_000) / 10_000;
 }
 
-// One statement for a whole case, covering all three identifier types.
-//
-// The SEDOL arm exploits the construction of a GB ISIN: GB00 + the 7-char
-// SEDOL + a check digit, so substring(isin from 5 for 7) IS the SEDOL. That
-// is an equality test rather than a LIKE, which matters twice: it is a single
-// scan for any number of SEDOLs, and pattern metacharacters in the input
-// cannot change what it matches.
-//
-// Measured 21ms against ~95k rows with no index. If that grows, the fix is a
-// functional index on substring(isin from 5 for 7), not a query change.
 const LOOKUP_SQL = `
   SELECT isin,
          citi_code,
@@ -183,13 +106,6 @@ const LOOKUP_SQL = `
       OR citi_code = ANY($3::text[])
 `;
 
-/**
- * Resolve a case's identifiers against the fund master in one round trip.
- *
- * Identifiers must already have been through classifyFundIdentifier — this
- * assumes it is handed validated ISINs, SEDOLs and Citi codes, never raw
- * checklist text.
- */
 export async function lookupFunds(keys: LookupKeys): Promise<FundMasterIndex> {
   const empty: FundMasterIndex = {
     byIsin: new Map(),

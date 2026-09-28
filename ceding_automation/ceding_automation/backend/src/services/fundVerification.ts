@@ -1,20 +1,3 @@
-// backend/src/services/fundVerification.ts
-//
-// Stage-6 verification: resolve each holding's identifier against the fund
-// master, price it via FE Fund Info, and record both what the CA entered and
-// what the reference data says — so the CA can see any disagreement and pick
-// a side before the case is approved.
-//
-// Export reads what this writes. It never re-runs the lookup, because the CA
-// signs off these figures at stage 6 and CRM must carry the ones they
-// approved; a fresh price at export would push numbers nobody reviewed and
-// contradict the plan-level Valuation, which comes from the checklist.
-//
-// Charges (OCF, transaction costs) are looked up but are absent for insured
-// pension share classes — the fund master holds none for them, and FE's
-// Pricing endpoint carries no charge fields at all. Those rows fall back to
-// the CA's manual figures, which is the intended behaviour, not a failure.
-
 import { PrismaClient, HoldingRag, FundValueSource } from "@prisma/client";
 import { classifyFundIdentifier, collectLookupKeys } from "../utils/fundIdentifier";
 import {
@@ -27,9 +10,6 @@ import { fetchPrices, isFeFundInfoConfigured, type FundPrice } from "./feFundInf
 
 const prisma = new PrismaClient();
 
-// The Zoho subform's Unit Price is a GBP currency field, so a price quoted in
-// anything else cannot be pushed as though it were sterling. Treat it as no
-// price: the holding goes RED and the CA keeps their own figure.
 const REPORTING_CURRENCY = "GBP";
 
 export interface VerificationSummary {
@@ -64,17 +44,6 @@ export interface RowVerification {
   verifiedAt: Date;
 }
 
-/**
- * The verification rules, as a pure function.
- *
- * AMBER requires BOTH a fund name and a usable price — that is the definition
- * agreed with the Zoho team. Anything else is RED, including a fund we can
- * name but cannot price.
- *
- * Each field defaults to LOOKUP where reference data came back and CEDING
- * where it did not, so export reads a decision rather than re-deriving one.
- * The CA can flip any of them.
- */
 export function deriveVerification(
   fund: FundMasterRow | null,
   price: FundPrice | null,
@@ -118,14 +87,6 @@ function matchFund(index: FundMasterIndex, identifier: string | null): FundMaste
   return null;
 }
 
-/**
- * Verify every fund line on a case.
- *
- * Throws if the fund master or FE is unreachable, and writes nothing in that
- * event. That distinction is deliberate: an outage must never be recorded as
- * a verified RED holding, because the CA would then approve figures that were
- * never actually checked.
- */
 export async function verifyCaseFundLines(
   caseId: string,
   userId: string,

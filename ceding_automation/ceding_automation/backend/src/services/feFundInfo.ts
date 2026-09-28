@@ -1,24 +1,3 @@
-// backend/src/services/feFundInfo.ts
-//
-// Unit prices from FE Fund Info, for stage-6 holdings verification. Ported
-// from the Catalyst holdings proxy (Prabu, 2026) so ceding can price holdings
-// without a second network hop through Catalyst — the fund master it also
-// queried turned out to be plain Azure Postgres, reachable directly, so the
-// proxy was left holding only these credentials.
-//
-// Kept from the original: client-credentials token with an in-process cache,
-// 10-ISIN batching (the pricing endpoint refuses more), and one retry with a
-// fresh token on 401 — FE expires tokens early often enough to matter.
-//
-// Added here, because this sits on a path a CA is waiting on:
-//   - explicit timeouts (axios has none by default, so a hung FE request
-//     would hang the CA's screen indefinitely)
-//   - batch failures are isolated, so one bad batch cannot lose the prices
-//     that did come back
-//
-// Configuration is optional at boot: without FEFUNDINFO_* the app starts and
-// verification reports itself unavailable.
-
 import axios, { type AxiosInstance } from "axios";
 
 const BATCH_SIZE = Number(process.env.FEFUNDINFO_BATCH_SIZE) || 10;
@@ -109,37 +88,6 @@ async function fetchBatch(isins: string[], token: string): Promise<unknown[]> {
   return (res.data?.Results as unknown[]) ?? [];
 }
 
-// FE returns the price under different field codes depending on the fund, and
-// which codes appear varies per instrument rather than per request. Measured
-// against ten real ceding holdings (Sept 2026):
-//
-//   OFDY908102   10/10   present on every fund
-//   OFDY000020    8/10
-//   OFDY908005    2/10   <- the only code the Catalyst proxy reads
-//
-// Re-measured against a random 41-fund sample from the fund master:
-//
-//   OFDY908102   41/41   present on every fund
-//   OFDY000020   23/41   agrees with 908102 in all 23
-//   OFDY000025   20/41   consistently ~5% higher — looks like an offer price
-//   OFDY908005   18/41
-//
-// So preferring 908102 is safe as well as the most complete. One counter-
-// example is known — GB0000011444 returns 908102=13.767774 against
-// 000020=9.896871 — so this is "agrees almost always", not "always"; if a
-// holding is ever priced oddly, that fund is the shape of the problem.
-// Reading only OFDY908005, as the proxy does, leaves more than half of these
-// unpriced and therefore RED.
-//
-// UNIT: pounds, which is what the Zoho Unit Price field expects (confirmed
-// with the CA team, Sept 2026). FE reports the major unit even for funds
-// quoted to investors in pence: GB0000011444 is a GBX listing in the fund
-// master and comes back here as 13.767774, with the pence figure
-// 1376.7774875783 carried separately under OFDY900143. So no conversion is
-// applied. Note that 30,450 of the 33,500 GB share classes in the fund master
-// are GBX listings, so a provider STATEMENT usually quotes pence — the
-// stage-6 comparison flags a clean 100x gap against the CA's entry for
-// exactly that reason.
 const PRICE_FIELDS = ["OFDY908102", "OFDY000020", "OFDY908005"] as const;
 const DATE_FIELD = "OFDY000021";
 
@@ -175,14 +123,6 @@ function toPrice(result: Record<string, unknown>): FundPrice | null {
   };
 }
 
-/**
- * Prices for a set of ISINs, keyed by ISIN.
- *
- * An ISIN missing from the result simply has no price — that is a normal
- * outcome (FE does not cover everything) and the holding becomes RED. It is
- * NOT an error, and must not be confused with the lookup having failed, which
- * throws.
- */
 export async function fetchPrices(isins: string[]): Promise<Map<string, FundPrice>> {
   const prices = new Map<string, FundPrice>();
   const unique = [...new Set(isins.filter((i) => i && i.trim().length > 0))];

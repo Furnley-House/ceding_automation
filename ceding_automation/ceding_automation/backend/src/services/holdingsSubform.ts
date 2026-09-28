@@ -1,28 +1,3 @@
-// backend/src/services/holdingsSubform.ts
-//
-// Maps a case's verified fund lines onto the Holdings_List subform of the
-// Zoho Plans module, and merges them with whatever is already on the Plan.
-//
-// FIELD NAMES ARE READ FROM ZOHO, NOT GUESSED. They were taken from
-// GET /settings/fields?module=Holdings_List (Sept 2026) because a wrong API
-// name does not fail — Zoho returns 200 and silently ignores the field, which
-// is the same class of bug as the Provider one documented in export.ts. If the
-// subform is ever changed, re-read the metadata rather than adjusting these by
-// eye.
-//
-//   Holdings_List        the subform field on Plans — NOT "Holdings"
-//   security_name        text       "Name"
-//   isin                 text       "ISIN"
-//   position             double     "Current Holding"
-//   gbp_valuation        currency   "Unit Price (£)"   <- pounds, confirmed
-//   Holdings_Valuation   currency   "Holdings Valuation"
-//   valuation_date       date       "Last Price Update"
-//   OCF                  percent    "OCF"
-//   Transaction_Cost     percent    "Transaction Cost"
-//   RAG                  picklist   -None- | Red | Amber | Green
-//   Weighting            percent    "Weighting %"       <- left blank, by request
-//   Parent_Id            lookup     read-only, system mandatory — never sent
-
 import { HoldingRag, FundValueSource, type ChecklistFundLine } from "@prisma/client";
 
 /** The subform field on the Plans module. */
@@ -32,14 +7,6 @@ export interface HoldingRow {
   [field: string]: unknown;
 }
 
-/**
- * What each numeric field will actually accept, from the same metadata read.
- *
- * Zoho rejects an over-precise number outright — a 400 naming the field and
- * its maximum_decimal_place, not a silent truncation — so this has to match
- * the module. FE returns unit prices to six decimals and the fund master
- * returns charges to four, both of which the subform refuses.
- */
 const DECIMALS: Record<string, number> = {
   gbp_valuation: 2,
   Holdings_Valuation: 2,
@@ -68,13 +35,6 @@ export function toFieldScale(field: string, v: number | null): number | null {
   return rounded / factor;
 }
 
-/**
- * The figure the CA settled on at stage 6.
- *
- * Falls back to the other side when the chosen one is empty: the source flag
- * records a preference, and a preference for a value that does not exist
- * should not blank the field in CRM.
- */
 function chosen<T>(source: FundValueSource | null, lookup: T | null, ceding: T | null): T | null {
   if (source === FundValueSource.LOOKUP) return lookup ?? ceding;
   if (source === FundValueSource.CEDING) return ceding ?? lookup;
@@ -94,10 +54,6 @@ function isoDate(d: Date | null): string | null {
   return d.toISOString().slice(0, 10);
 }
 
-/**
- * One subform row from one checklist fund line, carrying the figures the CA
- * approved at stage 6 — never a fresh lookup.
- */
 export function buildHoldingRow(line: ChecklistFundLine): HoldingRow {
   const name = chosen(line.fundNameSource, line.resolvedFundName, line.fundName);
   const price = chosen(
@@ -128,17 +84,6 @@ export function buildHoldingRow(line: ChecklistFundLine): HoldingRow {
   };
 }
 
-/**
- * The fields this export is the authority on.
- *
- * Every key buildHoldingRow produces. On an update these are written even
- * when empty, so a figure the CA deletes on the checklist is cleared in CRM
- * rather than left behind — before this, deleting a wrong OCF made it vanish
- * from ceding and stay in Zoho for ever, with nothing to say so.
- *
- * Fields NOT in here — Asset_Class, Weighting, anything a workflow adds — are
- * none of our business and survive untouched.
- */
 const OWNED_FIELDS = [
   "security_name",
   "isin",
@@ -151,12 +96,6 @@ const OWNED_FIELDS = [
   "RAG",
 ] as const;
 
-/**
- * A new row, carrying only the fields we actually have.
- *
- * An insert omits empties rather than sending nulls: there is nothing there
- * to clear, and a subform row full of explicit nulls is noise.
- */
 function forInsert(row: HoldingRow): HoldingRow {
   const out: HoldingRow = {};
   for (const [k, v] of Object.entries(row)) {
@@ -165,14 +104,6 @@ function forInsert(row: HoldingRow): HoldingRow {
   return out;
 }
 
-/**
- * What identifies "the same holding" across the two sides.
- *
- * ISIN where there is one. A RED holding usually has no ISIN — that is
- * generally why it is red — so it falls back to the fund name, normalised the
- * same way the stage-6 comparison normalises it, so "RLS Deposit Pn." and
- * "RLS deposit pn" are one holding rather than two.
- */
 export function holdingKey(row: HoldingRow): string | null {
   const isin = typeof row.isin === "string" ? row.isin.trim().toUpperCase() : "";
   if (isin) return `isin:${isin}`;
@@ -202,56 +133,9 @@ export interface MergeResult {
   ownedKeys: string[];
 }
 
-/**
- * Work out what to send to the Holdings_List subform.
- *
- * HOW THE SUBFORM ACTUALLY BEHAVES, measured against the live module rather
- * than assumed (Sept 2026):
- *
- *   - a row sent WITH an id updates that row, field by field;
- *   - a row sent WITHOUT an id is inserted;
- *   - a row NOT MENTIONED is left exactly as it is — it is NOT deleted;
- *   - a row sent as { id, _delete: null } is deleted.
- *
- * The third point is the one that matters and the one I first got wrong. The
- * usual advice is that a subform PUT replaces the whole list, so an early
- * version echoed every existing row back to avoid wiping them. That was
- * unnecessary — and it hid the real bug, because a holding deleted from the
- * checklist was simply left out of the payload and therefore never deleted
- * from the plan.
- *
- * So this now says only what it means:
- *
- *   ours, still held      -> { id, ...our fields }   updated in place
- *   ours, no longer held  -> { id, _delete: null }   deleted
- *   not ours              -> not mentioned           untouched
- *   new                   -> { ...our fields }       inserted
- *
- * Not mentioning other people's rows is better than echoing them: we never
- * write a field on a row we do not own, so nothing we do can disturb it.
- *
- * "Ours" means the key was recorded on this case's last successful export.
- * That, and only that, is what makes a delete safe.
- *
- * The trade-off, stated plainly: a figure edited directly in CRM on a holding
- * this case owns will be overwritten by the next export. That is the right way
- * round, because the checklist is where the holding is reviewed and signed
- * off, but it does mean corrections belong on the checklist and not in CRM.
- */
 export function mergeHoldings(
   existing: HoldingRow[],
   incoming: HoldingRow[],
-  /**
-   * Keys this case wrote to the Plan on its last successful export.
-   *
-   * The ONLY rows this function will delete. A row whose key is in here but
-   * which the case no longer holds was deleted from the checklist, so it goes
-   * from the Plan too. Anything absent from this list is somebody else's and
-   * is echoed back untouched, whatever it looks like.
-   *
-   * Empty on a case that has not exported since this was introduced, so the
-   * first run after deployment deletes nothing.
-   */
   previouslyExported: readonly string[] = [],
 ): MergeResult {
   // Index what we are pushing, so each existing row can find its counterpart.
@@ -284,26 +168,16 @@ export function mergeHoldings(
     if (ours && id) {
       matched.add(key!);
       updated += 1;
-      // Every field we own is written, empty ones included, so a value the
-      // CA deleted on the checklist is cleared here rather than left stale.
-      // Fields we do not own are not mentioned, so Zoho leaves them alone.
       const patch: HoldingRow = { id };
       for (const f of OWNED_FIELDS) patch[f] = ours[f] ?? null;
       rows.push(patch);
       continue;
     }
-
-    // We put this row here on a previous export, and the case no longer
-    // holds that fund — the CA deleted it from the checklist, so it goes
-    // from the plan too. Only ever a key we recorded ourselves.
     if (id && key && previouslyOurs.has(key)) {
       removed.push(String(row.security_name ?? key));
       rows.push({ id, _delete: null });
       continue;
     }
-
-    // Nothing to do with this case. Saying nothing about it is the safest
-    // thing we can do, and leaves it exactly as it is.
     kept += 1;
   }
 
@@ -320,8 +194,6 @@ export function mergeHoldings(
     kept,
     removed,
     skipped,
-    // Everything this export is now responsible for on the Plan. Stored
-    // against the case so the next run knows what it may delete.
     ownedKeys: [...byKey.keys()],
   };
 }
