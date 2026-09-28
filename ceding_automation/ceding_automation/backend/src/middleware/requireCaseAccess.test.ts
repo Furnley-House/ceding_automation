@@ -57,16 +57,18 @@ beforeEach(() => {
 });
 
 describe("requireCaseAccess", () => {
-  // ── ADMIN short-circuit ─────────────────────────────────────────────
-  it("ADMIN passes without a DB hit, even on a case with no relationship", async () => {
-    const req = makeReq({ user: USER("ADMIN"), id: "case-x" });
-    const res = makeRes();
-    const next = vi.fn() as NextFunction;
-    await requireCaseAccess(req, res, next);
-    expect(next).toHaveBeenCalledOnce();
-    expect(findFirstMock).not.toHaveBeenCalled();
-    expect(res.status).not.toHaveBeenCalled();
-  });
+  // ── Open-access short-circuit (ADMIN / CA_TEAM / PARAPLANNER) ──────
+  for (const role of ["ADMIN", "CA_TEAM", "PARAPLANNER"] as const) {
+    it(`${role} passes without a DB hit, even on a case with no relationship`, async () => {
+      const req = makeReq({ user: USER(role), id: "case-x" });
+      const res = makeRes();
+      const next = vi.fn() as NextFunction;
+      await requireCaseAccess(req, res, next);
+      expect(next).toHaveBeenCalledOnce();
+      expect(findFirstMock).not.toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+  }
 
   // ── Access via each of the four relations ───────────────────────────
   for (const relation of [
@@ -109,12 +111,14 @@ describe("requireCaseAccess", () => {
     });
   });
 
-  it("denies a CA_TEAM user with no relationship (regression: same for every non-ADMIN role)", async () => {
+  it("ADVISER is still scoped: lookup runs with the relationship OR clause", async () => {
     findFirstMock.mockResolvedValueOnce(null);
-    const req = makeReq({ user: USER("CA_TEAM"), caseId: "case-1" });
+    const req = makeReq({ user: USER("ADVISER", "adv-9"), caseId: "case-1" });
     const res = makeRes();
     const next = vi.fn() as NextFunction;
     await requireCaseAccess(req, res, next);
+    expect(findFirstMock).toHaveBeenCalledOnce();
+    expect(findFirstMock.mock.calls[0][0].where.OR).toContainEqual({ adviserId: "adv-9" });
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(403);
   });

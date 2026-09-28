@@ -151,13 +151,9 @@ const Dashboard = () => {
     return auditPayload.logs ?? [];
   }, [auditPayload]);
 
-  // CA team only sees their own cases on the dashboard (mirrors the existing
-  // behaviour and CaseRow.owner_name conventions).
-  const cases = useMemo(() => {
-    const all = rawCases as CaseLite[];
-    if (role !== "ca_team") return all;
-    return all.filter((c) => (c.owner_name ?? "").trim() === (userName ?? "").trim());
-  }, [rawCases, role, userName]);
+  // The dashboard shows every case the backend returns: all cases for
+  // CA team / paraplanners / admin, linked cases only for advisers.
+  const cases = rawCases as CaseLite[];
 
   // ────────────────────────────────────────────────────────
   // KPIs + caseflow — aggregated server-side (GET /cases/stats) so they

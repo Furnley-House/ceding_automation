@@ -2,7 +2,7 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient, CaseStatus, LOAStatus, PlanType, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { requireCaseAccess } from "../middleware/requireCaseAccess";
+import { requireCaseAccess, hasOpenCaseAccess } from "../middleware/requireCaseAccess";
 import { z } from "zod";
 import * as zoho from "../services/zohoCrm";
 import { SYSTEM_USER_ID } from "../services/aiBffApply";
@@ -447,13 +447,14 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
     ];
   }
 
-  // CA Team and Advisers only see their own cases (Admin sees all).
-  // Advisers additionally see every case whose Zoho Client has them as
-  // the assigned Adviser on the Contact record — populated by the
+  // Admin, CA Team and Paraplanners see every case (any CA can progress
+  // any case; any paraplanner can approve any case). Advisers only see
+  // cases they are linked to — chiefly every case whose Zoho Client has
+  // them as the assigned Adviser on the Contact record, populated by the
   // Refresh-from-Zoho sync (see Case.adviserId) — so they can step in
-  // for an absent paraplanner. All roles retain visibility into cases
-  // they created / are assigned to / paraplan.
-  if (req.user!.role !== "ADMIN") {
+  // for an absent paraplanner on their own clients. Keep in sync with
+  // requireCaseAccess (shared OPEN_CASE_ACCESS_ROLES).
+  if (!hasOpenCaseAccess(req.user!.role)) {
     where.OR = [
       { createdById: req.user!.id },
       { assignedToId: req.user!.id },
@@ -517,14 +518,11 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
     new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const lastWeekStart = new Date(weekStart.getTime() - 7 * DAY_MS);
 
-  // Same visibility as GET /cases, except CA Team is narrowed to the cases
-  // they own (assignee, falling back to creator when unassigned) — matching
-  // the dashboard's historical owner_name filter.
+  // Same visibility as GET /cases: Admin, CA Team and Paraplanners count
+  // every case (team-wide KPIs); Advisers only the cases they're linked to.
   const me = req.user!.id;
   let scope: Prisma.CaseWhereInput = {};
-  if (req.user!.role === "CA_TEAM") {
-    scope = { OR: [{ assignedToId: me }, { assignedToId: null, createdById: me }] };
-  } else if (req.user!.role !== "ADMIN") {
+  if (!hasOpenCaseAccess(req.user!.role)) {
     scope = {
       OR: [
         { createdById: me },
