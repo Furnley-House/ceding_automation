@@ -1,5 +1,17 @@
 // backend/src/index.ts
 import "dotenv/config";
+// Patches Express 4's Layer.prototype.handle_request to await async
+// handlers and forward rejections to the app.use((err, ...)) error
+// handler at the bottom of this file. MUST be imported before any
+// route module that declares an async handler — placing it here, on
+// line three, guarantees that order regardless of hoisting.
+//
+// Why not per-route try/catch: 23 of the 28 routes in calls.ts already
+// wrap; five don't (routes L219, L755, L1298, L1334, L1425 as of
+// 2026-09-28). A CA hitting a Prisma error on one of those five would
+// otherwise crash the container. One import fixes all of them and
+// every future async handler in the app.
+import "express-async-errors";
 import path from "path";
 import fs from "fs";
 import express from "express";
