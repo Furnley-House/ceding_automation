@@ -24,6 +24,12 @@ import {
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
 import { resolvePlanRecord } from "../services/planResolution";
+import {
+  applyOptionalSectionDefaults,
+  getOptionalSectionStates,
+  isOptionalSection,
+  setOptionalSection,
+} from "../services/optionalSections";
 import { CLOSED_STATUSES, medianCycleDays, summariseStatusCounts } from "../utils/caseStats";
 import { SAFE_USER_SELECT } from "../utils/userSelects";
 
@@ -636,6 +642,57 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
     unassigned,
   });
 });
+
+// ── Optional checklist sections (Stage 4 on/off switches) ────────────
+// With-Profit Funds / Guarantees / Protected Tax-Free Cash (Pre-A-Day).
+// See services/optionalSections.ts for the rules.
+router.get("/:id/optional-sections", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {
+  const sections = await getOptionalSectionStates(req.params.id);
+  if (!sections) return res.status(404).json({ error: "Case not found" });
+  res.json({ sections });
+});
+
+const OptionalSectionToggleSchema = z.object({
+  section: z.string(),
+  enabled: z.boolean(),
+});
+
+router.post(
+  "/:id/optional-sections",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
+  async (req: Request, res: Response) => {
+    const parsed = OptionalSectionToggleSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const { section, enabled } = parsed.data;
+    if (!isOptionalSection(section)) {
+      return res.status(400).json({ error: `"${section}" is not an optional section` });
+    }
+    const sections = await setOptionalSection({
+      caseId: req.params.id,
+      section,
+      enabled,
+      userId: req.user!.id,
+      via: "toggle",
+    });
+    if (!sections) return res.status(404).json({ error: "Case not found" });
+    res.json({ sections });
+  },
+);
+
+// Called when the CA marks Stage 4 complete: sections that are OFF by
+// default (never switched, no real data) get their fields written as N/A.
+router.post(
+  "/:id/optional-sections/apply-defaults",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
+  async (req: Request, res: Response) => {
+    const changed = await applyOptionalSectionDefaults(req.params.id, req.user!.id);
+    res.json({ changed, sections: await getOptionalSectionStates(req.params.id) });
+  },
+);
 
 // ── Get Single Case ─────────────────────────────────────
 router.get("/:id", requireAuth, requireCaseAccess, async (req: Request, res: Response) => {

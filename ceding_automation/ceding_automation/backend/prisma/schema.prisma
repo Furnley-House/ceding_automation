@@ -396,6 +396,13 @@ model Case {
   workDriveExportPath String?
   workDriveExportedAt DateTime?
 
+  // Optional checklist sections a CA has explicitly switched on/off on
+  // Stage 4 (With-Profit Funds, Guarantees, Protected Tax-Free Cash
+  // (Pre-A-Day)). Shape: { "<section name>": true | false }. A section
+  // with no entry falls back to "on if any field holds real data".
+  // See services/optionalSections.ts.
+  sectionToggles Json?
+
   // ── Cached Zoho IDs ───────────────────────────────────────
   // Populated by sync-from-zoho, consumed by complete-export. Storing
   // them keeps the export deterministic and avoids the "id seems to be
