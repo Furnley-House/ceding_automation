@@ -21,6 +21,7 @@ import {
   mapPlanTypeToZoho,
   planProviderField,
 } from "../services/zohoCrm";
+import { isVerificationConfigured } from "../services/fundVerification";
 import {
   buildHoldingRow,
   mergeHoldings,
@@ -172,6 +173,43 @@ router.post(
     for (const f of caseRecord.checklistFields) {
       fieldsByKey.set(f.template.fieldKey, { value: f.value });
     }
+
+    // ── Verification gate ─────────────────────────────────
+    // Enforced here rather than only on stage 6, because the stage stepper
+    // lets a CA jump straight to stage 9 and the figures go to CRM from this
+    // endpoint, not from the hand-off.
+    //
+    // It refuses rather than forbids. An FE Fund Info outage must not stop a
+    // firm exporting, and every fund line that predates this feature has a
+    // null verifiedAt, so a hard block would strand every case already
+    // carrying holdings. The CA can always proceed by confirming, and the
+    // override is recorded against their name in the audit trail.
+    //
+    // Skipped entirely where verification is not configured: blocking an
+    // environment that has no way to verify would leave no path but to
+    // override on every single export, which teaches people to click through
+    // the warning without reading it.
+    const fundLinesForGate = await prisma.checklistFundLine.findMany({
+      where: { caseId },
+      select: { id: true, fundName: true, verifiedAt: true },
+    });
+    const unverified = fundLinesForGate.filter((l) => !l.verifiedAt);
+    const overrideRequested = String(req.body?.confirmUnverified ?? "") === "true";
+    const gateApplies = isVerificationConfigured() && unverified.length > 0;
+
+    if (gateApplies && !overrideRequested) {
+      return res.status(409).json({
+        code: "HOLDINGS_UNVERIFIED",
+        error:
+          `${unverified.length} of ${fundLinesForGate.length} fund holding` +
+          `${fundLinesForGate.length === 1 ? " has" : "s have"} not been checked against the ` +
+          `fund data. Verify them on Review Checklist, or confirm to export them as they are.`,
+        unverified: unverified.length,
+        total: fundLinesForGate.length,
+        holdings: unverified.map((l) => l.fundName),
+      });
+    }
+    const unverifiedOverride = gateApplies && overrideRequested;
 
     // Production model: all Zoho IDs were already cached on the case at
     // last sync. The export does NOT re-fetch from CRM. If the cache is
@@ -486,6 +524,8 @@ router.post(
           workdriveError,
           zohoUpdate,
           zohoError,
+          unverifiedOverride,
+          unverifiedHoldings: unverifiedOverride ? unverified.map((l) => l.fundName) : undefined,
           holdings: holdingsResult,
           holdingsError,
           cacheWarning,
@@ -506,6 +546,7 @@ router.post(
       workdriveError,
       zohoUpdate,
       zohoError,
+      unverifiedOverride,
       holdings: holdingsResult,
       holdingsError,
       cacheWarning,

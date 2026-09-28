@@ -102,6 +102,14 @@ export function ExportWorkspace({ caseItem }: Props) {
   const { rows: fields, loading: isLoading } = useChecklistFields({ caseId: caseItem.id, template });
   const [exporting, setExporting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // Set when the server refuses because the holdings were never checked. The
+  // workbook bytes are held so confirming re-sends them instead of rebuilding.
+  const [unverifiedPrompt, setUnverifiedPrompt] = useState<{
+    blob: Blob;
+    message: string;
+    holdings: string[];
+  } | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const [lastExportAt, setLastExportAt] = useState<string | null>(null);
   const [workdriveLink, setWorkdriveLink] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<ExportReceipt | null>(null);
@@ -267,7 +275,24 @@ export function ExportWorkspace({ caseItem }: Props) {
       URL.revokeObjectURL(url);
 
       // 3. Backend does WorkDrive + Zoho in one call
-      const res = await casesApi.completeExport(caseItem.id, blob, fileName);
+      await sendToBackend(blob, false);
+    } catch (err) {
+      console.error(err);
+      toast.error("Export failed", { description: err instanceof Error ? err.message : "Unknown error" });
+    } finally {
+      setExporting(false);
+      setUploading(false);
+    }
+  };
+
+  /**
+   * POST the workbook. Split out from the build/download so that confirming
+   * an unverified export re-sends the same bytes rather than rebuilding the
+   * workbook and downloading a second copy to the CA's machine.
+   */
+  const sendToBackend = async (blob: Blob, confirmUnverified: boolean) => {
+    try {
+      const res = await casesApi.completeExport(caseItem.id, blob, fileName, confirmUnverified);
       const data = res.data as {
         workdrive?: { id: string; permalink?: string } | null;
         workdriveError?: string | null;
@@ -317,12 +342,23 @@ export function ExportWorkspace({ caseItem }: Props) {
       // Pull the audit row that the backend just wrote so the receipt panel
       // reflects this latest run without a page reload.
       await fetchLatestReceipt();
+      setUnverifiedPrompt(null);
     } catch (err) {
+      // The holdings have not been checked. That is a decision for the CA,
+      // not a failure — ask, rather than reporting an error they cannot act
+      // on. Nothing has been written at this point.
+      const resp = (err as { response?: { status?: number; data?: Record<string, unknown> } })
+        .response;
+      if (resp?.status === 409 && resp.data?.code === "HOLDINGS_UNVERIFIED") {
+        setUnverifiedPrompt({
+          blob,
+          message: String(resp.data.error ?? "These fund holdings have not been checked."),
+          holdings: Array.isArray(resp.data.holdings) ? (resp.data.holdings as string[]) : [],
+        });
+        return;
+      }
       console.error(err);
       toast.error("Export failed", { description: err instanceof Error ? err.message : "Unknown error" });
-    } finally {
-      setExporting(false);
-      setUploading(false);
     }
   };
 
@@ -444,6 +480,73 @@ export function ExportWorkspace({ caseItem }: Props) {
 
       {/* Zoho update receipt (D3) — sourced from the latest CHECKLIST_EXPORTED audit row */}
       <ExportReceiptPanel receipt={receipt} loading={receiptLoading} />
+
+      {/* The holdings were never checked. Nothing has been written yet — the
+          CA either goes back and verifies, or says to send them as they are
+          and that decision is recorded against their name. */}
+      {unverifiedPrompt && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => !confirming && setUnverifiedPrompt(null)}
+        >
+          <div
+            className="bg-card border border-border rounded-lg shadow-lg w-[480px] max-w-full p-4 space-y-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
+              <div>
+                <h3 className="text-sm font-bold text-foreground">
+                  Fund holdings have not been checked
+                </h3>
+                <p className="text-xs text-muted-foreground mt-1">{unverifiedPrompt.message}</p>
+              </div>
+            </div>
+
+            {unverifiedPrompt.holdings.length > 0 && (
+              <ul className="text-[11px] text-foreground bg-muted/40 rounded p-2 max-h-28 overflow-y-auto list-disc list-inside">
+                {unverifiedPrompt.holdings.map((h, i) => (
+                  <li key={`${h}-${i}`}>{h}</li>
+                ))}
+              </ul>
+            )}
+
+            <p className="text-[11px] text-muted-foreground">
+              If you export now, the figures on the checklist go to CRM exactly as they are and
+              this will be recorded against your name.
+            </p>
+
+            <div className="flex items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={confirming}
+                onClick={() => setUnverifiedPrompt(null)}
+              >
+                Go back and verify
+              </Button>
+              <Button
+                size="sm"
+                disabled={confirming}
+                className="gap-1.5"
+                onClick={async () => {
+                  setConfirming(true);
+                  try {
+                    await sendToBackend(unverifiedPrompt.blob, true);
+                  } finally {
+                    setConfirming(false);
+                  }
+                }}
+              >
+                {confirming && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                Export anyway
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

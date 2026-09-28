@@ -121,10 +121,14 @@ export const casesApi = {
    * Stage 9 one-shot export: posts the generated XLSX as multipart, gets
    * WorkDrive metadata + Zoho update result back.
    */
-  completeExport: (id: string, blob: Blob, fileName: string) => {
+  // `confirmUnverified` is the CA acknowledging that the fund holdings could
+  // not be checked and that they want to export anyway. The server refuses
+  // with 409 until it is sent, and records who overrode it.
+  completeExport: (id: string, blob: Blob, fileName: string, confirmUnverified = false) => {
     const form = new FormData();
     form.append("file", blob, fileName);
     form.append("fileName", fileName);
+    if (confirmUnverified) form.append("confirmUnverified", "true");
     return api.post(`/cases/${id}/complete-export`, form, {
       headers: { "Content-Type": "multipart/form-data" },
     });

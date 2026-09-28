@@ -45,9 +45,13 @@ interface Props {
   /** CA / admin can act; everyone else sees the result read-only. */
   canEdit: boolean;
   /**
-   * Fired when the environment has no fund verification configured at all.
-   * Stage 6 lifts its gate on this: a deployment problem must not strand a
-   * case, and there is nothing the CA could do about it anyway.
+   * Fired when verification could not be run at all — either the environment
+   * has none configured, or the fund data could not be reached.
+   *
+   * Stage 6 lifts its gate on this. Neither is something the CA can fix, and
+   * an FE Fund Info outage that froze every case at stage 6 would be a worse
+   * failure than the one the gate prevents. The export still stops and asks
+   * before anything reaches CRM, so this only relaxes the hand-off.
    */
   onUnavailable?: () => void;
 }
@@ -355,6 +359,10 @@ export function FundVerificationPanel({
             "Could not reach the fund data service. Nothing was changed — please try again.",
           ),
         });
+        // The CA has tried and the data is not reachable. Holding the case at
+        // stage 6 indefinitely helps nobody; the export gate still stops the
+        // figures reaching CRM without a recorded decision.
+        onUnavailable?.();
       }
     } finally {
       setRunning(false);
@@ -476,7 +484,7 @@ export function FundVerificationPanel({
             <p className="text-[11px] text-muted-foreground mt-0.5">
               {panelError.kind === "unavailable"
                 ? "You can still send this case on — the checklist figures will be used as they are."
-                : "No holding was changed. Try again; if it keeps failing, raise it before sending the case on."}
+                : "Nothing was changed. Try again in a few minutes; if it keeps failing you can still send the case on, and the export will ask you to confirm before anything reaches CRM."}
             </p>
           </div>
         </div>
