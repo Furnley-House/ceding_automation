@@ -371,6 +371,32 @@ export async function findPlanRecordByPolicyRef(
   return { id: rec.id as string, record: rec };
 }
 
+// Search the Plans module by record Name (e.g. "Plan127724" — an
+// auto-number, so unique). Used as a last-resort fallback when the stored
+// Plans id no longer resolves and Policy_Ref search is ambiguous: the case
+// still carries the name it cached when the plan was linked. Same
+// unique-match contract as findPlanRecordByPolicyRef.
+export async function findPlanRecordByName(
+  planName: string,
+): Promise<{ id: string; record: Record<string, unknown> } | null> {
+  if (!planName || !planName.trim()) return null;
+  const token = await getAccessToken();
+  const criteria = `(Name:equals:${planName.trim()})`;
+  const url = `${apiBase()}/${planModuleName()}/search?criteria=${encodeURIComponent(criteria)}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  if (res.status === 204) return null;
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`Zoho ${planModuleName()} name search failed (${res.status}): ${body}`);
+  }
+  const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
+  const matches = parsed.data ?? [];
+  if (matches.length !== 1) return null;
+  return { id: matches[0].id as string, record: matches[0] };
+}
+
 // Multi-result Plans search by Policy_Ref starts-with. Used by the D4
 // "Link existing" picker — exposes ambiguous / partial matches so the
 // CA can choose, instead of the unique-match silent-skip behaviour of

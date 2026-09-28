@@ -12,7 +12,6 @@ import {
   extractContactUserFields,
   findProviderRecordByName,
   findZohoUserById,
-  findPlanRecordByPolicyRef,
   findPlanRecordById,
   searchPlansByPolicyRefStartsWith,
   createPlanRecord,
@@ -24,6 +23,7 @@ import {
   inferPlanType,
 } from "../services/zohoCrm";
 import { generateNextCaseRef } from "../services/caseRef";
+import { resolvePlanRecord } from "../services/planResolution";
 import { CLOSED_STATUSES, medianCycleDays, summariseStatusCounts } from "../utils/caseStats";
 import { SAFE_USER_SELECT } from "../utils/userSelects";
 
@@ -1695,7 +1695,16 @@ router.post("/:id/sync-from-zoho", requireAuth, requireCaseAccess, async (req: R
   considerChange("policyRef", mapping.policyRef, caseRecord.policyRef);
   considerChange("planType", mapping.planType, caseRecord.planType);
   considerChange("zohoDeepLink", mapping.zohoDeepLink, caseRecord.zohoDeepLink);
-  considerChange("zohoCaseId", mapping.zohoCaseId, caseRecord.zohoCaseId);
+  // Task.What_Id is only a *candidate* Plans id. In Furnley's prod org it
+  // often points at a Deal, and blindly copying it here overwrote plans a
+  // CA had linked on Stage 3 (header still said "Linked" via the cached
+  // zohoPlanName, but every export then PUT to Plans/<Deal id> and 400'd).
+  // Accept it only when it resolves in the Plans module; otherwise keep
+  // the existing link and let 3e below verify / heal that.
+  if (mapping.zohoCaseId && mapping.zohoCaseId !== caseRecord.zohoCaseId) {
+    const asPlan = await findPlanRecordById(mapping.zohoCaseId).catch(() => null);
+    if (asPlan) considerChange("zohoCaseId", mapping.zohoCaseId, caseRecord.zohoCaseId);
+  }
   considerChange("clientZohoId", mapping.clientZohoId, caseRecord.clientZohoId);
 
   // 3e. Plans-module linkage: Plan Name + authoritative Plan_Type / Provider.
@@ -1723,13 +1732,17 @@ router.post("/:id/sync-from-zoho", requireAuth, requireCaseAccess, async (req: R
     (updates.zohoCaseId as string | undefined) ?? caseRecord.zohoCaseId;
   const effectivePolicyRef =
     (updates.policyRef as string | undefined) ?? caseRecord.policyRef;
+  const planLookup = {
+    policyRefs: [caseRecord.policyRef, mapping.policyRef],
+    planName: caseRecord.zohoPlanName,
+  };
   const pickPlanName = (rec: Record<string, unknown>): string | null => {
     const n = rec.Name;
     return typeof n === "string" && n.trim() ? n.trim() : null;
   };
   if (!effectiveZohoCaseId && effectivePolicyRef) {
     try {
-      const hit = await findPlanRecordByPolicyRef(effectivePolicyRef);
+      const hit = await resolvePlanRecord(planLookup);
       if (hit) {
         updates.zohoCaseId = hit.id;
         planRecord = hit.record;
@@ -1741,7 +1754,7 @@ router.post("/:id/sync-from-zoho", requireAuth, requireCaseAccess, async (req: R
           to: planName ?? hit.id,
         });
       } else {
-        planSyncNote = `No unique Plans record for Policy_Ref="${effectivePolicyRef}"`;
+        planSyncNote = `No unique Plans record for Policy_Ref (${[caseRecord.policyRef, mapping.policyRef].filter(Boolean).map((r) => `"${r}"`).join(", ")})`;
       }
     } catch (err) {
       planSyncNote = `Plans search by Policy_Ref failed: ${(err as Error).message}`;
@@ -1771,7 +1784,7 @@ router.post("/:id/sync-from-zoho", requireAuth, requireCaseAccess, async (req: R
         // Persist the corrected id so the export path (and every future
         // sync) skips this second lookup.
         try {
-          const hit = await findPlanRecordByPolicyRef(effectivePolicyRef);
+          const hit = await resolvePlanRecord(planLookup);
           if (hit) {
             updates.zohoCaseId = hit.id;
             planRecord = hit.record;
@@ -1784,7 +1797,7 @@ router.post("/:id/sync-from-zoho", requireAuth, requireCaseAccess, async (req: R
             });
           } else {
             planSyncNote =
-              `Stored zohoCaseId ${effectiveZohoCaseId} not found in ${planModuleName()} module, and Policy_Ref="${effectivePolicyRef}" also returned no unique match.`;
+              `Stored zohoCaseId ${effectiveZohoCaseId} not found in ${planModuleName()} module, and no unique Plans record matched Policy_Ref (${[caseRecord.policyRef, mapping.policyRef].filter(Boolean).map((r) => `"${r}"`).join(", ")}) or plan name "${caseRecord.zohoPlanName ?? "—"}". Re-link the plan on Stage 3.`;
           }
         } catch (searchErr) {
           planSyncNote =

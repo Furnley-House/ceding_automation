@@ -13,9 +13,9 @@ import { PrismaClient, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { uploadToWorkDrive, resolveCaseFolderId, WorkDriveFolderResolutionError } from "../services/workdrive";
+import { resolvePlanRecord } from "../services/planResolution";
 import {
   updatePlanRecord,
-  findPlanRecordByPolicyRef,
   findProviderRecordByName,
   mapPlanTypeToZoho,
   planProviderField,
@@ -254,9 +254,12 @@ router.post(
     // receipt falls back to "Plan <id>".
     let planRecordName: string | undefined;
     let resolvedVia: "stored" | "policy_ref_search" | null = planRecordId ? "stored" : null;
-    if (!planRecordId && caseRecord.policyRef) {
+    // Policy_Ref (split into parts if it holds two refs), then the plan Name
+    // the case cached when it was last linked. See services/planResolution.
+    const planLookup = { policyRefs: [caseRecord.policyRef], planName: caseRecord.zohoPlanName };
+    if (!planRecordId && (caseRecord.policyRef || caseRecord.zohoPlanName)) {
       try {
-        const hit = await findPlanRecordByPolicyRef(caseRecord.policyRef);
+        const hit = await resolvePlanRecord(planLookup);
         if (hit) {
           planRecordId = hit.id;
           resolvedVia = "policy_ref_search";
@@ -362,13 +365,13 @@ router.post(
           const isInvalidId =
             /the id given seems to be invalid/i.test(msg) ||
             /INVALID_DATA.*resource_path_index/i.test(msg);
-          if (isInvalidId && caseRecord.policyRef) {
+          if (isInvalidId && (caseRecord.policyRef || caseRecord.zohoPlanName)) {
             console.warn(
               "[plan-provider] PUT rejected id=%s as invalid; auto-healing via Policy_Ref=%s",
               planRecordId, caseRecord.policyRef,
             );
             try {
-              const hit = await findPlanRecordByPolicyRef(caseRecord.policyRef);
+              const hit = await resolvePlanRecord(planLookup);
               if (hit && hit.id !== planRecordId) {
                 const oldId = planRecordId;
                 planRecordId = hit.id;
@@ -395,7 +398,7 @@ router.post(
                 zohoError =
                   hit
                     ? msg // same id, so the underlying error stands
-                    : `PUT failed and Policy_Ref="${caseRecord.policyRef}" returned no unique Plans record. Original error: ${msg}`;
+                    : `The linked Plans record id is not valid in Zoho, and no unique Plans record matched Policy_Ref="${caseRecord.policyRef ?? "—"}" or plan name "${caseRecord.zohoPlanName ?? "—"}". Re-link the plan on Stage 3 (Link existing) and export again. Original error: ${msg}`;
               }
             } catch (retryErr) {
               zohoError = `PUT failed (${msg}); auto-heal via Policy_Ref also failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
