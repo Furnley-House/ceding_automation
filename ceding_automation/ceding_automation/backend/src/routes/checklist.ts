@@ -7,6 +7,7 @@ import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { requireInternalKey } from "../middleware/internalKey";
 import { applyFieldExtraction } from "../services/aiBffApply";
 import { mirrorChecklistToCase } from "../services/caseFieldMirror";
+import { shouldClearApproval } from "../utils/approvalOnEdit";
 import { canMarkMissingAsNA } from "../utils/checklistReadiness";
 
 const router = Router();
@@ -174,6 +175,12 @@ router.patch(
     const isResolvingConflict =
       field.hasConflict && (value !== undefined || resolvedConflict === true);
 
+    // Every field is editable at Stage 6 Review Checklist, including ones a
+    // paraplanner has already approved. A changed value must not keep an
+    // approval that was given to the old value — clear it so the field
+    // goes back to the paraplanner. Unchanged saves keep the approval.
+    const clearsApproval = shouldClearApproval(field.isApproved, field.value, value);
+
     const updated = await prisma.checklistField.update({
       where: { id: req.params.fieldId },
       data: {
@@ -190,6 +197,7 @@ router.patch(
         ...(isResolvingConflict ? { conflictValues: Prisma.JsonNull } : {}),
         // Promote confidence to HIGH on manual edit
         confidence: value ? "HIGH" : "MISSING",
+        ...(clearsApproval ? { isApproved: false, approvedAt: null } : {}),
       },
     });
 
@@ -203,6 +211,7 @@ router.patch(
         oldValue,
         newValue: value,
         source: auditSource,
+        ...(clearsApproval ? { metadata: { approvalCleared: true } } : {}),
       },
     });
 
