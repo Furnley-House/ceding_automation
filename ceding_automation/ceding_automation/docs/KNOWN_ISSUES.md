@@ -5,6 +5,129 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-13 — Zoho token cache is never invalidated on 401, and CRM 401s come back as data
+
+**Filed:** 2026-09-29
+**Owner:** unassigned
+**Severity:** Medium — the WorkDrive half fails loudly (intermittent
+palindrome-submit 401s in staging logs 2026-09-29). The CRM half fails
+silently — every CRM caller treats Zoho's error payload as a valid response,
+which means sync/update flows can quietly no-op on a rejected token and no
+one notices until the downstream state is wrong. Two shapes of the same
+root cause, and the silent shape is the more dangerous one.
+
+### Half 1 — the cache is never invalidated on 401
+
+`services/zohoCrm.ts` holds a module-level `TokenCache = { accessToken,
+expiresAt }`. Every Zoho caller — CRM, WorkDrive, Creator — goes through
+`getAccessToken()`, which returns the cached token whenever
+`Date.now() < cache.expiresAt - 60_000`.
+
+```ts
+async function getAccessToken(): Promise<string> {
+  if (cache && Date.now() < cache.expiresAt - 60_000) return cache.accessToken;
+  // …refresh via POST /oauth/v2/token, populate cache…
+}
+```
+
+Nothing observes the actual API responses. If Zoho revokes the token early
+(concurrent refresh from another process, admin re-authorised the app,
+scope change on Zoho's side, transient auth-service quirk), the cache
+still says "valid for another 30 minutes" and every subsequent call reuses
+the rejected token. Recovery only happens when the cache naturally
+expires — could be 30+ minutes.
+
+Observed symptom on staging (2026-09-29 10:35:17Z, 10:42:04Z): recurring
+`[calls] palindrome-submit error: Request failed with status code 401`
+where the 401 came from `axios.get(WorkDrive)` inside `ensureCaseCallFolders`.
+Same-user retry two minutes later succeeded — because *some other* code
+path forced a genuine refresh in the meantime. Race, not by design.
+
+### Half 2 — CRM uses `fetch`, so 401 comes back as data
+
+WorkDrive uses `axios`, which throws on any non-2xx by default. CRM uses
+`fetch`, which resolves with `res.ok = false` and the response body still
+readable.
+
+```ts
+// services/zohoCrm.ts updateTask — every CRM function follows this shape:
+export async function updateTask(taskId: string, fields: …) {
+  const token = await getAccessToken();
+  const res = await fetch(`${apiBase()}/Tasks/${taskId}`, {
+    method: 'PUT',
+    headers: { Authorization: `Zoho-oauthtoken ${token}`, … },
+    body: JSON.stringify({ data: [{ id: taskId, ...fields }] }),
+  });
+  return res.json();   // ← 401 body returned as if it were success data
+}
+```
+
+The route/service handler downstream gets an object like
+`{ code: 'INVALID_TOKEN', message: '…', status: 'error' }` back, and treats
+it the same as `{ data: [ { id: '…', code: 'SUCCESS' } ] }` unless it
+happens to inspect `.code`. **Most callers don't** — they either forward
+the result as JSON, ignore it, or destructure fields that aren't there
+(quietly setting things to `undefined`).
+
+WorkDrive's loud failure is uncomfortable but visible. CRM's silent
+failure produces **wrong-looking Zoho state** — a case's paraplanner
+resolves to null because the Contact fetch was a 401, a Task update
+silently no-ops, an export write-back looks successful but never
+happened. There is no log line for any of that today.
+
+### Fix direction — `withZohoAuth(fn)` wrapper, applied centrally
+
+One helper in `services/zohoCrm.ts` that both halves use:
+
+```ts
+async function withZohoAuth<T>(fn: (token: string) => Promise<T>): Promise<T> {
+  const token = await getAccessToken();
+  try {
+    return await fn(token);
+  } catch (err) {
+    if (is401(err)) {
+      // Rejected — invalidate cache and retry ONCE with a fresh token.
+      cache = null;
+      const freshToken = await getAccessToken();
+      return await fn(freshToken);
+    }
+    throw err;
+  }
+}
+```
+
+Two things to make it cover both surfaces:
+
+1. **`is401()` needs both shapes.** For axios: `err?.response?.status === 401`. For fetch: the caller has to opt in — `fetch` won't throw, so the pattern in each CRM function needs to check `if (!res.ok && res.status === 401) throw new UnauthorizedError()` before `res.json()`, and the throw is what `is401()` matches. Retrofitting the ~15 CRM callers in `zohoCrm.ts` is mechanical but not trivial — worth a codemod-style PR.
+
+2. **Retry ONCE only.** A persistent 401 (real credential problem — expired refresh token, scope revoked, etc.) shouldn't burn API calls in a loop. Second failure propagates, matching today's behaviour.
+
+Ship it in one PR — the whole point is that CRM and WorkDrive share the
+same root cause, and half-fixing one is worse than what we have (would
+mask the CRM-silent surface even further).
+
+### Notes for whoever picks this up
+
+- **All WorkDrive callers** at time of writing use `axios` and would get
+  the retry for free once the wrapper's around them.
+- **CRM callers** (~15 in `zohoCrm.ts`, plus `zohoCreator.ts`) each need
+  the `if (!res.ok && res.status === 401) throw …` guard before `.json()`.
+  Grep for `await fetch(` in `services/zoho*.ts` — that's the codemod
+  target.
+- **`zohoCreator.ts`** also uses `fetch` — same silent-401 shape, same
+  fix. Should be updated in the same PR.
+- **Confirm no callers rely on receiving Zoho error bodies as data on
+  purpose.** Unlikely, but worth an audit as part of the change.
+- **Cross-refs.** KI-08 was about downstream 429 hammering with no backoff
+  in the recording-watcher; this KI is the sibling story for 401 handling
+  in the auth layer. Different symptom, different code path, but the same
+  "silent recovery from a transient failure" concern.
+- **Reply to Srinath 2026-09-29** contains the initial diagnosis of the
+  WorkDrive-401 symptom; his palindrome-submit test session bumped into
+  this shape but the root cause is not his config or credentials.
+
+---
+
 ## KI-12 — Sync auto-provisions users from placeholder Zoho Owner accounts
 
 **Filed:** 2026-09-29
