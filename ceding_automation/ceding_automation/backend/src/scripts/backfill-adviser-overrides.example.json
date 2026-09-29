@@ -1,5 +1,11 @@
 {
   "_": "Copy this file, edit, pass via --overrides /path/to/your-copy.json to the backfill script.",
+  "_skipEmails_help": "Contacts whose Owner email is in this list are skipped entirely. No user created, no adviserId set, case keeps adviserId=null. Use for placeholder / role-based / shared-mailbox Zoho users that aren't actual advisers (e.g. 'unassigned@', 'admin@', team mailboxes). A blank adviser field is honest; one that reads 'Unassigned' is misleading.",
+  "skipEmails": [
+    "unassigned@furnleyhouse.co.uk",
+    "admin@furnleyhouse.co.uk",
+    "test@headleyfs.com"
+  ],
   "_inactiveDomains_help": "Emails on these domains are auto-provisioned with status=INACTIVE. Row exists (so header shows adviser name), but the user cannot sign in even if credentials appear later.",
   "inactiveDomains": [
     "anchor-wealth.co.uk"

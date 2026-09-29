@@ -5,6 +5,113 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-12 — Sync auto-provisions users from placeholder Zoho Owner accounts
+
+**Filed:** 2026-09-29
+**Owner:** unassigned
+**Severity:** Medium — governance / data quality. Not a security vulnerability
+but the checklist header, dashboards, and every downstream report claim
+"Unassigned" is a real adviser once it starts firing. A blank adviser field
+is honest; one that reads "Unassigned" is a positive claim of the wrong
+person.
+
+### The shape
+
+The interactive `POST /:id/sync-from-zoho` endpoint's adviser resolution
+(`backend/src/routes/cases.ts` ~L1670, adviser branch) reads
+`Contact.Owner` (post-2026-09-29 env flip `ZOHO_CONTACT_FIELD_ADVISER=Owner`),
+resolves the returned Zoho user by email, and — if that email isn't in the
+local `users` table — auto-creates a new user row with
+`role: "ADVISER", status: "ACTIVE"`.
+
+That branch treats every distinct Owner email as a real person. But
+Furnley's prod Zoho tenant contains at least one placeholder Zoho user
+(`unassigned@furnleyhouse.co.uk`, active, currently the Owner of 200+
+Contacts in prod Zoho) which is intentionally not a person. Any Refresh
+click on a case whose Contact is owned by that user triggers:
+
+1. Sync reads `Contact.Owner = { id: 382102000032227577, name: "Unassigned",
+   email: "unassigned@furnleyhouse.co.uk" }`
+2. No match in local `users` → auto-provisions a new row
+3. Case `adviserId` links to that row
+4. Header renders "Unassigned" as the adviser
+
+Staging has this exact row today (created 2026-09-28 by exactly this path,
+linked to FH-2026-000077 Marianne Coulling). Prod doesn't yet — but 200+
+Contacts are lined up as triggers.
+
+### Placeholders found in prod Zoho on 2026-09-29
+
+| Email | Zoho status | Contacts owned |
+|---|---|---|
+| `unassigned@furnleyhouse.co.uk` | active | 200+ (COQL page-1 full, `more_records: true`) |
+| `admin@furnleyhouse.co.uk` | disabled | unknown (Zoho refused the ownership COQL against disabled users) |
+| `test@headleyfs.com` | disabled | unknown (same) |
+
+Scanning technique: paginate `GET /crm/v6/users?type=AllUsers`, filter local-
+part of email against a small keyword list (`unassigned, admin, support, info,
+office, reception, team, shared, house, master, system, sales, general, info,
+contact, test, demo, dummy, placeholder`, plus variations). Three matches out
+of 236 org users. Only `unassigned@` is active and confirmed owning Contacts.
+Historical / new placeholder Zoho users should be re-scanned periodically —
+the pattern is set by the Zoho admin, not by our code.
+
+### The already-in-place partial patch (backfill script)
+
+The 2026-09-29 backfill script (`scripts/backfill-adviser-from-owner.ts`)
+takes a `skipEmails` list in its overrides config, defaulted to those three
+placeholders. Cases whose Owner email matches short-circuit to
+`skip_placeholder_owner` — no user created, no `adviserId` set. That protects
+the one-off backfill run. It does NOT protect the interactive sync-from-zoho
+endpoint used every day.
+
+### Fix direction — at source, in the sync path
+
+Skip placeholder Owner emails in the sync path before it considers the
+adviser branch. Recommendation: **an env var config**.
+
+```
+ZOHO_ADVISER_SKIP_EMAILS=unassigned@furnleyhouse.co.uk,admin@furnleyhouse.co.uk,test@headleyfs.com
+```
+
+Read once by `services/zohoCrm.ts` `extractContactUserFields` (or a new
+helper called just before the adviser + paraplanner branches). Any Owner
+email in the list short-circuits to `null` on BOTH `fields.adviser` AND
+`fields.paraplanner` — nothing about the placeholder check is adviser-
+specific; if the same placeholder ever shows up as Contact.Paraplanner, the
+same skip should fire.
+
+Small code change (~15 lines + tests). Additive — no schema, no migration.
+
+Alternative shape: DB-driven skip-list table + admin UI to manage. Bigger
+change. Only worth it if the list changes often — it doesn't.
+
+### Cleanup after the fix ships
+
+Once the sync-path skip is live:
+1. Deactivate the staging `unassigned@furnleyhouse.co.uk` user row
+   (`UPDATE users SET status = 'INACTIVE' WHERE email =
+   'unassigned@furnleyhouse.co.uk'`).
+2. Clear the one staging case's `adviserId`
+   (`UPDATE cases SET "adviserId" = NULL, "zohoAdviserId" = NULL
+   WHERE "caseRef" = 'FH-2026-000077'`).
+3. Same treatment on prod if any placeholder rows land there before the fix
+   deploys.
+
+### Cross-refs
+
+- **KI-11** is about auto-provisioned users leaving no audit trail. Related
+  but distinct — that's about accountability *when* provisioning happens;
+  this is about provisioning happening at all for identities that shouldn't
+  be users. Both worth fixing; neither blocks the other.
+- The scope of "placeholder skip-list" is deliberately narrower than the
+  scope of "who is / isn't a legitimate app user" — the KI's skip-list is
+  a defensive floor, not the full answer to user hygiene. If a Zoho user
+  is added later that shouldn't be an adviser, this list needs an entry.
+  There is no automatic detection.
+
+---
+
 ## KI-11 — Auto-provisioned users leave no row in `user_audit_logs`
 
 **Filed:** 2026-09-29

@@ -42,6 +42,13 @@ const SYSTEM_USER_ID = "system-ai-bff";
 const REQUEST_STAGGER_MS = 200; // ~5 req/s — well under Zoho CRM v6 (~100 req/min)
 
 interface OverrideConfig {
+  // Contacts owned by any of these Zoho user emails are skipped
+  // entirely — no user created, no adviserId set. For placeholder /
+  // role-based / shared-mailbox Zoho accounts that aren't actual
+  // advisers. See KI-12 for the sync-side gap this compensates for
+  // (the interactive sync path has the same auto-provision blind
+  // spot and should be fixed at source).
+  skipEmails: string[];
   inactiveDomains: string[];
   roleOverrides: Record<string, UserRole>;
 }
@@ -54,6 +61,15 @@ const VALID_ROLES = new Set<UserRole>([
 ]);
 
 const DEFAULT_CONFIG: OverrideConfig = {
+  // Prod Zoho scan on 2026-09-29 found these three placeholder accounts.
+  // `unassigned@furnleyhouse.co.uk` (active) currently owns 200+ prod
+  // Contacts. `admin@` and `test@` are disabled but included defensively
+  // in case they're re-enabled or already own historical Contacts.
+  skipEmails: [
+    "unassigned@furnleyhouse.co.uk",
+    "admin@furnleyhouse.co.uk",
+    "test@headleyfs.com",
+  ],
   inactiveDomains: ["anchor-wealth.co.uk"],
   roleOverrides: {},
 };
@@ -97,7 +113,11 @@ function loadConfig(pathToJson?: string): OverrideConfig {
     }
     roleOverrides[email.toLowerCase()] = role as UserRole;
   }
+  const skipEmails: string[] = (parsed.skipEmails ?? DEFAULT_CONFIG.skipEmails).map(
+    (e: string) => e.toLowerCase().trim(),
+  );
   return {
+    skipEmails,
     inactiveDomains: (parsed.inactiveDomains ?? DEFAULT_CONFIG.inactiveDomains).map(
       (d: string) => d.toLowerCase(),
     ),
@@ -148,7 +168,8 @@ type Outcome =
     }
   | { kind: "skip_no_contact"; caseId: string; caseRef: string; clientZohoId: string }
   | { kind: "skip_no_owner"; caseId: string; caseRef: string; clientZohoId: string }
-  | { kind: "skip_no_email"; caseId: string; caseRef: string; ownerZohoId: string };
+  | { kind: "skip_no_email"; caseId: string; caseRef: string; ownerZohoId: string }
+  | { kind: "skip_placeholder_owner"; caseId: string; caseRef: string; email: string; ownerZohoId: string };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -165,6 +186,7 @@ async function main() {
   console.log(`  Run id:           ${runId}`);
   console.log(`  Limit:            ${args.limit ?? "(none)"}`);
   console.log(`  Overrides source: ${args.overridesPath ?? "(defaults)"}`);
+  console.log(`  Skip emails:      ${config.skipEmails.join(", ") || "(none)"}`);
   console.log(`  Inactive domains: ${config.inactiveDomains.join(", ") || "(none)"}`);
   console.log(`  Role overrides:   ${Object.keys(config.roleOverrides).length} entr${Object.keys(config.roleOverrides).length === 1 ? "y" : "ies"}`);
   console.log();
@@ -240,6 +262,19 @@ async function main() {
     }
     if (!owner.email) {
       outcomes.push({ kind: "skip_no_email", caseId: c.id, caseRef: c.caseRef, ownerZohoId: owner.id });
+      continue;
+    }
+    if (config.skipEmails.includes(owner.email)) {
+      // Placeholder / role-based / shared-mailbox Zoho account. Case
+      // keeps adviserId=null — a blank adviser field is honest;
+      // one that reads "Unassigned" would be misleading.
+      outcomes.push({
+        kind: "skip_placeholder_owner",
+        caseId: c.id,
+        caseRef: c.caseRef,
+        email: owner.email,
+        ownerZohoId: owner.id,
+      });
       continue;
     }
     const domain = owner.email.split("@")[1] ?? "";
@@ -395,12 +430,14 @@ function renderReport(outcomes: Outcome[]) {
   const create = outcomes.filter((o) => o.kind === "create_and_link") as Extract<Outcome, { kind: "create_and_link" }>[];
   const noContact = outcomes.filter((o) => o.kind === "skip_no_contact");
   const noEmail = outcomes.filter((o) => o.kind === "skip_no_email");
+  const placeholder = outcomes.filter((o) => o.kind === "skip_placeholder_owner") as Extract<Outcome, { kind: "skip_placeholder_owner" }>[];
 
   console.log("Plan summary");
-  console.log(`  Would link to existing user:      ${link.length} cases`);
-  console.log(`  Would auto-provision + link:      ${create.length} cases`);
-  console.log(`  Would skip (Contact not found):   ${noContact.length} cases`);
-  console.log(`  Would skip (Owner has no email):  ${noEmail.length} cases`);
+  console.log(`  Would link to existing user:       ${link.length} cases`);
+  console.log(`  Would auto-provision + link:       ${create.length} cases`);
+  console.log(`  Would skip (placeholder Owner):    ${placeholder.length} cases`);
+  console.log(`  Would skip (Contact not found):    ${noContact.length} cases`);
+  console.log(`  Would skip (Owner has no email):   ${noEmail.length} cases`);
   console.log();
 
   if (create.length) {
@@ -438,6 +475,19 @@ function renderReport(outcomes: Outcome[]) {
     console.log(`  ${"email".padEnd(42)} ${"current role".padEnd(13)} ${"status".padEnd(9)} cases`);
     for (const [email, u] of rows) {
       console.log(`  ${email.padEnd(42)} ${u.role.padEnd(13)} ${u.status.padEnd(9)} ${u.cases}`);
+    }
+    console.log();
+  }
+
+  if (placeholder.length) {
+    // Break down by which placeholder email so it's obvious which pattern
+    // is doing the skipping.
+    const byEmail = new Map<string, number>();
+    for (const o of placeholder) byEmail.set(o.email, (byEmail.get(o.email) ?? 0) + 1);
+    const rows = [...byEmail.entries()].sort((a, b) => b[1] - a[1]);
+    console.log(`Skipped — Owner is a placeholder / shared account (${placeholder.length}):`);
+    for (const [email, n] of rows) {
+      console.log(`  ${email.padEnd(42)} ${n} cases`);
     }
     console.log();
   }
