@@ -5,6 +5,135 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-11 — Auto-provisioned users leave no row in `user_audit_logs`
+
+**Filed:** 2026-09-29
+**Owner:** unassigned
+**Severity:** Medium — governance / accountability, not correctness. A
+regulated firm needs to answer "who created this account and when" for every
+row in `users`. Today that answer exists on `users.createdAt` alone, with no
+actor and no reason recorded anywhere queryable.
+
+### The shape
+
+Three code paths create users automatically (`backend/src/routes/cases.ts`):
+
+- L1511 — Task-owner auto-provision — `role: "CA_TEAM"`
+- L1615 — Paraplanner auto-provision from Contact — `role: "PARAPLANNER"`
+- L1674 — Adviser auto-provision from Contact — `role: "ADVISER"`
+
+Plus a fourth site introduced by the 2026-09-29 adviser backfill script
+(`backend/src/scripts/backfill-adviser-from-owner.ts`).
+
+None of them write to `user_audit_logs`. All three sync-path creations happen
+inside a request handler where `req.user!.id` is available, but that user id
+is not recorded against the auto-provisioned row anywhere. The backfill
+script explicitly noted the gap in its own commit body — hence this KI.
+
+The reason is a schema constraint: `UserAuditAction` enum
+(`prisma/schema.prisma:730`) has:
+
+```
+USER_PERMISSION_CHANGED
+USER_ROLE_CHANGED
+USER_STATUS_CHANGED
+```
+
+No `USER_CREATED`. There's no way to write a create event through the
+existing table without an enum extension.
+
+### Real prod count
+
+As of 2026-09-29, prod `users` has ~44 rows. An unknown fraction of those
+were auto-provisioned by the Task-owner / paraplanner sync paths since
+2026-06. The adviser backfill (once run) will auto-create up to 15 more.
+There is no queryable answer for "who created any of these rows".
+
+### Fix direction
+
+**1. Extend the enum in a single-line Prisma migration.**
+
+```prisma
+enum UserAuditAction {
+  USER_PERMISSION_CHANGED
+  USER_ROLE_CHANGED
+  USER_STATUS_CHANGED
+  USER_CREATED           // new
+}
+```
+
+Migration file adds one enum value — additive, cheap, safe under
+`prisma migrate deploy`.
+
+**2. Write `UserAuditLog` on every auto-provision site.**
+
+Each of the four create sites already knows what it needs — the caller id
+(`req.user!.id` on interactive paths, `'system-ai-bff'` on the backfill),
+plus the initial `role` and `status` the row is created with. Emit a single
+row per create:
+
+```ts
+await prisma.userAuditLog.create({
+  data: {
+    actorUserId: req.user!.id,           // or SYSTEM_USER_ID for scripts
+    targetUserId: created.id,
+    action: "USER_CREATED",
+    field: "role",                        // or "creation"
+    oldValue: null,
+    newValue: created.role,               // stringified for the schema
+    metadata: {
+      autoProvisioned: true,
+      source: "sync-from-zoho" | "task-owner" | "backfill-adviser-from-owner",
+      email: created.email,
+      status: created.status,
+    },
+  },
+});
+```
+
+Keep it best-effort behind a try/catch so an audit failure never rolls back
+the user creation (same pattern as the recording-watcher's audit).
+
+**3. Consider a shape refinement (optional).**
+
+The `field` + `oldValue` + `newValue` shape was designed for
+role/status/permission mutations — three attributes that individually change.
+"USER_CREATED" is a whole-row event, and stuffing `field="creation"` reads
+awkwardly. Two alternatives:
+
+- Keep the mutation-focused shape but relax it: on CREATE, write two rows
+  (one for `field=role`, one for `field=status`), each with `oldValue=null`.
+  Query "how was user X created" → filter on
+  `targetUserId=X AND action=USER_CREATED`, aggregate.
+- Or extend the schema with `oldValue: String?` (already nullable) and
+  `newValue: String?` (currently required — needs a migration to relax).
+  Then create-events can have both null and rely on `metadata` for detail.
+
+Direction (a) is the additive path — no schema change beyond the enum
+extension — and preserves the "one row per field-change" invariant. Ship
+that unless the frontend audit viewer breaks on two rows per event.
+
+### Retroactive backfill for existing rows?
+
+Not worth it. `users.createdAt` gives the timestamp; the *actor* has been
+lost for every historical creation. Writing backdated audit rows with
+`actorUserId = 'system-unknown'` would just be lossy documentation, not
+recovery. Live with the gap for pre-fix rows; fix forward.
+
+### Notes for whoever picks this up
+
+- Four call sites to update — three in `cases.ts` sync path, one in
+  `scripts/backfill-adviser-from-owner.ts`.
+- The frontend user-management audit viewer (if one exists — check
+  `frontend/src/components/admin/UserManagementPanel.tsx` for a history
+  drawer) needs to render `USER_CREATED` events; check whether it renders
+  unknown enum values gracefully or crashes.
+- Cross-refs: bundled with KI-04 (batch vs per-row audit granularity on AI
+  writes) — same "make internal state changes queryable by actor" hygiene.
+  Two different tables, same lesson.
+
+---
+
 ## KI-10 — Zoho Plans export fails on `Valuation` with more than 2 decimal places
 
 **Filed:** 2026-09-29
