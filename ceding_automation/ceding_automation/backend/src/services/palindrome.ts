@@ -1,33 +1,3 @@
-// backend/src/services/palindrome.ts
-// Submit a ceding provider call to Palindrome for transcription.
-//
-// ── How Palindrome actually works ─────────────────────────────────────────
-// It is NOT a request/response transcription API. The trigger endpoint takes
-// no request body at all:
-//
-//   POST {PALINDROME_API_URL}/api/v1/trigger/post-meeting-workflow
-//   X-API-Key: <key>
-//
-// That call means "wake up and sweep the Creator form you are bound to for
-// rows marked Ready For Processing". It is a poke, not a job submission.
-//
-// Three consequences drive the design of this file:
-//
-//   1. We must write our row into the SAME Creator form the org's meeting
-//      pipeline uses. The trigger is bound to that one form; rows on any
-//      other form are invisible to Palindrome.
-//   2. Palindrome reads the audio out of WorkDrive using its own service
-//      account, so the folder must be shared with that account BEFORE the
-//      row is enqueued — otherwise the sweep finds a row it cannot read.
-//   3. There is no callback. Completion is discovered by re-reading the
-//      Creator row (Processing Status / Palindrome Code) and by watching the
-//      summary folder for a new document.
-//
-// Ordering therefore matters and is enforced below: share → enqueue → poke.
-//
-// Reference: the org's Deluge function UploadMeetingInfoToCreator2, which
-// does the same four steps for Zoho Meeting recordings.
-
 import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
 import {
@@ -44,8 +14,7 @@ import { createRecordingLink, recordingLinkConfigError } from './recordingLinks'
 
 const prisma = new PrismaClient();
 
-// ── Config ────────────────────────────────────────────────────────────────
-// Read at call-time, not module-load, so .env edits apply without a rebuild.
+
 const apiUrl = () =>
   (process.env.PALINDROME_API_URL ?? 'https://client-service.prod.palindrome.co').replace(/\/+$/, '');
 const triggerPath = () =>
@@ -54,18 +23,11 @@ const apiKey = () => process.env.PALINDROME_API_KEY ?? '';
 const accessEmail = () =>
   process.env.PALINDROME_ACCESS_EMAIL ?? 'palindrome.access@furnleyhouse.co.uk';
 
-// The Creator form + report the meeting pipeline already uses. Overridable in
-// case the org ever gives ceding its own form AND Palindrome binds a workflow
-// to it — but the default is deliberately the shared one.
 const formLinkName = () =>
   process.env.ZOHO_CREATOR_FORM ?? 'Meeting_Recordings';
 const reportLinkName = () =>
   process.env.ZOHO_CREATOR_REPORT ?? 'All_Meeting_Recordings';
 
-// How long Palindrome's access to a case's recordings folder survives. The
-// meeting pipeline leaves its equivalent permanent (the expiration_date line
-// is commented out in the Deluge). Ceding sets one so client audio does not
-// stay reachable by an external processor indefinitely if cleanup is missed.
 const shareTtlDays = () => Number(process.env.PALINDROME_SHARE_TTL_DAYS ?? 7);
 
 export function isPalindromeConfigured(): boolean {
@@ -95,20 +57,6 @@ export class PalindromeTriggerError extends Error {
   }
 }
 
-// ── Folders ───────────────────────────────────────────────────────────────
-// Two subfolders inside the client's own WorkDrive folder
-// (Contact.Client_Record_Folder_ID — the same folder the Stage 9 checklist
-// export writes to):
-//
-//   <client record folder>/
-//     Ceding Call Recordings/     ← the MP3 the CA uploads
-//     Ceding Call Transcripts/    ← where Palindrome writes transcript_*.docx
-//
-// Keeping call audio and transcripts out of the client folder root matters
-// for two reasons: that root also holds checklist exports and client
-// documents, and the poller identifies Palindrome's output by filename — a
-// dedicated folder means far less to sift through and no chance of colliding
-// with an unrelated document.
 const RECORDINGS_FOLDER = 'Ceding Call Recordings';
 const TRANSCRIPTS_FOLDER = 'Ceding Call Transcripts';
 
@@ -118,11 +66,6 @@ export interface CaseFolders {
   clientFolderId: string;
 }
 
-/**
- * Resolve the client's WorkDrive folder and make sure both call subfolders
- * exist inside it. Idempotent — reuses the folders if they are already there,
- * so it is safe to call on every submission.
- */
 export async function ensureCaseCallFolders(
   clientZohoId: string | null,
   _caseRef: string,
@@ -139,15 +82,6 @@ export async function ensureCaseCallFolders(
   };
 }
 
-// ── Trigger ───────────────────────────────────────────────────────────────
-
-/**
- * Poke Palindrome to sweep the Creator form.
- *
- * Carries no body by design — see the header comment. Returns the raw
- * response so callers can log what came back; Palindrome's reply shape is not
- * contractually documented to us.
- */
 export async function triggerPalindromeWorkflow(): Promise<unknown> {
   if (!isPalindromeConfigured()) throw new PalindromeNotConfiguredError();
 
@@ -191,16 +125,6 @@ export interface SubmitCallArgs {
   recordingUrl?: string;
   recordingsFolderId: string;
   transcriptsFolderId: string;
-  /**
-   * Who made the call. Palindrome labels the adviser's turns in the
-   * transcript with this value, so it should be the person who was actually
-   * on the phone — normally the signed-in user submitting the recording,
-   * NOT the case's assigned owner. Those differ whenever one CA covers a
-   * colleague's case, and using the owner mislabels every line they speak.
-   *
-   * Falls back to the case's assigned user when no acting user is known
-   * (the folder watcher runs unattended).
-   */
   adviserEmail?: string;
 }
 
@@ -236,13 +160,6 @@ function splitName(full: string): { first_name: string; last_name: string } {
   return { first_name: parts[0], last_name: parts.slice(1).join(' ') };
 }
 
-/**
- * Share → enqueue → poke, in that order.
- *
- * The order is load-bearing. Palindrome's sweep can fire the moment the row
- * exists, so the folder share has to be in place first or the worker picks up
- * a row whose audio it cannot read and fails it.
- */
 export async function submitCallForTranscription(
   args: SubmitCallArgs,
 ): Promise<SubmitCallResult> {
@@ -280,19 +197,6 @@ export async function submitCallForTranscription(
         ...(expiresOn ? { expiresOnUtc: expiresOn } : {}),
       });
     } catch (err) {
-      // Best-effort, deliberately non-fatal. Two reasons:
-      //
-      //   1. Palindrome does NOT read the audio from this folder — it fetches
-      //      Meeting_Download_URL2 over HTTP. The share only matters so it can
-      //      WRITE its transcript back, and that grant is normally already in
-      //      place on the client folder.
-      //   2. The API user (itsupport@superbiagroup.co.uk) is Editor, not
-      //      Organizer, on these team folders, so POST /permissions answers
-      //      F7007 every time. Treating that as fatal would block every
-      //      submission for a grant we cannot make and usually do not need.
-      //
-      // If Palindrome later reports it cannot write output, this warning is
-      // the first place to look.
       const msg = (err as Error).message ?? '';
       const already =
         msg.includes('already') || msg.includes('ALREADY') || msg.includes('R016');
@@ -304,19 +208,6 @@ export async function submitCallForTranscription(
     }
   }
 
-  // ── 1b. The URL Palindrome will fetch ──────────────────────────────────
-  // Palindrome GETs this URL. It does NOT read the shared folder — proven
-  // when a run failed with "Failed to download file after 3 attempts:
-  // Redirect response '302'" after following a WorkDrive permalink to a
-  // login page.
-  //
-  // We cannot hand it a WorkDrive external link: the API user is Editor, not
-  // Organizer, so POST /links answers R008 under every payload and endpoint
-  // variant — and org policy disables public download links anyway. So the
-  // backend serves the audio itself, behind a signed expiring token.
-  //
-  // args.recordingUrl overrides this, which is how the manual-link test path
-  // works while the backend has no public address.
   let downloadUrl = args.recordingUrl ?? '';
   if (!downloadUrl) {
     const linkConfigError = recordingLinkConfigError();
@@ -336,9 +227,6 @@ export async function submitCallForTranscription(
     );
   }
 
-  // ── 2. Enqueue the row on the Creator form ─────────────────────────────
-  // Field link names match the org's existing Meeting_Recordings form, since
-  // that is the form the Palindrome trigger sweeps.
   const clientName = splitName(caseRecord.clientName);
   const label = [
     caseRecord.caseRef,
@@ -381,18 +269,6 @@ export async function submitCallForTranscription(
   };
 }
 
-/**
- * Stamp one of OUR Creator rows as finished.
- *
- * Palindrome does not reliably set processing_status — transcripts have been
- * written to WorkDrive while the row stayed on "Ready For Processing"
- * indefinitely. Since the shared report is what the org watches, a growing
- * column of apparently-stuck ceding jobs is misleading, so once the poller
- * has the transcript in hand it closes the row itself.
- *
- * Best-effort by design: the transcript is already safely in the database, so
- * a failure here is cosmetic and must never fail the ingestion.
- */
 export async function markCreatorRecordComplete(
   creatorRecordId: string,
   note?: string,
@@ -425,13 +301,6 @@ export interface PalindromeJobStatus {
   raw: unknown;
 }
 
-/**
- * Re-read the Creator row to see whether Palindrome has finished.
- *
- * Field names mirror the All Meeting Recordings report. We read defensively —
- * Creator returns display labels or link names depending on how the report is
- * configured, so each value is looked up under both spellings.
- */
 export async function getPalindromeJobStatus(
   creatorRecordId: string,
 ): Promise<PalindromeJobStatus> {

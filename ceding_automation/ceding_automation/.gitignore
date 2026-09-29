@@ -11,6 +11,11 @@ build/
 .env
 .env.local
 .env.*.local
+# Any copy of a .env is still a .env. A backup made before editing one
+# carries every secret the original does, and `.env` alone does not match it.
+.env.bak*
+.env.backup*
+*.env.bak
 
 # Prisma
 backend/prisma/migrations/*.sql
