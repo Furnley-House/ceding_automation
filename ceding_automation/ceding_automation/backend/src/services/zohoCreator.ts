@@ -19,7 +19,7 @@
 // those scopes were added will fail here with an OAUTH_SCOPE_MISMATCH.
 
 import axios from 'axios';
-import { getZohoAccessToken } from './zohoCrm';
+import { withZohoAuth } from './zohoCrm';
 
 // Read env at call-time so .env edits are picked up without a rebuild —
 // same convention as workdrive.ts.
@@ -113,31 +113,32 @@ export async function createCreatorRecord(
   formLinkName: string,
   data: Record<string, unknown>,
 ): Promise<CreateRecordResult> {
-  const token = await getZohoAccessToken();
   const url = `${creatorApiBase()}/data/${appOwner()}/${appName()}/form/${formLinkName}`;
 
   try {
-    const { data: body } = await axios.post(
-      url,
-      { data },
-      {
-        headers: {
-          Authorization: `Zoho-oauthtoken ${token}`,
-          'Content-Type': 'application/json',
-          // Same strict validation as the GET path — see getCreatorRecords.
-          Accept: 'application/json',
+    return await withZohoAuth(async (token) => {
+      const { data: body } = await axios.post(
+        url,
+        { data },
+        {
+          headers: {
+            Authorization: `Zoho-oauthtoken ${token}`,
+            'Content-Type': 'application/json',
+            // Same strict validation as the GET path — see getCreatorRecords.
+            Accept: 'application/json',
+          },
+          timeout: 20_000,
         },
-        timeout: 20_000,
-      },
-    );
+      );
 
-    assertCreatorOk(body, 'Record create');
+      assertCreatorOk(body, 'Record create');
 
-    // Creator v2.1 replies { code, data: { ID }, message } on success.
-    const inner = (body as { data?: Record<string, unknown> })?.data;
-    const recordId =
-      (inner?.ID as string | undefined) ?? (inner?.id as string | undefined) ?? null;
-    return { recordId, raw: body };
+      // Creator v2.1 replies { code, data: { ID }, message } on success.
+      const inner = (body as { data?: Record<string, unknown> })?.data;
+      const recordId =
+        (inner?.ID as string | undefined) ?? (inner?.id as string | undefined) ?? null;
+      return { recordId, raw: body };
+    });
   } catch (err) {
     mapCreatorError(err);
   }
@@ -162,7 +163,6 @@ export async function getCreatorRecords(
   criteria?: string,
   limit = 20,
 ): Promise<CreatorRecord[]> {
-  const token = await getZohoAccessToken();
   const url = `${creatorApiBase()}/data/${appOwner()}/${appName()}/report/${reportLinkName}`;
 
   // Creator rejects anything other than 200 / 500 / 1000 here with code 9250 —
@@ -171,25 +171,27 @@ export async function getCreatorRecords(
   const maxRecords = limit <= 200 ? 200 : limit <= 500 ? 500 : 1000;
 
   try {
-    const { data: body } = await axios.get(url, {
-      headers: {
-        Authorization: `Zoho-oauthtoken ${token}`,
-        // Creator validates this header strictly and accepts only
-        // "application/json" or "text/csv" (code 9210). Axios would
-        // otherwise send "application/json, text/plain, */*" and be refused.
-        Accept: 'application/json',
-      },
-      params: {
-        ...(criteria ? { criteria } : {}),
-        max_records: maxRecords,
-      },
-      timeout: 20_000,
-    });
+    return await withZohoAuth(async (token) => {
+      const { data: body } = await axios.get(url, {
+        headers: {
+          Authorization: `Zoho-oauthtoken ${token}`,
+          // Creator validates this header strictly and accepts only
+          // "application/json" or "text/csv" (code 9210). Axios would
+          // otherwise send "application/json, text/plain, */*" and be refused.
+          Accept: 'application/json',
+        },
+        params: {
+          ...(criteria ? { criteria } : {}),
+          max_records: maxRecords,
+        },
+        timeout: 20_000,
+      });
 
-    const rows = ((body as { data?: unknown[] })?.data ?? []) as Array<Record<string, unknown>>;
-    return rows
-      .slice(0, limit)
-      .map((r) => ({ ...r, id: String(r.ID ?? r.id ?? '') }));
+      const rows = ((body as { data?: unknown[] })?.data ?? []) as Array<Record<string, unknown>>;
+      return rows
+        .slice(0, limit)
+        .map((r) => ({ ...r, id: String(r.ID ?? r.id ?? '') }));
+    });
   } catch (err) {
     // "No rows matched" is not a failure — a poller asking about a record
     // that has been deleted, or a criteria that matches nothing, should get
@@ -231,24 +233,25 @@ export async function updateCreatorRecord(
   recordId: string,
   data: Record<string, unknown>,
 ): Promise<unknown> {
-  const token = await getZohoAccessToken();
   const url = `${creatorApiBase()}/data/${appOwner()}/${appName()}/report/${reportLinkName}/${recordId}`;
 
   try {
-    const { data: body } = await axios.patch(
-      url,
-      { data },
-      {
-        headers: {
-          Authorization: `Zoho-oauthtoken ${token}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
+    return await withZohoAuth(async (token) => {
+      const { data: body } = await axios.patch(
+        url,
+        { data },
+        {
+          headers: {
+            Authorization: `Zoho-oauthtoken ${token}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          timeout: 20_000,
         },
-        timeout: 20_000,
-      },
-    );
-    assertCreatorOk(body, 'Record update');
-    return body;
+      );
+      assertCreatorOk(body, 'Record update');
+      return body;
+    });
   } catch (err) {
     mapCreatorError(err);
   }

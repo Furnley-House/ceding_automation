@@ -2,7 +2,7 @@
 // Upload files (call recordings, transcripts, generated PDFs) to Zoho WorkDrive.
 import axios from 'axios';
 import FormData from 'form-data';
-import { getZohoAccessToken, getContactRecord, extractContactWorkDriveFolderId } from './zohoCrm';
+import { getContactRecord, extractContactWorkDriveFolderId, withZohoAuth } from './zohoCrm';
 
 // Read env at call-time, not module-load, so .env edits are picked up without rebuilding
 const workdriveApiBase = () => process.env.ZOHO_WORKDRIVE_API_BASE ?? 'https://www.zohoapis.eu/workdrive/api/v1';
@@ -166,11 +166,13 @@ export async function listWorkDriveFiles(
   }
   const extensions = (options.extensions ?? ['mp3']).map((e) => e.toLowerCase().replace(/^\./, ''));
 
-  const token = await getZohoAccessToken();
-  const { data } = await axios.get(
-    `${workdriveApiBase()}/files/${parentId}/files`,
-    { headers: { Authorization: `Zoho-oauthtoken ${token}` } }
-  );
+  const data = await withZohoAuth(async (token) => {
+    const resp = await axios.get(
+      `${workdriveApiBase()}/files/${parentId}/files`,
+      { headers: { Authorization: `Zoho-oauthtoken ${token}` } }
+    );
+    return resp.data;
+  });
   const items = ((data as { data?: Array<Record<string, unknown>> }).data ?? []);
   const mapped = items.map((it) => {
     const attrs = (it.attributes as Record<string, unknown>) ?? {};
@@ -215,19 +217,21 @@ export async function createWorkDriveFolder(
   parentFolderId: string,
   folderName: string,
 ): Promise<{ id: string; name: string }> {
-  const token = await getZohoAccessToken();
   const body = {
     data: {
       attributes: { name: folderName, parent_id: parentFolderId },
       type: 'files',
     },
   };
-  const { data } = await axios.post(`${workdriveApiBase()}/files`, body, {
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      Accept: 'application/vnd.api+json',
-      'Content-Type': 'application/json',
-    },
+  const data = await withZohoAuth(async (token) => {
+    const resp = await axios.post(`${workdriveApiBase()}/files`, body, {
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        Accept: 'application/vnd.api+json',
+        'Content-Type': 'application/json',
+      },
+    });
+    return resp.data;
   });
   // WorkDrive is inconsistent about the create response: sometimes
   // { data: [ { id, attributes } ] }, sometimes { data: { id, attributes } }.
@@ -250,11 +254,13 @@ export async function ensureWorkDriveFolder(
   parentFolderId: string,
   folderName: string,
 ): Promise<{ id: string; name: string; created: boolean }> {
-  const token = await getZohoAccessToken();
-  const { data } = await axios.get(
-    `${workdriveApiBase()}/files/${parentFolderId}/files`,
-    { headers: { Authorization: `Zoho-oauthtoken ${token}` } },
-  );
+  const data = await withZohoAuth(async (token) => {
+    const resp = await axios.get(
+      `${workdriveApiBase()}/files/${parentFolderId}/files`,
+      { headers: { Authorization: `Zoho-oauthtoken ${token}` } },
+    );
+    return resp.data;
+  });
   const items = ((data as { data?: Array<Record<string, unknown>> }).data ?? []);
   for (const it of items) {
     const attrs = (it.attributes as Record<string, unknown>) ?? {};
@@ -275,11 +281,14 @@ export async function ensureWorkDriveFolder(
   // means Palindrome cannot write the transcript back — and it would only
   // ever bite on the FIRST submission for a client, because every later call
   // finds the folder by listing above and works fine.
-  const recheck = await axios.get(
-    `${workdriveApiBase()}/files/${parentFolderId}/files`,
-    { headers: { Authorization: `Zoho-oauthtoken ${await getZohoAccessToken()}` } },
-  );
-  const recheckItems = ((recheck.data as { data?: Array<Record<string, unknown>> }).data ?? []);
+  const recheckData = await withZohoAuth(async (token) => {
+    const resp = await axios.get(
+      `${workdriveApiBase()}/files/${parentFolderId}/files`,
+      { headers: { Authorization: `Zoho-oauthtoken ${token}` } },
+    );
+    return resp.data;
+  });
+  const recheckItems = ((recheckData as { data?: Array<Record<string, unknown>> }).data ?? []);
   for (const it of recheckItems) {
     const attrs = (it.attributes as Record<string, unknown>) ?? {};
     if (String(attrs.name ?? '') === folderName) {
@@ -313,7 +322,6 @@ export interface ShareWorkDriveResourceArgs {
 export async function shareWorkDriveResource(
   args: ShareWorkDriveResourceArgs,
 ): Promise<Record<string, unknown>> {
-  const token = await getZohoAccessToken();
   const attributes: Record<string, unknown> = {
     resource_id: args.resourceId,
     shared_type: 'personal',
@@ -325,29 +333,33 @@ export async function shareWorkDriveResource(
 
   const body = { data: { attributes, type: 'permissions' } };
 
-  const { data } = await axios.post(`${workdriveApiBase()}/permissions`, body, {
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      Accept: 'application/vnd.api+json',
-      'Content-Type': 'application/json',
-    },
+  const data = await withZohoAuth(async (token) => {
+    const resp = await axios.post(`${workdriveApiBase()}/permissions`, body, {
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        Accept: 'application/vnd.api+json',
+        'Content-Type': 'application/json',
+      },
+    });
+    return resp.data;
   });
   return data as Record<string, unknown>;
 }
 
 // Download a WorkDrive file's binary content (used for streaming or transcription).
 export async function downloadWorkDriveFile(fileId: string): Promise<{ buffer: Buffer; contentType: string; filename?: string }> {
-  const token = await getZohoAccessToken();
-  const resp = await axios.get(
-    `${workdriveApiBase()}/download/${fileId}`,
-    { headers: { Authorization: `Zoho-oauthtoken ${token}` }, responseType: 'arraybuffer' }
-  );
-  const headers = resp.headers as Record<string, string>;
-  return {
-    buffer: Buffer.from(resp.data as ArrayBuffer),
-    contentType: headers['content-type'] ?? 'audio/mpeg',
-    filename: headers['content-disposition'],
-  };
+  return withZohoAuth(async (token) => {
+    const resp = await axios.get(
+      `${workdriveApiBase()}/download/${fileId}`,
+      { headers: { Authorization: `Zoho-oauthtoken ${token}` }, responseType: 'arraybuffer' }
+    );
+    const headers = resp.headers as Record<string, string>;
+    return {
+      buffer: Buffer.from(resp.data as ArrayBuffer),
+      contentType: headers['content-type'] ?? 'audio/mpeg',
+      filename: headers['content-disposition'],
+    };
+  });
 }
 
 export async function uploadToWorkDrive(
@@ -361,26 +373,27 @@ export async function uploadToWorkDrive(
     throw new Error('No WorkDrive folder ID supplied and ZOHO_WORKDRIVE_FOLDER_ID env fallback not configured');
   }
 
-  const token = await getZohoAccessToken();
-
   const form = new FormData();
   form.append('content', buffer, { filename: fileName, contentType });
   form.append('parent_id', parentId);
   form.append('filename', fileName);
   form.append('override-name-exist', 'true');
 
-  const { data } = await axios.post(
-    `${workdriveApiBase()}/upload`,
-    form,
-    {
-      headers: {
-        Authorization: `Zoho-oauthtoken ${token}`,
-        ...form.getHeaders(),
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-    }
-  );
+  const data = await withZohoAuth(async (token) => {
+    const resp = await axios.post(
+      `${workdriveApiBase()}/upload`,
+      form,
+      {
+        headers: {
+          Authorization: `Zoho-oauthtoken ${token}`,
+          ...form.getHeaders(),
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+      }
+    );
+    return resp.data;
+  });
 
   // WorkDrive returns {data: [{attributes: {resource_id, name, permalink, ...}}]}
   const first = (data as { data?: Array<Record<string, unknown>> })?.data?.[0];

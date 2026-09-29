@@ -49,6 +49,52 @@ async function getAccessToken(): Promise<string> {
   return cache.accessToken;
 }
 
+// ── Auth retry (KI-13) ─────────────────────────────────────────────
+// The `cache` above trusts its own expiresAt clock. If Zoho invalidates a
+// still-cached token (concurrent refresh from another process, scope change,
+// admin action), every subsequent call within that window reuses the rejected
+// token and gets 401 back. Recovery would otherwise only happen when the
+// cache naturally expires — 30+ minutes of continuous failures.
+//
+// withZohoAuth wraps a single Zoho API call. On 401, it invalidates the
+// cache, forces a fresh access token, and retries once. A persistent 401 —
+// a real credential problem — propagates on the second attempt so we don't
+// burn API calls in a loop.
+//
+// Applied centrally so both surfaces — axios (WorkDrive, Creator) which
+// throws on non-2xx, and fetch (CRM) which does not — get the same
+// treatment. fetch callers must explicitly throw ZohoAuthError on
+// res.status === 401 for the wrapper to catch it; axios errors are matched
+// by their .response.status shape.
+
+/** Thrown by fetch-based callers when the response is 401, so the wrapper
+ *  can catch the same shape regardless of transport. */
+export class ZohoAuthError extends Error {
+  constructor() {
+    super('Zoho returned 401');
+    this.name = 'ZohoAuthError';
+  }
+}
+
+function is401(err: unknown): boolean {
+  if (err instanceof ZohoAuthError) return true;
+  if (typeof err !== 'object' || err === null) return false;
+  const anyErr = err as { isAxiosError?: boolean; response?: { status?: number } };
+  return Boolean(anyErr.isAxiosError && anyErr.response?.status === 401);
+}
+
+export async function withZohoAuth<T>(fn: (token: string) => Promise<T>): Promise<T> {
+  const token = await getAccessToken();
+  try {
+    return await fn(token);
+  } catch (err) {
+    if (!is401(err)) throw err;
+    cache = null;
+    const freshToken = await getAccessToken();
+    return await fn(freshToken);
+  }
+}
+
 export function buildAuthorizeUrl(redirectUri: string): string {
   const params = new URLSearchParams({
     // Scopes:
@@ -104,30 +150,36 @@ export async function exchangeCodeForTokens(
 }
 
 export async function listTasks(page = 1, perPage = 200): Promise<unknown> {
-  const token = await getAccessToken();
-  const res = await fetch(`${apiBase()}/Tasks?page=${page}&per_page=${perPage}`, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  return withZohoAuth(async (token) => {
+    const res = await fetch(`${apiBase()}/Tasks?page=${page}&per_page=${perPage}`, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    return res.json();
   });
-  return res.json();
 }
 
 export async function getTask(taskId: string): Promise<unknown> {
-  const token = await getAccessToken();
-  const res = await fetch(`${apiBase()}/Tasks/${taskId}`, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  return withZohoAuth(async (token) => {
+    const res = await fetch(`${apiBase()}/Tasks/${taskId}`, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    return res.json();
   });
-  return res.json();
 }
 
 export async function getContact(contactId: string): Promise<unknown> {
-  const token = await getAccessToken();
-  const res = await fetch(`${apiBase()}/Contacts/${contactId}`, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  return withZohoAuth(async (token) => {
+    const res = await fetch(`${apiBase()}/Contacts/${contactId}`, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    if (!res.ok) {
+      throw new Error(`Zoho Contacts/${contactId} returned ${res.status}: ${await res.text()}`);
+    }
+    return res.json();
   });
-  if (!res.ok) {
-    throw new Error(`Zoho Contacts/${contactId} returned ${res.status}: ${await res.text()}`);
-  }
-  return res.json();
 }
 
 // ── Contact record access ───────────────────────────────────
@@ -265,29 +317,33 @@ export async function updateTask(
   taskId: string,
   fields: Record<string, unknown>
 ): Promise<unknown> {
-  const token = await getAccessToken();
-  const res = await fetch(`${apiBase()}/Tasks/${taskId}`, {
-    method: 'PUT',
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ data: [{ id: taskId, ...fields }] }),
+  return withZohoAuth(async (token) => {
+    const res = await fetch(`${apiBase()}/Tasks/${taskId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ data: [{ id: taskId, ...fields }] }),
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    return res.json();
   });
-  return res.json();
 }
 
 export async function createTask(fields: Record<string, unknown>): Promise<unknown> {
-  const token = await getAccessToken();
-  const res = await fetch(`${apiBase()}/Tasks`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ data: [fields] }),
+  return withZohoAuth(async (token) => {
+    const res = await fetch(`${apiBase()}/Tasks`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ data: [fields] }),
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    return res.json();
   });
-  return res.json();
 }
 
 // ── Custom Plans module updates ─────────────────────────────
@@ -323,25 +379,27 @@ export async function updatePlanRecord(
   planRecordId: string,
   fields: Record<string, unknown>,
 ): Promise<unknown> {
-  const token = await getAccessToken();
-  const url = `${apiBase()}/${planModuleName()}/${encodeURIComponent(planRecordId)}`;
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ data: [{ id: planRecordId, ...fields }] }),
+  return withZohoAuth(async (token) => {
+    const url = `${apiBase()}/${planModuleName()}/${encodeURIComponent(planRecordId)}`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ data: [{ id: planRecordId, ...fields }] }),
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    const body = await res.text();
+    if (!res.ok) {
+      throw new Error(`Zoho ${planModuleName()}/${planRecordId} PUT failed (${res.status}): ${body}`);
+    }
+    try {
+      return JSON.parse(body);
+    } catch {
+      return { raw: body };
+    }
   });
-  const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`Zoho ${planModuleName()}/${planRecordId} PUT failed (${res.status}): ${body}`);
-  }
-  try {
-    return JSON.parse(body);
-  } catch {
-    return { raw: body };
-  }
 }
 
 // Search the Plans module for a record whose Policy_Ref matches. Used when
@@ -353,22 +411,24 @@ export async function findPlanRecordByPolicyRef(
   policyRef: string,
 ): Promise<{ id: string; record: Record<string, unknown> } | null> {
   if (!policyRef || !policyRef.trim()) return null;
-  const token = await getAccessToken();
-  const criteria = `(Policy_Ref:equals:${policyRef.trim()})`;
-  const url = `${apiBase()}/${planModuleName()}/search?criteria=${encodeURIComponent(criteria)}`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  return withZohoAuth(async (token) => {
+    const criteria = `(Policy_Ref:equals:${policyRef.trim()})`;
+    const url = `${apiBase()}/${planModuleName()}/search?criteria=${encodeURIComponent(criteria)}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    if (res.status === 204) return null; // Zoho convention: no match
+    const body = await res.text();
+    if (!res.ok) {
+      throw new Error(`Zoho ${planModuleName()} search failed (${res.status}): ${body}`);
+    }
+    const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
+    const matches = parsed.data ?? [];
+    if (matches.length !== 1) return null; // ambiguous or no match → require manual resolution
+    const rec = matches[0];
+    return { id: rec.id as string, record: rec };
   });
-  if (res.status === 204) return null; // Zoho convention: no match
-  const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`Zoho ${planModuleName()} search failed (${res.status}): ${body}`);
-  }
-  const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
-  const matches = parsed.data ?? [];
-  if (matches.length !== 1) return null; // ambiguous or no match → require manual resolution
-  const rec = matches[0];
-  return { id: rec.id as string, record: rec };
 }
 
 // Search the Plans module by record Name (e.g. "Plan127724" — an
@@ -380,21 +440,23 @@ export async function findPlanRecordByName(
   planName: string,
 ): Promise<{ id: string; record: Record<string, unknown> } | null> {
   if (!planName || !planName.trim()) return null;
-  const token = await getAccessToken();
-  const criteria = `(Name:equals:${planName.trim()})`;
-  const url = `${apiBase()}/${planModuleName()}/search?criteria=${encodeURIComponent(criteria)}`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  return withZohoAuth(async (token) => {
+    const criteria = `(Name:equals:${planName.trim()})`;
+    const url = `${apiBase()}/${planModuleName()}/search?criteria=${encodeURIComponent(criteria)}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    if (res.status === 204) return null;
+    const body = await res.text();
+    if (!res.ok) {
+      throw new Error(`Zoho ${planModuleName()} name search failed (${res.status}): ${body}`);
+    }
+    const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
+    const matches = parsed.data ?? [];
+    if (matches.length !== 1) return null;
+    return { id: matches[0].id as string, record: matches[0] };
   });
-  if (res.status === 204) return null;
-  const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`Zoho ${planModuleName()} name search failed (${res.status}): ${body}`);
-  }
-  const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
-  const matches = parsed.data ?? [];
-  if (matches.length !== 1) return null;
-  return { id: matches[0].id as string, record: matches[0] };
 }
 
 // Multi-result Plans search by Policy_Ref starts-with. Used by the D4
@@ -415,31 +477,33 @@ export async function searchPlansByPolicyRefStartsWith(
 ): Promise<PlanSearchHit[]> {
   const trimmed = q.trim();
   if (!trimmed) return [];
-  const token = await getAccessToken();
-  // Zoho CRM v6 doesn't support `starts_with` on all field types; Policy_Ref
-  // is a Single Line and supports `starts_with`. `equals` is the safe fallback
-  // if your CRM rejects the operator (catch the 400 and retry).
-  const criteria = `(Policy_Ref:starts_with:${trimmed})`;
-  const url = `${apiBase()}/${planModuleName()}/search?criteria=${encodeURIComponent(criteria)}&per_page=${Math.min(
-    limit,
-    200,
-  )}`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  return withZohoAuth(async (token) => {
+    // Zoho CRM v6 doesn't support `starts_with` on all field types; Policy_Ref
+    // is a Single Line and supports `starts_with`. `equals` is the safe fallback
+    // if your CRM rejects the operator (catch the 400 and retry).
+    const criteria = `(Policy_Ref:starts_with:${trimmed})`;
+    const url = `${apiBase()}/${planModuleName()}/search?criteria=${encodeURIComponent(criteria)}&per_page=${Math.min(
+      limit,
+      200,
+    )}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    if (res.status === 204) return [];
+    const body = await res.text();
+    if (!res.ok) {
+      throw new Error(`Zoho ${planModuleName()} search failed (${res.status}): ${body}`);
+    }
+    const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
+    const rows = parsed.data ?? [];
+    return rows.slice(0, limit).map((r) => ({
+      id: String(r.id ?? ""),
+      name: typeof r.Name === "string" ? r.Name : null,
+      policyRef: typeof r.Policy_Ref === "string" ? r.Policy_Ref : null,
+      planType: typeof r.Plan_Type === "string" ? r.Plan_Type : null,
+    }));
   });
-  if (res.status === 204) return [];
-  const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`Zoho ${planModuleName()} search failed (${res.status}): ${body}`);
-  }
-  const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
-  const rows = parsed.data ?? [];
-  return rows.slice(0, limit).map((r) => ({
-    id: String(r.id ?? ""),
-    name: typeof r.Name === "string" ? r.Name : null,
-    policyRef: typeof r.Policy_Ref === "string" ? r.Policy_Ref : null,
-    planType: typeof r.Plan_Type === "string" ? r.Plan_Type : null,
-  }));
 }
 
 // Create a new Plans record in Zoho. Used by the D4 "Create new in Zoho"
@@ -452,28 +516,31 @@ export async function searchPlansByPolicyRefStartsWith(
 export async function createPlanRecord(
   fields: Record<string, unknown>,
 ): Promise<{ id: string; name: string | null }> {
-  const token = await getAccessToken();
-  const url = `${apiBase()}/${planModuleName()}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ data: [fields] }),
+  const newId = await withZohoAuth(async (token) => {
+    const url = `${apiBase()}/${planModuleName()}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ data: [fields] }),
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    const body = await res.text();
+    if (!res.ok) {
+      throw new Error(`Zoho ${planModuleName()} POST failed (${res.status}): ${body}`);
+    }
+    const parsed = JSON.parse(body) as { data?: Array<{ details?: { id?: string }; status?: string; message?: string }> };
+    const first = parsed.data?.[0];
+    if (!first || first.status !== "success" || !first.details?.id) {
+      throw new Error(`Zoho ${planModuleName()} POST returned non-success: ${body}`);
+    }
+    return first.details.id;
   });
-  const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`Zoho ${planModuleName()} POST failed (${res.status}): ${body}`);
-  }
-  const parsed = JSON.parse(body) as { data?: Array<{ details?: { id?: string }; status?: string; message?: string }> };
-  const first = parsed.data?.[0];
-  if (!first || first.status !== "success" || !first.details?.id) {
-    throw new Error(`Zoho ${planModuleName()} POST returned non-success: ${body}`);
-  }
-  const newId = first.details.id;
   // Zoho's create response doesn't include Name — fetch the new record to
   // capture the auto-generated Plan Name (e.g. "Plan119576") for caching.
+  // findPlanRecordById is itself wrapped in withZohoAuth so no need to nest.
   let name: string | null = null;
   try {
     const fetched = await findPlanRecordById(newId);
@@ -496,64 +563,68 @@ export async function createPlansXClientsLinks(
   const ids = clientOwnerIds.filter((id) => typeof id === "string" && id.trim().length > 0);
   if (ids.length === 0) return { created: 0, errors: [] };
 
-  const token = await getAccessToken();
-  const url = `${apiBase()}/${plansXClientsModuleName()}`;
-  const rows = ids.map((clientId) => ({
-    Plans: planRecordId,
-    Client_Owners: clientId,
-  }));
+  return withZohoAuth(async (token) => {
+    const url = `${apiBase()}/${plansXClientsModuleName()}`;
+    const rows = ids.map((clientId) => ({
+      Plans: planRecordId,
+      Client_Owners: clientId,
+    }));
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ data: rows }),
-  });
-  const body = await res.text();
-  if (!res.ok) {
-    return { created: 0, errors: [`POST ${plansXClientsModuleName()} failed (${res.status}): ${body}`] };
-  }
-  const parsed = JSON.parse(body) as {
-    data?: Array<{ status?: string; message?: string; details?: { id?: string } }>;
-  };
-  let created = 0;
-  const errors: string[] = [];
-  (parsed.data ?? []).forEach((row, i) => {
-    if (row.status === "success" && row.details?.id) {
-      created++;
-    } else {
-      errors.push(`row ${i} (client ${ids[i]}): ${row.message ?? "unknown error"}`);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ data: rows }),
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    const body = await res.text();
+    if (!res.ok) {
+      return { created: 0, errors: [`POST ${plansXClientsModuleName()} failed (${res.status}): ${body}`] };
     }
+    const parsed = JSON.parse(body) as {
+      data?: Array<{ status?: string; message?: string; details?: { id?: string } }>;
+    };
+    let created = 0;
+    const errors: string[] = [];
+    (parsed.data ?? []).forEach((row, i) => {
+      if (row.status === "success" && row.details?.id) {
+        created++;
+      } else {
+        errors.push(`row ${i} (client ${ids[i]}): ${row.message ?? "unknown error"}`);
+      }
+    });
+    return { created, errors };
   });
-  return { created, errors };
 }
 
 // Link a Zoho Task to a Plans record by setting What_Id + $se_module.
 // Both fields are required by the CRM API — `What_Id` alone is rejected.
 export async function linkTaskToPlan(taskId: string, planRecordId: string): Promise<void> {
-  const token = await getAccessToken();
-  const res = await fetch(`${apiBase()}/Tasks/${taskId}`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      data: [
-        {
-          id: taskId,
-          What_Id: planRecordId,
-          $se_module: planModuleName(),
-        },
-      ],
-    }),
+  await withZohoAuth(async (token) => {
+    const res = await fetch(`${apiBase()}/Tasks/${taskId}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        data: [
+          {
+            id: taskId,
+            What_Id: planRecordId,
+            $se_module: planModuleName(),
+          },
+        ],
+      }),
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    const body = await res.text();
+    if (!res.ok) {
+      throw new Error(`Zoho Tasks/${taskId} What_Id update failed (${res.status}): ${body}`);
+    }
   });
-  const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`Zoho Tasks/${taskId} What_Id update failed (${res.status}): ${body}`);
-  }
 }
 
 // Fetch a single Plans record by id. Used by the case-sync to backfill
@@ -563,20 +634,22 @@ export async function findPlanRecordById(
   recordId: string,
 ): Promise<{ id: string; record: Record<string, unknown> } | null> {
   if (!recordId || !recordId.trim()) return null;
-  const token = await getAccessToken();
-  const url = `${apiBase()}/${planModuleName()}/${encodeURIComponent(recordId.trim())}`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  return withZohoAuth(async (token) => {
+    const url = `${apiBase()}/${planModuleName()}/${encodeURIComponent(recordId.trim())}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    if (res.status === 204 || res.status === 404) return null;
+    const body = await res.text();
+    if (!res.ok) {
+      throw new Error(`Zoho ${planModuleName()} get failed (${res.status}): ${body}`);
+    }
+    const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
+    const rec = parsed.data?.[0];
+    if (!rec) return null;
+    return { id: rec.id as string, record: rec };
   });
-  if (res.status === 204 || res.status === 404) return null;
-  const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`Zoho ${planModuleName()} get failed (${res.status}): ${body}`);
-  }
-  const parsed = JSON.parse(body) as { data?: Array<Record<string, unknown>> };
-  const rec = parsed.data?.[0];
-  if (!rec) return null;
-  return { id: rec.id as string, record: rec };
 }
 
 // Providers custom module — same pattern as Plans. Searches by the standard
@@ -605,33 +678,35 @@ export async function findProviderRecordByName(
   providerName: string,
 ): Promise<{ id: string; record: Record<string, unknown> } | null> {
   if (!providerName || !providerName.trim()) return null;
-  const token = await getAccessToken();
-  const trimmed = providerName.trim();
-  const headers = { Authorization: `Zoho-oauthtoken ${token}` };
+  return withZohoAuth(async (token) => {
+    const trimmed = providerName.trim();
+    const headers = { Authorization: `Zoho-oauthtoken ${token}` };
 
-  // 1. Exact match first — the cheapest, most precise.
-  const searchOnce = async (criteria: string) => {
-    const url = `${apiBase()}/${providerModuleName()}/search?criteria=${encodeURIComponent(criteria)}`;
-    const res = await fetch(url, { headers });
-    if (res.status === 204) return [] as Array<Record<string, unknown>>;
-    const body = await res.text();
-    if (!res.ok) {
-      throw new Error(`Zoho ${providerModuleName()} search failed (${res.status}): ${body}`);
-    }
-    return (JSON.parse(body) as { data?: Array<Record<string, unknown>> }).data ?? [];
-  };
+    // 1. Exact match first — the cheapest, most precise.
+    const searchOnce = async (criteria: string) => {
+      const url = `${apiBase()}/${providerModuleName()}/search?criteria=${encodeURIComponent(criteria)}`;
+      const res = await fetch(url, { headers });
+      if (res.status === 401) throw new ZohoAuthError();
+      if (res.status === 204) return [] as Array<Record<string, unknown>>;
+      const body = await res.text();
+      if (!res.ok) {
+        throw new Error(`Zoho ${providerModuleName()} search failed (${res.status}): ${body}`);
+      }
+      return (JSON.parse(body) as { data?: Array<Record<string, unknown>> }).data ?? [];
+    };
 
-  const exact = await searchOnce(`(${providerNameField()}:equals:${trimmed})`);
-  if (exact.length === 1) return { id: exact[0].id as string, record: exact[0] };
-  // Multiple exact matches: ambiguous → fail rather than guess.
-  if (exact.length > 1) return null;
+    const exact = await searchOnce(`(${providerNameField()}:equals:${trimmed})`);
+    if (exact.length === 1) return { id: exact[0].id as string, record: exact[0] };
+    // Multiple exact matches: ambiguous → fail rather than guess.
+    if (exact.length > 1) return null;
 
-  // 2. No exact match — try starts_with so "Aviva" finds "Aviva Life & Pensions".
-  const partial = await searchOnce(`(${providerNameField()}:starts_with:${trimmed})`);
-  if (partial.length === 1) return { id: partial[0].id as string, record: partial[0] };
+    // 2. No exact match — try starts_with so "Aviva" finds "Aviva Life & Pensions".
+    const partial = await searchOnce(`(${providerNameField()}:starts_with:${trimmed})`);
+    if (partial.length === 1) return { id: partial[0].id as string, record: partial[0] };
 
-  // 3. Still ambiguous or empty — give up to avoid guessing.
-  return null;
+    // 3. Still ambiguous or empty — give up to avoid guessing.
+    return null;
+  });
 }
 
 // ── Users — email → Zoho user id resolution ─────────────────
@@ -650,19 +725,22 @@ const USER_CACHE_TTL_MS = 60 * 60 * 1000;
 
 async function loadUserCache(): Promise<Map<string, ZohoUser>> {
   if (userCache && Date.now() < userCache.expiresAt) return userCache.byEmail;
-  const token = await getAccessToken();
-  const url = `${apiBase()}/users?type=AllUsers&per_page=200`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  const byEmail = await withZohoAuth(async (token) => {
+    const url = `${apiBase()}/users?type=AllUsers&per_page=200`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    });
+    if (res.status === 401) throw new ZohoAuthError();
+    if (!res.ok) {
+      throw new Error(`Zoho users list failed (${res.status}): ${await res.text()}`);
+    }
+    const body = (await res.json()) as { users?: ZohoUser[] };
+    const map = new Map<string, ZohoUser>();
+    for (const u of body.users ?? []) {
+      if (u.email) map.set(u.email.toLowerCase(), u);
+    }
+    return map;
   });
-  if (!res.ok) {
-    throw new Error(`Zoho users list failed (${res.status}): ${await res.text()}`);
-  }
-  const body = (await res.json()) as { users?: ZohoUser[] };
-  const byEmail = new Map<string, ZohoUser>();
-  for (const u of body.users ?? []) {
-    if (u.email) byEmail.set(u.email.toLowerCase(), u);
-  }
   userCache = { byEmail, expiresAt: Date.now() + USER_CACHE_TTL_MS };
   return byEmail;
 }
