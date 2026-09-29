@@ -379,20 +379,42 @@ export async function uploadToWorkDrive(
   form.append('filename', fileName);
   form.append('override-name-exist', 'true');
 
+  // 90s timeout. Container Apps ingress caps the outer request at 240s;
+  // this leaves headroom for the earlier RC download + the Creator/Palindrome
+  // trigger steps. A 6 MB voice recording finishes far inside this window on
+  // any healthy WorkDrive tenant — hitting 90s means WorkDrive is rate-
+  // limiting us, dropping connections under concurrent load, or a real
+  // network problem, and the socket-hang-up error that would otherwise
+  // surface is not useful to whoever's debugging.
   const data = await withZohoAuth(async (token) => {
-    const resp = await axios.post(
-      `${workdriveApiBase()}/upload`,
-      form,
-      {
-        headers: {
-          Authorization: `Zoho-oauthtoken ${token}`,
-          ...form.getHeaders(),
-        },
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
+    try {
+      const resp = await axios.post(
+        `${workdriveApiBase()}/upload`,
+        form,
+        {
+          headers: {
+            Authorization: `Zoho-oauthtoken ${token}`,
+            ...form.getHeaders(),
+          },
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+          timeout: 90_000,
+        }
+      );
+      return resp.data;
+    } catch (err) {
+      if (
+        axios.isAxiosError(err) &&
+        (err.code === "ECONNABORTED" || err.code === "ETIMEDOUT")
+      ) {
+        const mb = (buffer.length / 1024 / 1024).toFixed(1);
+        throw new Error(
+          `WorkDrive upload exceeded 90s timeout (${mb} MB file "${fileName}"). ` +
+            "Likely WorkDrive rate-limiting or connection drop under concurrent load.",
+        );
       }
-    );
-    return resp.data;
+      throw err;
+    }
   });
 
   // WorkDrive returns {data: [{attributes: {resource_id, name, permalink, ...}}]}

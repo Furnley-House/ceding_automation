@@ -1100,10 +1100,33 @@ router.post(
         } else {
           return res.status(503).json({ error: "RingCentral not configured" });
         }
-        const audioResp = await axios.get(contentUri, {
-          headers: { Authorization: `Bearer ${bearerToken}` },
-          responseType: "arraybuffer",
-        });
+        // 90s timeout. Container Apps ingress caps the outer request at 240s;
+        // this leaves headroom for the WorkDrive upload that follows plus the
+        // Creator + Palindrome-trigger steps in submitCallForTranscription.
+        // A typical RC call recording is well under 20 MB, so anything longer
+        // than 90s is almost certainly the RC media server throttling or a
+        // network hiccup rather than legitimate transfer time.
+        let audioResp;
+        try {
+          audioResp = await axios.get(contentUri, {
+            headers: { Authorization: `Bearer ${bearerToken}` },
+            responseType: "arraybuffer",
+            timeout: 90_000,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+          });
+        } catch (err) {
+          if (
+            axios.isAxiosError(err) &&
+            (err.code === "ECONNABORTED" || err.code === "ETIMEDOUT")
+          ) {
+            throw new Error(
+              `RingCentral audio download exceeded 90s timeout (contentUri: ${contentUri}). ` +
+                "The RC media server may be throttling or the recording is unusually large.",
+            );
+          }
+          throw err;
+        }
         const uploaded = await uploadToWorkDrive(
           Buffer.from(audioResp.data as ArrayBuffer),
           recordingFileName,
