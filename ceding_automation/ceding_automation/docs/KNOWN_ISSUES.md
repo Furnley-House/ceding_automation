@@ -5,6 +5,136 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-14 — palindrome-submit buffers whole audio through Node.js memory
+
+**Filed:** 2026-09-29
+**Owner:** unassigned
+**Severity:** Low today (voice recordings are typically 5-20 MB and current
+timeouts cover them); Medium if RC recording sizes grow or WorkDrive gets
+slower on the tenant. Not blocking any current user flow.
+
+### The shape
+
+`POST /:caseId/calls/palindrome-submit` in `routes/calls.ts` currently
+downloads the RC recording as a full `arraybuffer` into Node.js memory, then
+uploads that same buffer via multipart POST to WorkDrive. Both hops are
+serialised (download completes fully before upload begins).
+
+```ts
+// routes/calls.ts around line 1103 — the two big transfers, each
+// buffering the entire recording into memory before starting the next hop
+const audioResp = await axios.get(contentUri, {
+  headers: { Authorization: `Bearer ${bearerToken}` },
+  responseType: "arraybuffer",           // ← whole file in RAM
+  timeout: 90_000,                        // added 2026-09-29
+});
+const uploaded = await uploadToWorkDrive(
+  Buffer.from(audioResp.data as ArrayBuffer),
+  recordingFileName,
+  folders.recordingsFolderId,
+  "audio/mpeg",
+);
+// uploadToWorkDrive in services/workdrive.ts constructs a FormData
+// with the buffer and POSTs it — same second copy in memory.
+```
+
+Consequences:
+
+- **Memory:** two copies of the recording live in the container's heap
+  simultaneously (the axios arraybuffer and the FormData copy of the same
+  bytes). A 6 MB recording ≈ 12 MB heap; a 60 MB recording ≈ 120 MB heap.
+  Not fatal at current sizes; a concern if RC recording sizes grow.
+- **Time-to-first-byte at WorkDrive:** the upload can't start until the
+  full download finishes, so end-to-end latency is `RC_download_time +
+  WorkDrive_upload_time`. Streaming would let them overlap.
+- **Container Apps 240s ingress budget:** currently split ~90s + 90s
+  between the two hops with 60s left for the surrounding steps. Streaming
+  would collapse that to `max(download, upload)` rather than the sum,
+  buying ~60s of headroom for edge cases.
+
+### Not the root cause of the 2026-09-29 socket-hang-up
+
+The specific failure that surfaced this (Srinath, staging, case
+`cmq7vgqva0023i6zxs0fl4lxb`, 5.7 MB recording) was almost certainly WorkDrive
+dropping connections under the concurrent load from the recording-watcher's
+rate-limit bursts, not a memory/latency issue with the buffered path. That's
+addressed by turning `WATCH_RECORDING_FOLDER=false` (done 2026-09-29) and by
+the timeouts + descriptive errors landed the same day.
+
+This KI is the *right long-term shape* for the palindrome-submit path, not
+a hotfix.
+
+### Fix direction
+
+Pipe the RC stream directly into a WorkDrive multipart POST body without an
+intermediate arraybuffer. Sketch:
+
+```ts
+const audioResp = await axios.get(contentUri, {
+  headers: { Authorization: `Bearer ${bearerToken}` },
+  responseType: "stream",                // instead of "arraybuffer"
+  timeout: 90_000,
+});
+
+const form = new FormData();
+form.append("content", audioResp.data as Readable, {
+  filename: recordingFileName,
+  contentType: "audio/mpeg",
+});
+form.append("parent_id", folders.recordingsFolderId);
+form.append("filename", recordingFileName);
+form.append("override-name-exist", "true");
+
+const uploaded = await withZohoAuth(async (token) => {
+  const resp = await axios.post(`${workdriveApiBase()}/upload`, form, {
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      ...form.getHeaders(),
+    },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+    timeout: 90_000,
+  });
+  return normaliseUploadResponse(resp.data);
+});
+```
+
+Complications to think through:
+
+1. **WorkDrive multipart with a stream needs a Content-Length** — the
+   FormData library can't compute one for a raw stream without buffering.
+   Either pre-fetch Content-Length from the RC HEAD response (RC returns
+   it in the metadata endpoint we probed on 2026-09-29) and pass it
+   explicitly, or wait for a full-stream FormData shape.
+2. **Backpressure and error propagation** need explicit handling — a
+   stream error on the RC side has to abort the WorkDrive upload cleanly,
+   and vice versa, without leaking file descriptors.
+3. **Retry on 401 via withZohoAuth becomes harder** — the stream has been
+   consumed by the first attempt; a retry would need to re-open the RC
+   download. Either re-mint the stream in the closure, or fall back to
+   buffered on retry only (matches today's behaviour for the second try).
+4. **Progress logging** — the buffered path knows the full size before
+   upload starts. Streaming loses that unless we plumb it through.
+
+None of these are hard on their own; they're what makes the change bigger
+than the timeout patch.
+
+### Notes for whoever picks this up
+
+- KI-13 (Zoho auth wrapper) is the load-bearing dependency — the retry
+  semantics there change subtly with a stream body. Read `services/zohoCrm.ts:
+  withZohoAuth` before touching this.
+- KI-8 (recording-watcher backoff) is *not* about this path but shares the
+  same "WorkDrive rate-limits hard under concurrent load" mode — worth
+  cross-referencing if you see 429/socket drops during a streamed upload
+  attempt.
+- Consider whether the export/upload path in `services/workdrive.ts` `upload
+  ToWorkDrive` should ALSO learn a streaming variant, since it has the
+  same shape (buffer in, POST out). Ships together or separately depending
+  on how ambitious the PR is.
+
+---
+
 ## KI-13 — Zoho token cache is never invalidated on 401, and CRM 401s come back as data
 
 **Filed:** 2026-09-29
