@@ -1,0 +1,11 @@
+{
+  "_": "Copy this file, edit, pass via --overrides /path/to/your-copy.json to the backfill script.",
+  "_inactiveDomains_help": "Emails on these domains are auto-provisioned with status=INACTIVE. Row exists (so header shows adviser name), but the user cannot sign in even if credentials appear later.",
+  "inactiveDomains": [
+    "anchor-wealth.co.uk"
+  ],
+  "_roleOverrides_help": "Auto-provisioned users default to role=ADVISER. Use this map to force a different role for specific emails. Values must be one of: CA_TEAM, ADVISER, PARAPLANNER, ADMIN. Applies only to freshly-created users; existing users always keep their current role.",
+  "roleOverrides": {
+    "someone@furnleyhouse.co.uk": "CA_TEAM"
+  }
+}
