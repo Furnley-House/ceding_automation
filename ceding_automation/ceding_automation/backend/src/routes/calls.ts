@@ -1076,9 +1076,26 @@ router.post(
     });
     if (!caseRecord) return res.status(404).json({ error: "Case not found" });
 
+    // Per-stage instrumentation. Reproducible "socket hang up" errors weren't
+    // caught by the RC/WorkDrive 90s timeout guards (ECONNRESET, not
+    // ECONNABORTED), so we couldn't tell which leg dropped. These structured
+    // logs bracket every outbound call so the error log names the stage +
+    // elapsed time, and the boundary logs pin which side severed the socket.
+    const t0 = Date.now();
+    let stage = "init";
+    console.log(JSON.stringify({
+      evt: "palindrome_submit_start",
+      caseRef: caseRecord.caseRef,
+      caseId: caseRecord.id,
+      hasContentUri: Boolean(contentUri),
+      hasWorkdriveFileId: Boolean(workdriveFileId),
+      fileName: fileName ?? null,
+    }));
+
     try {
       // 1. Per-case Recordings + Transcripts subfolders. Idempotent, so
       //    re-submitting for a case reuses the folders it already has.
+      stage = "ensure_folders";
       const folders = await ensureCaseCallFolders(
         caseRecord.clientZohoId,
         caseRecord.caseRef,
@@ -1106,6 +1123,13 @@ router.post(
         // A typical RC call recording is well under 20 MB, so anything longer
         // than 90s is almost certainly the RC media server throttling or a
         // network hiccup rather than legitimate transfer time.
+        stage = "rc_download";
+        const rcStart = Date.now();
+        console.log(JSON.stringify({
+          evt: "palindrome_submit_rc_download_start",
+          caseRef: caseRecord.caseRef,
+          contentUri,
+        }));
         let audioResp;
         try {
           audioResp = await axios.get(contentUri, {
@@ -1127,6 +1151,22 @@ router.post(
           }
           throw err;
         }
+        const rcBytes = (audioResp.data as ArrayBuffer).byteLength;
+        console.log(JSON.stringify({
+          evt: "palindrome_submit_rc_download_ok",
+          caseRef: caseRecord.caseRef,
+          bytes: rcBytes,
+          durationMs: Date.now() - rcStart,
+        }));
+
+        stage = "workdrive_upload";
+        const wdStart = Date.now();
+        console.log(JSON.stringify({
+          evt: "palindrome_submit_workdrive_upload_start",
+          caseRef: caseRecord.caseRef,
+          bytes: rcBytes,
+          fileName: recordingFileName,
+        }));
         const uploaded = await uploadToWorkDrive(
           Buffer.from(audioResp.data as ArrayBuffer),
           recordingFileName,
@@ -1135,9 +1175,21 @@ router.post(
         );
         recordingFileId = uploaded.id;
         recordingFileName = uploaded.name;
+        console.log(JSON.stringify({
+          evt: "palindrome_submit_workdrive_upload_ok",
+          caseRef: caseRecord.caseRef,
+          fileId: recordingFileId,
+          durationMs: Date.now() - wdStart,
+        }));
       }
 
       // 3. Share → enqueue on the Creator form → poke Palindrome.
+      stage = "creator_submit";
+      const crStart = Date.now();
+      console.log(JSON.stringify({
+        evt: "palindrome_submit_creator_start",
+        caseRef: caseRecord.caseRef,
+      }));
       const submitted = await submitCallForTranscription({
         caseId: caseRecord.id,
         recordingFileId,
@@ -1146,6 +1198,13 @@ router.post(
         transcriptsFolderId: folders.transcriptsFolderId,
         adviserEmail: req.user!.email,
       });
+      console.log(JSON.stringify({
+        evt: "palindrome_submit_creator_ok",
+        caseRef: caseRecord.caseRef,
+        creatorRecordId: submitted.creatorRecordId,
+        durationMs: Date.now() - crStart,
+      }));
+      stage = "db_persist";
 
       // 4. Park a pending transcript row so the UI has something to poll and
       //    the job survives a server restart.
@@ -1204,7 +1263,21 @@ router.post(
         });
       }
       const msg = err instanceof Error ? err.message : "Palindrome submit failed";
-      console.error("[calls] palindrome-submit error:", msg);
+      const errCode = (err as { code?: string | number } | null)?.code ?? null;
+      const errName = err instanceof Error ? err.name : null;
+      const isAxios = axios.isAxiosError(err);
+      const axiosStatus = isAxios ? err.response?.status ?? null : null;
+      console.error(JSON.stringify({
+        evt: "palindrome_submit_error",
+        caseRef: caseRecord.caseRef,
+        stage,
+        totalDurationMs: Date.now() - t0,
+        errCode,
+        errName,
+        axiosStatus,
+        isAxios,
+        message: msg,
+      }));
       res.status(500).json({ error: msg });
     }
   }
