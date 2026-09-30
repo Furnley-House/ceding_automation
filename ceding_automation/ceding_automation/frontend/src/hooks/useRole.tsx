@@ -10,6 +10,19 @@ export const ROLE_LABELS: Record<Role, string> = {
   admin: "Admin",
 };
 
+// Map backend UserRole enum values (UPPER_SNAKE) to the frontend Role type
+// (lower_snake). Used by every auth-completion path — password login in
+// pages/Auth.tsx and SSO in pages/AuthCallback.tsx — to keep `fh_role`
+// in step with the newly-signed-in JWT. Adding a third auth path? Import
+// this map, call setRole(ROLE_MAP[user.role] ?? "ca_team"). SEE ALSO
+// KI-07 / KI-16 — the two-store drift this map compensates for.
+export const ROLE_MAP: Record<string, Role> = {
+  CA_TEAM: "ca_team",
+  ADVISER: "adviser",
+  PARAPLANNER: "paraplanner",
+  ADMIN: "admin",
+};
+
 // Display labels shown on the role-picker tiles (before sign-in).
 // Once signed in, the rest of the app uses the actual user's name from the auth
 // store (not these labels), so ownership checks reflect the JWT identity.

@@ -12,16 +12,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAuthStore } from "@/lib/store";
-import { useRole, type Role } from "@/hooks/useRole";
+import { useRole, ROLE_MAP } from "@/hooks/useRole";
 import { Loader2, AlertCircle } from "lucide-react";
-
-// Map Prisma UserRole enum values to the frontend Role type
-const ROLE_MAP: Record<string, Role> = {
-  CA_TEAM: "ca_team",
-  ADVISER: "adviser",
-  PARAPLANNER: "paraplanner",
-  ADMIN: "admin",
-};
 
 const AuthCallback = () => {
   const [searchParams] = useSearchParams();
@@ -60,9 +52,16 @@ const AuthCallback = () => {
         token
       );
 
-      // Set the frontend role so RoleGuard lets the user through
-      const frontendRole = ROLE_MAP[user.role] ?? "ca_team";
-      setRole(frontendRole);
+      // Set the frontend role so RoleGuard lets the user through.
+      // Fail honest on an unmapped role: leave fh_role unset so RoleGuard
+      // bounces the user rather than silently defaulting to CA_TEAM
+      // (which they may not have). Mirrors pages/Auth.tsx. See KI-07/KI-16.
+      const frontendRole = ROLE_MAP[user.role];
+      if (frontendRole) {
+        setRole(frontendRole);
+      } else {
+        console.warn(`[AuthCallback] Unknown backend role, leaving fh_role unset: ${user.role}`);
+      }
 
       // Forward to where the user was going (preserves zohoTaskId, etc.)
       navigate(returnTo, { replace: true });

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { authApi } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
+import { useRole, ROLE_MAP } from "@/hooks/useRole";
 import { Briefcase, Mail } from "lucide-react";
 
 const Auth = () => {
@@ -10,6 +11,7 @@ const Auth = () => {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const { setAuth } = useAuthStore();
+  const { setRole } = useRole();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -18,7 +20,22 @@ const Auth = () => {
     try {
       const res = await authApi.login(email);
       const { token, user } = res.data as { token: string; user: any };
-      if (token && user) setAuth(user, token);
+      if (token && user) {
+        setAuth(user, token);
+        // Keep fh_role in step with the JWT — without this a user re-logging
+        // in as a different role sees stale role from localStorage until
+        // sign-out. Mirrors AuthCallback.tsx's SSO handler. See KI-07/KI-16.
+        //
+        // Fail honest on an unmapped role: leave fh_role unset so RoleGuard
+        // bounces the user rather than silently defaulting to CA_TEAM
+        // (which they may not have).
+        const frontendRole = ROLE_MAP[user.role];
+        if (frontendRole) {
+          setRole(frontendRole);
+        } else {
+          console.warn(`[Auth] Unknown backend role, leaving fh_role unset: ${user.role}`);
+        }
+      }
       navigate("/");
     } catch (err: any) {
       const msg = err?.response?.data?.error ?? err.message ?? "Unknown error";

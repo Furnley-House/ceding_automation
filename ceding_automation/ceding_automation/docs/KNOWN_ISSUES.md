@@ -5,6 +5,92 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-16 — Fold `role` into `useAuthStore` to retire the two-store drift permanently
+
+**Filed:** 2026-10-01
+**Owner:** unassigned
+**Severity:** Low today — the 2026-10-01 targeted fix on `pages/Auth.tsx`
+addressed the specific manifestation Revathy hit during E2E (JWT
+PARAPLANNER, UI CA after a password re-login). Medium the next time an
+auth path is added: as long as `useRole` and `useAuthStore` are separate,
+every new path is one missed `setRole()` call away from the same drift.
+
+### Context
+
+KI-07 (filed 2026-09-18) documented the underlying class: two independent
+frontend stores hold auth state — `useAuthStore` (Zustand + `persist`,
+key `ceding-auth`) holds `user + token`; `useRole` (React Context +
+manual `localStorage.setItem`, key `fh_role`) holds `role`. Every
+populate + clear semantic has to touch both. Every past fix in this area
+has been "add the missing `setRole()` call in this one place."
+
+The 2026-10-01 item-6 patch was one more of those — password login in
+`pages/Auth.tsx` was missing the `setRole(ROLE_MAP[user.role])` call
+that SSO `pages/AuthCallback.tsx` already had. Fifth manifestation of
+the class; won't be the last while the two-store shape exists.
+
+### The fix that retires the class
+
+Derive `role` from `useAuthStore.user.role` via `ROLE_MAP` at read time
+instead of storing it separately. Then:
+
+- `setRole` and `clearRole` become no-ops (or removed entirely).
+- The `fh_role` localStorage key is deleted; the auth store's Zustand-
+  persist middleware already handles the `ceding-auth` localStorage
+  key, and role is a projection of `user.role`.
+- Any future auth path only has to call `setAuth(user, token)`; role
+  updates automatically.
+- The `useEffect` in `useRole.tsx` that syncs `role → localStorage` disappears.
+
+### Files touched
+
+- `frontend/src/hooks/useRole.tsx` — rewrite `RoleProvider` as a thin
+  selector over `useAuthStore` (or remove `RoleProvider` entirely and
+  turn `useRole` into a plain hook). `ROLE_MAP` stays exported.
+- `frontend/src/hooks/useAuth.tsx` — drop the `localStorage.removeItem(ROLE_STORAGE_KEY)`
+  in `signOut()`; it becomes redundant.
+- `frontend/src/pages/AuthCallback.tsx` — drop the `setRole(...)` call
+  after `setAuth(...)`. Role is now derived.
+- `frontend/src/pages/Auth.tsx` — drop the `setRole(...)` call added by
+  the 2026-10-01 item-6 patch (same reason). Actual code deletion of the
+  band-aid this KI is replacing.
+- `frontend/src/components/layout/AppHeader.tsx` — drop the `clearRole()`
+  call in `handleSignOut`. Also redundant.
+
+### Rough sizing
+
+Approximately 50 lines of net change across 5 files, mostly deletion.
+KI-07 estimated 3-4 hours end-to-end including manual verification.
+
+### Manual verification checklist (frontend has no test infrastructure)
+
+- Password login as CA_TEAM, verify AppHeader shows "CA Team" role.
+- Sign out via AppHeader dropdown, verify redirect to `/`.
+- Password login as PARAPLANNER, verify AppHeader shows "Paraplanner"
+  and the checklist edit buttons disappear (paraplanners don't edit).
+- Password login as CA_TEAM in tab 1; open tab 2, sign out from tab 1,
+  password login as PARAPLANNER from tab 2. Return to tab 1, refresh —
+  verify tab 1 either signs out (JWT invalidated) or reflects the new
+  identity (both are acceptable; tab 1 showing STALE CA_TEAM role is a
+  regression).
+- SSO login as any role, verify role matches JWT.
+- Session restore: hard-refresh mid-session, verify role persists.
+- Session restore across a role change: sign in as role A, admin
+  changes the DB role to B, refresh — verify UI reflects B (may
+  require re-login, that's fine; STALE A is the regression).
+
+### Cross-refs
+
+- **KI-07** — the predecessor KI documenting the class. Every past fix
+  in this area chains back to it.
+- **Item-6 patch (2026-10-01)** — the targeted `setRole` addition in
+  `Auth.tsx` this KI would replace. See `git log --grep "item 6"` for
+  the commit hash once merged.
+- **KI-11** — auto-provisioned user audit trail. Adjacent surface
+  (users + auth). Not blocked by or blocking of this.
+
+---
+
 ## KI-15 — Unauthenticated `/auth/*` routes share the per-IP rate-limit bucket
 
 **Filed:** 2026-09-30
