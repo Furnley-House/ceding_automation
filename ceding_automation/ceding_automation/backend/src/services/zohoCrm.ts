@@ -76,6 +76,20 @@ export class ZohoAuthError extends Error {
   }
 }
 
+/** Thrown by getContact on 404 so callers can distinguish "genuinely no
+ *  such contact" from every other failure mode (auth, network, 5xx). See
+ *  workdrive.ts resolveCaseFolderId — silently swallowing all errors as
+ *  "contact missing" turned auth failures into misleading data-error
+ *  responses and, in staging, into a silent fallback to the wrong folder. */
+export class ZohoContactNotFoundError extends Error {
+  readonly contactZohoId: string;
+  constructor(contactZohoId: string) {
+    super(`Zoho Contact ${contactZohoId} not found (404)`);
+    this.name = 'ZohoContactNotFoundError';
+    this.contactZohoId = contactZohoId;
+  }
+}
+
 function is401(err: unknown): boolean {
   if (err instanceof ZohoAuthError) return true;
   if (typeof err !== 'object' || err === null) return false;
@@ -175,6 +189,10 @@ export async function getContact(contactId: string): Promise<unknown> {
       headers: { Authorization: `Zoho-oauthtoken ${token}` },
     });
     if (res.status === 401) throw new ZohoAuthError();
+    // 404 is a discriminated error so resolveCaseFolderId (and other
+    // callers) can distinguish "no such contact" from "auth broken" or
+    // "Zoho down" — the two shapes need different remediation.
+    if (res.status === 404) throw new ZohoContactNotFoundError(contactId);
     if (!res.ok) {
       throw new Error(`Zoho Contacts/${contactId} returned ${res.status}: ${await res.text()}`);
     }

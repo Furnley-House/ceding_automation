@@ -2,7 +2,7 @@
 // Upload files (call recordings, transcripts, generated PDFs) to Zoho WorkDrive.
 import axios from 'axios';
 import FormData from 'form-data';
-import { getContactRecord, extractContactWorkDriveFolderId, withZohoAuth } from './zohoCrm';
+import { getContactRecord, extractContactWorkDriveFolderId, withZohoAuth, ZohoContactNotFoundError } from './zohoCrm';
 
 // Read env at call-time, not module-load, so .env edits are picked up without rebuilding
 const workdriveApiBase = () => process.env.ZOHO_WORKDRIVE_API_BASE ?? 'https://www.zohoapis.eu/workdrive/api/v1';
@@ -60,7 +60,18 @@ const perClientRequired = (): boolean =>
 export async function resolveCaseFolderId(clientZohoId: string | null): Promise<ResolvedFolder> {
   // Try the per-client folder first — always preferred when available.
   if (clientZohoId) {
-    const contact = await getContactRecord(clientZohoId).catch(() => null);
+    // Distinguish "no such Contact" (fall through to env fallback / hard-fail)
+    // from auth / network / 5xx (propagate — a CA seeing "check clientZohoId"
+    // when the actual failure is Zoho auth is misleading, and in staging the
+    // silent env-fallback landed exports in the wrong folder). Was previously
+    // a blanket `.catch(() => null)`; see KI-13 for the sibling shape.
+    let contact: Record<string, unknown> | null = null;
+    try {
+      contact = await getContactRecord(clientZohoId);
+    } catch (err) {
+      if (!(err instanceof ZohoContactNotFoundError)) throw err;
+      // else fall through with contact = null
+    }
     if (contact) {
       const folderId = extractContactWorkDriveFolderId(contact);
       if (folderId) {
