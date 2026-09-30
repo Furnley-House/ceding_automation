@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { approveAllChecklist, type ApproveAllPrismaLike } from "./approveAllChecklist";
 
 // DI-over-module-mocking, matching contributionsService.test.ts. The helper
@@ -10,22 +10,33 @@ import { approveAllChecklist, type ApproveAllPrismaLike } from "./approveAllChec
 function makeMockDb(overrides?: {
   skippableFieldKeys?: string[];
   approvedCount?: number;
+  currentStatus?: string | null; // null → case.findUnique returns null → guard bypassed
 }) {
   const findMany = vi.fn(async () =>
     (overrides?.skippableFieldKeys ?? []).map((fieldKey) => ({ template: { fieldKey } }))
   );
   const updateMany = vi.fn(async () => ({ count: overrides?.approvedCount ?? 0 }));
+  const caseFindUnique = vi.fn(async () =>
+    overrides?.currentStatus === undefined || overrides?.currentStatus === null
+      ? null
+      : { status: overrides.currentStatus },
+  );
   const caseUpdate = vi.fn(async () => ({}));
   const auditCreate = vi.fn(async () => ({}));
 
   const prisma = {
     checklistField: { findMany, updateMany },
-    case: { update: caseUpdate },
+    case: { findUnique: caseFindUnique, update: caseUpdate },
     auditLog: { create: auditCreate },
   } as unknown as ApproveAllPrismaLike;
 
-  return { prisma, findMany, updateMany, caseUpdate, auditCreate };
+  return { prisma, findMany, updateMany, caseFindUnique, caseUpdate, auditCreate };
 }
+
+// Existing tests default currentStatus to null → case.findUnique returns
+// null → enforceCompletionInvariant is bypassed. Preserves the pre-guard
+// behaviour these tests assert. New tests targeting the guard set
+// currentStatus explicitly.
 
 const CASE_ID = "case-1";
 const ACTOR_ID = "user-para-1";
@@ -178,6 +189,93 @@ describe("approveAllChecklist — response and audit shape", () => {
       expect.objectContaining({
         data: expect.objectContaining({ newValue: "0 fields approved" }),
       })
+    );
+  });
+});
+
+describe("approveAllChecklist — KI-09 guard integration", () => {
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("guard OFF (default): case still flips to APPROVED even when unapproved-valued fields remain — interim state", async () => {
+    // Simulates the current shipped default: guard emits an observability
+    // audit but doesn't block. Behaviour identical to pre-2026-10-01.
+    vi.stubEnv("COMPLETION_GUARD_ENABLED", "");
+    const { prisma, caseUpdate, auditCreate } = makeMockDb({
+      skippableFieldKeys: ["review_me"],
+      approvedCount: 40,
+      currentStatus: "STAGE_8_VERIFY_CHECKLIST",
+    });
+
+    await approveAllChecklist({ prisma, caseId: CASE_ID, actorUserId: ACTOR_ID });
+
+    // case.update DID fire — guard didn't block.
+    expect(caseUpdate).toHaveBeenCalledOnce();
+    // Two audit rows: one COMPLETION_BLOCKED (observe-only), one CASE_APPROVED.
+    expect(auditCreate).toHaveBeenCalledTimes(2);
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: "COMPLETION_BLOCKED",
+          metadata: expect.objectContaining({ guardEnforced: false }),
+        }),
+      }),
+    );
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: "CASE_APPROVED" }),
+      }),
+    );
+  });
+
+  it("guard ON + unapproved fields remain: case status flip is SKIPPED", async () => {
+    // The invariant fires: case stays at STAGE_8_VERIFY_CHECKLIST, fields
+    // that could be approved are, but the case is NOT marked APPROVED.
+    vi.stubEnv("COMPLETION_GUARD_ENABLED", "true");
+    const { prisma, caseUpdate, auditCreate } = makeMockDb({
+      skippableFieldKeys: ["review_me", "conflict_me"],
+      approvedCount: 40,
+      currentStatus: "STAGE_8_VERIFY_CHECKLIST",
+    });
+
+    const result = await approveAllChecklist({ prisma, caseId: CASE_ID, actorUserId: ACTOR_ID });
+
+    // Fields approved as usual; case status flip skipped.
+    expect(result.approved).toBe(40);
+    expect(result.skipped).toBe(2);
+    expect(caseUpdate).not.toHaveBeenCalled();
+    // COMPLETION_BLOCKED audit reflects the enforced guard.
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: "COMPLETION_BLOCKED",
+          metadata: expect.objectContaining({ guardEnforced: true }),
+        }),
+      }),
+    );
+  });
+
+  it("guard ON + all fields safely approved: case status flip proceeds normally", async () => {
+    vi.stubEnv("COMPLETION_GUARD_ENABLED", "true");
+    const { prisma, caseUpdate, auditCreate } = makeMockDb({
+      skippableFieldKeys: [], // nothing to skip
+      approvedCount: 71,
+      currentStatus: "STAGE_8_VERIFY_CHECKLIST",
+    });
+
+    await approveAllChecklist({ prisma, caseId: CASE_ID, actorUserId: ACTOR_ID });
+
+    // No unapproved-with-value fields → guard doesn't fire audit, case.update fires.
+    expect(caseUpdate).toHaveBeenCalledOnce();
+    expect(auditCreate).toHaveBeenCalledOnce();
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: "CASE_APPROVED" }),
+      }),
     );
   });
 });

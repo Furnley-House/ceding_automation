@@ -33,6 +33,7 @@ import {
 import { CLOSED_STATUSES, medianCycleDays, summariseStatusCounts } from "../utils/caseStats";
 import { SAFE_USER_SELECT } from "../utils/userSelects";
 import { isRecentSync } from "../utils/syncFreshness";
+import { enforceCompletionInvariant } from "../utils/completionInvariant";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -1061,6 +1062,38 @@ router.patch(
       }
     }
 
+    // KI-09 completion-gap guard. Applied at end of handler so both
+    // sub-paths (currentStage → status, and body.status → status) are
+    // covered by one call regardless of which one populated data.status.
+    // Behind COMPLETION_GUARD_ENABLED — off by default, observe-only
+    // (audit fires, transition proceeds). See utils/completionInvariant.ts.
+    if (
+      data.status === CaseStatus.APPROVED ||
+      data.status === CaseStatus.STAGE_10_COMPLETE
+    ) {
+      const cur = await prisma.case.findUnique({
+        where: { id: req.params.id },
+        select: { status: true },
+      });
+      if (cur) {
+        const guard = await enforceCompletionInvariant({
+          prisma,
+          caseId: req.params.id,
+          targetStatus: data.status,
+          currentStatus: cur.status,
+          actorUserId: req.user!.id,
+        });
+        if (guard.blocked) {
+          return res.status(409).json({
+            error: `Case has ${guard.unapprovedCount} field${guard.unapprovedCount === 1 ? "" : "s"} awaiting approval before it can be marked ${data.status}`,
+            code: "COMPLETION_UNAPPROVED_FIELDS",
+            unapprovedCount: guard.unapprovedCount,
+            unapprovedFieldKeys: guard.unapprovedFieldKeys,
+          });
+        }
+      }
+    }
+
     // Same handoff side-effects as PATCH /:id/status, so navigating via the
     // stepper doesn't skip paraplanner assignment + notification.
     const nextStatus = data.status as CaseStatus | undefined;
@@ -1165,6 +1198,32 @@ router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAP
     approvedAt: status === "APPROVED" ? new Date() : undefined,
     completedAt: status === "STAGE_10_COMPLETE" ? new Date() : undefined,
   };
+
+  // KI-09 completion-gap guard. Behind COMPLETION_GUARD_ENABLED — off by
+  // default, observe-only (audit fires, transition proceeds).
+  if (status === CaseStatus.APPROVED || status === CaseStatus.STAGE_10_COMPLETE) {
+    const cur = await prisma.case.findUnique({
+      where: { id: req.params.id },
+      select: { status: true },
+    });
+    if (cur) {
+      const guard = await enforceCompletionInvariant({
+        prisma,
+        caseId: req.params.id,
+        targetStatus: status,
+        currentStatus: cur.status,
+        actorUserId: req.user!.id,
+      });
+      if (guard.blocked) {
+        return res.status(409).json({
+          error: `Case has ${guard.unapprovedCount} field${guard.unapprovedCount === 1 ? "" : "s"} awaiting approval before it can be marked ${status}`,
+          code: "COMPLETION_UNAPPROVED_FIELDS",
+          unapprovedCount: guard.unapprovedCount,
+          unapprovedFieldKeys: guard.unapprovedFieldKeys,
+        });
+      }
+    }
+  }
 
   let paraplannerToNotify: string | null = null;
   if (isAwaitingReview(status)) {

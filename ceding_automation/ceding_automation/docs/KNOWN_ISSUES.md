@@ -728,7 +728,20 @@ case we've seen.
 ## KI-09 — `PATCH /:id/status` accepts CA_TEAM for terminal transitions with no approval invariant
 
 **Filed:** 2026-09-29
-**Owner:** unassigned
+**Status update 2026-10-01:** Guard code shipped behind
+`COMPLETION_GUARD_ENABLED` env var — **off by default**. When off, the
+invariant runs and emits a `COMPLETION_BLOCKED` audit row for every
+would-be-blocked transition (observe-only mode), giving Aruna live
+"how often would this fire" data before flipping the flag on. When on,
+transitions into APPROVED / STAGE_10_COMPLETE with unapproved-valued
+fields return 409. Applied to all four vectors (bare `PATCH /:id` — both
+`currentStage` and `status` sub-paths; `PATCH /:id/status`;
+`POST /:caseId/checklist/approve-all`). Predicate + gate in
+`backend/src/utils/completionInvariant.ts` with 12 tests. Behaviour today
+is unchanged from pre-2026-10-01 pending Aruna's workflow decision —
+per-guard analysis showed 70 of 86 recent completions would have been
+blocked, i.e. this is a workflow change, not a hotfix.
+**Owner:** unassigned (guard flip = Aruna decision, not eng)
 **Severity:** Medium — the current audit trail shows 84 prod cases in a
 terminal state with unapproved fields; ≥4 of them show the extreme "zero
 approvals ever" pattern. Not a data-loss bug (fields keep their values), but

@@ -107,6 +107,12 @@ enum AuditAction {
   CASE_APPROVED
   CHECKLIST_EXPORTED
   WORKDRIVE_EXPORTED
+  // Emitted by utils/completionInvariant.ts when a case transition to
+  // APPROVED / STAGE_10_COMPLETE was attempted with unapproved-valued
+  // fields remaining. Fires whether or not COMPLETION_GUARD_ENABLED
+  // actually blocked the transition — the audit is the observability
+  // signal Aruna needs before flipping the guard on.
+  COMPLETION_BLOCKED
   COMMENT_ADDED
   CHASE_LOGGED
   LOA_STATUS_UPDATED

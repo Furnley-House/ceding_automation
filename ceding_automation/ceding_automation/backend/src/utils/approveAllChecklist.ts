@@ -5,12 +5,16 @@
 //   - reviewRequestedAt IS NOT NULL  (someone asked for another look)
 //   - hasConflict = true             (extractor saw disagreeing sources)
 //
-// Case status is flipped to APPROVED regardless of skip count. The
-// workflow question "must every field be approved for case approval?"
-// is deferred pending a separate decision — the audit row reflects the
-// actual approve/skip counts so the deferred state is visible.
+// Case status flip to APPROVED is guarded by KI-09's completion invariant
+// (utils/completionInvariant.ts), behind COMPLETION_GUARD_ENABLED. When the
+// flag is OFF the case flips regardless — matches pre-2026-10-01 behaviour
+// and the guard emits a COMPLETION_BLOCKED observe-only audit. When ON, the
+// case flip is skipped if any field remains unapproved after the narrow
+// approve above. Response returns the actual counts either way; caller
+// derives "did case advance" from skipped === 0.
 
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient, CaseStatus } from "@prisma/client";
+import { enforceCompletionInvariant } from "./completionInvariant";
 
 // The Prisma-like slice we depend on — narrowed so the route handler
 // (real PrismaClient) and the tests (plain object with vi.fn mocks)
@@ -60,10 +64,30 @@ export async function approveAllChecklist(args: ApproveAllArgs): Promise<Approve
     data: { isApproved: true, approvedAt: new Date(), status: "APPROVED" },
   });
 
-  await prisma.case.update({
+  // KI-09 guard: after the narrow approve above, are there still
+  // unapproved-valued fields blocking the case → APPROVED transition?
+  // Observe-only (audit fires) when flag off; blocks the case.update
+  // when flag on.
+  const cur = await prisma.case.findUnique({
     where: { id: caseId },
-    data: { status: "APPROVED", approvedAt: new Date() },
+    select: { status: true },
   });
+  const guard = cur
+    ? await enforceCompletionInvariant({
+        prisma,
+        caseId,
+        targetStatus: "APPROVED" as CaseStatus,
+        currentStatus: cur.status,
+        actorUserId,
+      })
+    : { blocked: false, unapprovedCount: 0, unapprovedFieldKeys: [] };
+
+  if (!guard.blocked) {
+    await prisma.case.update({
+      where: { id: caseId },
+      data: { status: "APPROVED", approvedAt: new Date() },
+    });
+  }
 
   await prisma.auditLog.create({
     data: {
