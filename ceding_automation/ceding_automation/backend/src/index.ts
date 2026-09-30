@@ -19,6 +19,7 @@ import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 
+import { buildRateLimitKey } from "./utils/rateLimitKey";
 import { caseRoutes } from "./routes/cases";
 import { documentRoutes, documentInternalRoutes } from "./routes/documents";
 import { checklistRoutes } from "./routes/checklist";
@@ -57,9 +58,28 @@ app.use(
 );
 
 // ── Rate limiting ────────────────────────────────────────
+// Default raised from 200 → 500 with the switch to per-user keying: one
+// heavy triage session opens ~15 cases in 15 min at ~8 calls each ≈ 120
+// requests, and header/list refreshes stack on top. 500 gives ~3-4×
+// headroom over that observed pattern while still catching runaway
+// client loops. Env var `RATE_LIMIT_MAX_REQUESTS` overrides if set —
+// staging/prod may need re-checking after this deploys.
+//
+// Keying: authenticated user id (via buildRateLimitKey → jwt.verify),
+// falls back to req.ip for unauthenticated traffic. Fixes item 3 —
+// office NAT put every user in one 200-request bucket.
+//
+// SEE ALSO KI-15: unauthenticated /auth/* still shares the per-IP
+// bucket. A stricter, second limiter for auth routes is deferred.
 const limiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-  max: Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 200,
+  max: Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 500,
+  keyGenerator: (req) =>
+    buildRateLimitKey({
+      authHeader: req.headers.authorization,
+      ip: req.ip,
+      jwtSecret: process.env.JWT_SECRET!,
+    }),
   // BFF write-back is server-to-server (X-Internal-Key auth) and bursts
   // 66 requests per doc per submission (65 field PATCHes + 1 doc-level).
   // Multi-doc cases (3-4 docs) blew the shared human-IP budget and 429'd.

@@ -32,6 +32,7 @@ import {
 } from "../services/optionalSections";
 import { CLOSED_STATUSES, medianCycleDays, summariseStatusCounts } from "../utils/caseStats";
 import { SAFE_USER_SELECT } from "../utils/userSelects";
+import { isRecentSync } from "../utils/syncFreshness";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -1339,6 +1340,22 @@ router.post("/:id/sync-from-zoho", requireAuth, requireCaseAccess, async (req: R
   if (!caseRecord) return res.status(404).json({ error: "Case not found" });
   if (!caseRecord.zohoTaskId) {
     return res.status(400).json({ error: "Case is not linked to a Zoho task" });
+  }
+
+  // Debounce: CaseDetail.tsx fires this on every case-detail mount, which
+  // dominates the rate-limit budget under triage load (item 3). If Zoho was
+  // synced in the last 5 min the answer won't have changed — short-circuit
+  // with the changed:false shape the frontend already handles silently.
+  // The manual "Sync from Zoho" button uses a different endpoint and is
+  // deliberately unthrottled — it's the escape hatch when a CA has just
+  // edited Zoho and needs an immediate refresh. See utils/syncFreshness.ts.
+  if (isRecentSync(caseRecord.zohoSyncedAt, new Date())) {
+    return res.json({
+      changed: false,
+      changes: [],
+      debounced: true,
+      lastSyncedAt: caseRecord.zohoSyncedAt,
+    });
   }
 
   // 1. Pull the latest task from Zoho

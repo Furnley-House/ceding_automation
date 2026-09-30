@@ -5,6 +5,84 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-15 — Unauthenticated `/auth/*` routes share the per-IP rate-limit bucket
+
+**Filed:** 2026-09-30
+**Owner:** unassigned
+**Severity:** Low today — no incident traces yet. Filed as follow-up to the
+2026-09-30 rate-limit fix (per-user keying), which deliberately did not
+address unauthenticated traffic. Left too long, this is the shape that
+lets a credential-stuffing attempt exhaust the login endpoint's budget
+for real users on the same office IP.
+
+### The shape
+
+`backend/src/index.ts:60` — after the 2026-09-30 fix the app-level limiter
+keys on the authenticated user id (via `buildRateLimitKey → jwt.verify`)
+and falls back to `req.ip` for unauthenticated traffic. Unauthenticated
+routes — most importantly `/api/auth/login`, `/api/auth/complete-password-reset`,
+`/api/auth/sso-callback` — share ONE bucket per IP.
+
+Consequence: any office visitor (or a bot) hitting `/api/auth/login` with
+wrong credentials burns from the same 500-request budget the office's
+legitimate pre-auth traffic uses. A slow credential-stuffing run at
+one attempt every few seconds could saturate the budget over the 15-min
+window and produce a real login lockout for the office. Cheap for the
+attacker, expensive to notice.
+
+The 2026-09-30 fix was scoped to unlock the office (item 3 of the
+2026-09-30 E2E findings — one triage session locked everyone out via
+the shared per-IP bucket). Hardening `/auth/*` specifically is a
+separate concern and was deferred to keep that PR focused.
+
+### Fix direction — a second, stricter limiter mounted only on `/api/auth`
+
+Two limiters, each with its own key + window + ceiling:
+
+- **Existing app-level limiter** — per-user (auth'd) / per-IP (unauth'd),
+  500 / 15 min. Broad protection for the general API surface.
+- **New `/api/auth/*` limiter** — per-IP always (unauth'd by definition),
+  much tighter: 20 / 15 min per IP feels right for a five-person office
+  where a legitimate login should almost never repeat. Applied via
+  `app.use("/api/auth", authLimiter, authRoutes)` before the app-level
+  limiter, so it fires first.
+
+```ts
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => `ip:${req.ip ?? "unknown"}`,
+  // Do NOT skip on x-internal-key — SSO callbacks don't set that header.
+  // Skip only the health-check-adjacent surface.
+  skip: (req) => req.path.endsWith("/health"),
+});
+app.use("/api/auth", authLimiter, authRoutes);
+```
+
+Ceiling tuning: 20/15min is aggressive; may need to relax to 40-50 if the
+SSO callback pattern turns out to be chattier than expected. Env-var
+gate it (`AUTH_RATE_LIMIT_MAX_REQUESTS`) so we can adjust without
+redeploying.
+
+### Notes for whoever picks this up
+
+- **The login endpoint's user-lockout is separate.** This KI is about IP-
+  level rate limiting. Per-user login backoff (e.g. exponential lockout
+  after N wrong passwords) is a different mitigation and is not currently
+  implemented — filed as a Phase 2 hardening in `docs/handover/` when it
+  becomes relevant.
+- **Cross-refs.** The 2026-09-30 per-user keying (`src/utils/rateLimitKey.ts`)
+  is the sibling change; this KI is the deliberately-deferred half.
+- **KI-11** (auto-provisioned users leave no audit trail) touches the same
+  auth surface but is orthogonal — governance not rate-limiting.
+- **Order of mounts matters.** If the auth limiter is mounted AFTER
+  `app.use(limiter)`, the general limiter will burn budget on failed
+  login attempts before the auth limiter runs. Mount the auth limiter
+  earlier — either before the app-level limiter, or inline on the auth
+  router itself.
+
+---
+
 ## KI-14 — palindrome-submit buffers whole audio through Node.js memory
 
 **Filed:** 2026-09-29
