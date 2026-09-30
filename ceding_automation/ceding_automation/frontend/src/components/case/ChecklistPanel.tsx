@@ -424,10 +424,22 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
   };
 
   const approveAll = async () => {
-    await approveAllFilled();
-    toast.success("All filled fields approved", {
-      description: "Missing fields skipped — please send those back to CA Team if needed.",
-    });
+    const result = await approveAllFilled();
+    if (result.skipped === 0) {
+      toast.success(
+        `${result.approved} field${result.approved === 1 ? "" : "s"} approved`,
+        { description: "Case marked approved." }
+      );
+    } else {
+      const preview = result.skippedFieldKeys.slice(0, 3).join(", ");
+      const rest = result.skippedFieldKeys.length - 3;
+      toast(`${result.approved} approved, ${result.skipped} skipped`, {
+        description:
+          `Skipped: ${preview}${rest > 0 ? ` and ${rest} more` : ""}. ` +
+          `These are missing, review-requested, or have unresolved conflicts. ` +
+          `Send them back to CA Team to progress.`,
+      });
+    }
   };
 
   // ── Bulk-mark all missing checklist fields as "N/A" ────────────────────

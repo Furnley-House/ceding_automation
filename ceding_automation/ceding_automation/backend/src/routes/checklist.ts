@@ -9,6 +9,7 @@ import { applyFieldExtraction } from "../services/aiBffApply";
 import { mirrorChecklistToCase } from "../services/caseFieldMirror";
 import { shouldClearApproval } from "../utils/approvalOnEdit";
 import { canMarkMissingAsNA } from "../utils/checklistReadiness";
+import { approveAllChecklist } from "../utils/approveAllChecklist";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -499,33 +500,21 @@ router.post(
 );
 
 // ── Bulk approve all fields ───────────────────────────────
+// Logic lives in utils/approveAllChecklist.ts — see the header there for
+// the four skip conditions and the deferred workflow decision on case
+// status. Route is a thin wrapper so the tested helper is the real thing.
 router.post(
   "/:caseId/checklist/approve-all",
   requireAuth,
   requireRole(["ADVISER", "PARAPLANNER", "ADMIN"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
-    await prisma.checklistField.updateMany({
-      where: { caseId: req.params.caseId, isApproved: false },
-      data: { isApproved: true, approvedAt: new Date(), status: "APPROVED" },
+    const result = await approveAllChecklist({
+      prisma,
+      caseId: req.params.caseId,
+      actorUserId: req.user!.id,
     });
-
-    await prisma.case.update({
-      where: { id: req.params.caseId },
-      data: { status: "APPROVED", approvedAt: new Date() },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        caseId: req.params.caseId,
-        userId: req.user!.id,
-        action: "CASE_APPROVED",
-        source: "MANUAL",
-        newValue: "All fields approved",
-      },
-    });
-
-    res.json({ message: "All fields approved" });
+    res.json(result);
   }
 );
 

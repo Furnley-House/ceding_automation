@@ -300,21 +300,31 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
     }
   };
 
-  const approveAllFilled = async () => {
+  const approveAllFilled = async (): Promise<{
+    approved: number;
+    skipped: number;
+    skippedFieldKeys: string[];
+  }> => {
     const filled = rows.filter(
       (r) => r.value && r.status !== "approved" && r.status !== "review_requested"
     );
-    if (!filled.length) return;
+    if (!filled.length) return { approved: 0, skipped: 0, skippedFieldKeys: [] };
+    let result = { approved: 0, skipped: 0, skippedFieldKeys: [] as string[] };
     try {
-      // Use approve-all endpoint
-      await api.post(`/cases/${caseId}/checklist/approve-all`, {
+      const res = await api.post<{
+        approved: number;
+        skipped: number;
+        skippedFieldKeys: string[];
+      }>(`/cases/${caseId}/checklist/approve-all`, {
         actorName: userName ?? undefined,
         actorRole: role ?? undefined,
       });
+      result = res.data;
     } catch (err) {
       console.error("approveAllFilled error", err);
     }
     refresh();
+    return result;
   };
 
   return { rows, byKey, loading, refresh, updateField, approveAllFilled };
