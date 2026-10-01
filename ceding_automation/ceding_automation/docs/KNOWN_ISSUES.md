@@ -5,6 +5,104 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-19 — Provider name comparison is string-based; needs a provider alias registry
+
+**Filed:** 2026-10-01
+**Owner:** unassigned
+**Severity:** Medium. Blocks the case-vs-AI provider mismatch flag (commit 268a139,
+reverted in a073df5) from being trustworthy without stopgap rules. The stopgap
+can get to ≤5 flags on current prod data, but it degrades the moment a new
+provider acquisition / rebrand lands.
+
+### What's happening
+
+The provider mismatch check in `aiBffApply.ts` compares the AI's `provider_name`
+reading against `Case.provider.name` via `compareFieldValues`. That comparator
+does string normalisation (lowercase, whitespace, possessive 's, mid-string
+period, "and" ↔ "&", substring collapse per follow-up commit). It has no
+awareness that "Aegon", "Aegon Platform", "Aegon One Retirement", "Aegon UK plc"
+and "AEGON Retirement Choices" are **the same provider** in the business.
+Nor that "The People's Pension" and "The Peoples Pension" (typo) are the same.
+Nor that "Friends Life" and "Aviva Life & Pensions UK Limited" are the same
+group post-2015 acquisition.
+
+### Evidence — 23 alias-shaped false positives in prod
+
+A prod query on 2026-10-01 against 154 cases with both `Case.provider.name` and
+checklist `provider_name` populated found **29 cases** where the string
+comparator would flag a mismatch. Breakdown:
+
+| Pattern | Count | Example |
+|---|---|---|
+| Aegon group alias | 9 | FH-2026-000115: Case `Aegon Scottish Equitable` vs checklist `Aegon` |
+| Legal & General alias ("and" vs "&" + longer form) | 4 | FH-2026-000149: Case `Legal and General` vs checklist `Legal & General` |
+| Parent/subsidiary (Octopus, Natwest, Wesleyan) | 3 | FH-2026-000139: Case `Octopus Investments Ltd` vs checklist `Octopus` |
+| St James's Place variants | 1 | FH-2026-000066: Case `St James Place` vs checklist `St. James's Place Wealth Management` |
+| Fidelity brand variants (FIL, International) | 2 | FH-2026-000206: Case `Fidelity Adviser Solutions` vs checklist `Fidelity International` |
+| True Potential word rearrangement | 1 | FH-2026-000023: Case `True Potential Investments` vs checklist `True Investment Potential trustee company limited` |
+| People's Pension typo (Case missing apostrophe) | 6 | FH-2026-000006, 18, 114, 43, 207, 9 |
+| Scottish Widows / Halifax (both Lloyds Group) | 2 | FH-2026-000118, 155 |
+| Friends Life (now Aviva) | 1 | FH-2026-000249 |
+
+23 of these are pure alias noise (Aegon ×9, L&G ×4, parent/subsidiary ×3, St James, Fidelity ×2,
+True Potential, Halifax/Widows ×2, Friends Life — the Fidelity and Lloyds-group cases are debatable
+but a CA would read them as noise). The remaining 7 — People's Pension typos (×6) and True Potential
+word rearrangement (×1) — are genuine data issues worth surfacing: Case header has a typo and a CA
+seeing it is useful.
+
+### Why the registry is the real answer
+
+Once the Provider table carries an aliases set — `{ canonical: "Aegon", aliases: ["Aegon Platform",
+"Aegon UK plc", "AEGON Retirement Choices", "AEGON One Retirement", "Aegon Scottish Equitable"] }` —
+the mismatch check reduces to: resolve both strings against the registry, compare canonicals, flag
+only if the canonicals differ. String normalisation becomes a last resort for unregistered providers.
+
+A registry also fixes:
+- The 18 placeholder providers from pre-mirror-gate AI writes (TEST, Unknown Provider, Other/Unknown,
+  Unknown, N/A — currently preserved as evidence, see commit 993141f). Each becomes a known
+  "placeholder" alias of a "needs CA input" sentinel.
+- The provider directory grooming surface — one place to see every provider ever written to prod,
+  with alias groupings. The current Provider table has no alias concept at all.
+- Downstream dedup (two cases pointing at Aegon and Aegon Platform right now show as different
+  providers on the dashboard).
+
+### Stopgap in flight (follow-up to 268a139)
+
+Three string-level rules extended into `compareFieldValues`:
+
+1. **Substring collapse** — if one normalised value contains the other, equivalent. Kills Aegon,
+   Octopus, Natwest, Wesleyan, St James, parts of L&G.
+2. **"and" ↔ "&" alias** — treat as equivalent during text normalisation. Finishes off L&G.
+3. **Mid-string period strip** — not just trailing. Finishes off St. James's.
+
+Combined with the possessive 's fix (from 268a139), these take the 29 down to the user's "aim for
+≤5" target. People's Pension and True Potential cases are **intentionally kept flagging** — the
+Case header has a genuine typo, a CA seeing it is useful.
+
+### What to do when picking this up
+
+- **Schema:** add `Provider.aliases String[]` (Postgres text[]). Backfill from the 29 evidence cases
+  above as the first seed. Admin UI needs a per-provider "manage aliases" page.
+- **Resolver:** `resolveProvider(name: string): Provider | null` → longest-matching-alias lookup,
+  normalisation-aware (lowercase, whitespace, possessive).
+- **Mismatch check:** replace the `compareFieldValues` call in `aiBffApply.ts` with
+  `resolveProvider(checklistValue) !== resolveProvider(Case.provider.name)`. Keep the stopgap
+  normalisation rules as the fallback when either side resolves to `null` (unregistered provider).
+- **Remove the stopgap rules** from `compareFieldValues` once the registry is authoritative — those
+  rules can over-collapse for non-provider text fields (e.g. "Charge Period Monthly" vs "Charge
+  Period"). Scope them to `fieldKey === "provider_name"` only, or move them out.
+
+### Notes
+
+- Commit 268a139 (first attempt at the mismatch flag with string-only comparison) was reverted in
+  a073df5 after the prod verification showed 29 flags. The follow-up with the three stopgap rules
+  lands separately.
+- `Case.providerId` is operator-owned per the mirror boundary (commit 993141f). Neither the stopgap
+  rules nor the eventual registry resolver changes that — the mismatch flag only marks the checklist
+  field, never writes to case details.
+
+---
+
 ## KI-18 — Templates added after a case's first extraction create unapprovable placeholder rows
 
 **Filed:** 2026-10-01

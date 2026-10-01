@@ -367,9 +367,26 @@ continue to work exactly as before.
 
 ---
 
-## C — Provider name mismatch flag (case-vs-AI conflict)
+## C — Provider name mismatch flag (case-vs-AI conflict) — PARKED
 
-**Status:** fixed, on staging (commit `268a139`).
+**Status:** NOT on staging. Original commit `268a139` was reverted in `a073df5`
+after the pre-deploy prod verification showed 29 cases would flag — far above the
+~4 we were aiming for. 23 of those 29 are alias noise (Aegon Platform ≡ Aegon,
+Legal & General ≡ Legal and General, Octopus Investments Ltd ≡ Octopus, etc.).
+
+**What's happening in the background:** three stopgap comparator rules are being
+added — substring collapse, "and" ↔ "&" alias, mid-string period strip —
+followed by a re-verify against the same 29 cases. Target: ≤5 flags. People's
+Pension and True Potential cases will intentionally still flag (genuine Case
+typos worth surfacing). The proper fix is a provider alias registry; see KI-19
+for the writeup and the 23 cases as seed data.
+
+**What you can do today:** nothing to click. Everything below describes the
+flow that will be in place once the extended comparator ships. Keeping it here
+so you can test immediately when it does.
+
+<details>
+<summary>Click-steps for when it ships (not applicable to this build)</summary>
 
 **What it closes:** before this, an AI extraction that read a different
 provider name from the operator-picked Case provider wrote silently to the
@@ -442,6 +459,8 @@ Case.providerId.** The Case stays operator-owned.
   still show the old heading "Two sources disagree — pick a value"
   and labels "Existing" / "New" with doc provenance. If those also
   changed, something's wrong with the source discriminator.
+
+</details>
 
 ---
 
