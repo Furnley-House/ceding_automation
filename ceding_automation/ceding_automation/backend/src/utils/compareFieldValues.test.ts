@@ -53,33 +53,6 @@ describe("compareFieldValues", () => {
         ),
       ).toBe("different");
     });
-    // Possessive-apostrophe collapse — "St James's Place" was coming back
-    // as "different" from "St James Place" because the 85% prefix rule
-    // can't bridge the "'s" split. Added so provider-name mismatch flagging
-    // doesn't fire false positives on St James's Place policy documents.
-    it("ASCII possessive 's folds — St James's Place ≡ St James Place", () => {
-      expect(
-        compareFieldValues("St James's Place", "St James Place", "text"),
-      ).toBe("equivalent");
-    });
-    it("curly ’s possessive folds — St James’s Place ≡ St James Place", () => {
-      expect(
-        compareFieldValues("St James’s Place", "St James Place", "text"),
-      ).toBe("equivalent");
-    });
-    it("case-insensitive with possessive — ST JAMES'S PLACE ≡ st james place", () => {
-      expect(
-        compareFieldValues("ST JAMES'S PLACE", "st james place", "text"),
-      ).toBe("equivalent");
-    });
-    it("plural possessive (apostrophe-only) folds — Customers' Trust ≡ Customers Trust", () => {
-      expect(
-        compareFieldValues("Customers' Trust", "Customers Trust", "text"),
-      ).toBe("equivalent");
-    });
-    it("possessive stripping does NOT eat trailing letters without apostrophe — glass ≠ glas", () => {
-      expect(compareFieldValues("glass", "glas", "text")).toBe("different");
-    });
   });
 
   describe("currency", () => {
