@@ -367,6 +367,151 @@ continue to work exactly as before.
 
 ---
 
+## C — Provider name mismatch flag (case-vs-AI conflict)
+
+**Status:** fixed, on staging (commit `268a139`).
+
+**What it closes:** before this, an AI extraction that read a different
+provider name from the operator-picked Case provider wrote silently to the
+checklist. The CA had no way to notice. Now the row is flagged CONFLICT
+with a two-side "pick a value" resolver — one side showing the Case header
+value, the other showing the extraction. **Neither side writes to
+Case.providerId.** The Case stays operator-owned.
+
+**Fire conditions** (all four required, or the flag doesn't fire):
+
+- The checklist "Provider name" field is not null and not "N/A".
+- The Case header provider is set AND is not one of the placeholder stubs
+  (`TEST`, `Unknown Provider`, `Other/Unknown`, `Unknown`, `N/A` — these
+  all came from pre-mirror-gate AI writes on 18 historical cases; we
+  don't flag against them).
+- `compareFieldValues` with `Case.provider.name` as the canonical returns
+  "different". This commit also fixed the possessive normaliser, so
+  "St James's Place" vs "St James Place" no longer false-flags.
+
+**Steps**
+
+1. Open any PENSION case where the Case header shows a real provider
+   (not blank, not one of the placeholders). The best test case is one
+   where you can run or re-run the AI extraction on a document whose
+   provider reads differently from the header.
+2. Trigger the AI extraction (Stage 3). Wait for Stage 4 to populate.
+3. Scroll to the "Provider name" row in the Stage 4 checklist.
+
+**Expected (mismatch case)**
+
+- Row shows a red CONFLICT chip, same style as a doc-vs-doc conflict.
+- Below the row, a two-candidate resolver appears with heading
+  **"Case header disagrees with the extraction — pick a value"**.
+- First card labelled **"Case header"** shows the Case provider name
+  with the line "from case header" (no "from X.pdf").
+- Second card labelled **"Extracted"** shows the AI's reading with
+  "from <doc name>, p.<n>".
+- Clicking "Use this value" on either card:
+  - picking Case header → checklist row flips to the Case provider name
+  - picking Extracted → checklist row keeps the AI reading
+  - either way, the Case header provider on the top of the page does
+    NOT change.
+
+**Expected (no mismatch)**
+
+- If the AI reads the same provider as the Case header (possibly after
+  the possessive / alias normalisation), no conflict chip appears. The
+  row shows HIGH / MEDIUM / LOW confidence as usual.
+
+**Possessive-check sub-test**
+
+- Set the Case header to a provider called "St James Place" (or any
+  provider whose true name has a possessive apostrophe). Run the AI
+  against a doc that calls it "St James's Place" or vice versa. The
+  mismatch flag should NOT fire — these are now treated as equivalent.
+
+**Regression indicator**
+
+- Case header provider changes after you resolve the conflict. The
+  mirror boundary from 993141f means this must never happen.
+- Mismatch flag fires on St James's Place vs St James Place (possessive
+  normaliser broken).
+- Mismatch flag fires when the Case header is one of the placeholder
+  stubs (`TEST`, `Unknown Provider`, `Other/Unknown`, `Unknown`, `N/A`)
+  — we shouldn't flag against a placeholder.
+- Mismatch flag does NOT fire on a case with a real Case provider +
+  AI reading a genuinely different provider (e.g. Case says "Aviva",
+  AI reads "Prudential").
+- Legacy doc-vs-doc conflicts (two PDFs disagree on the same field)
+  still show the old heading "Two sources disagree — pick a value"
+  and labels "Existing" / "New" with doc provenance. If those also
+  changed, something's wrong with the source discriminator.
+
+---
+
+## D — Checklist template mismatch banner
+
+**Status:** fixed, on staging (commit `94f1fba`).
+
+**What it closes:** nine prod cases have checklist rows keyed to an older
+plan type than the case currently is (someone changed the plan type after
+the AI had already seeded a different template set). The system has been
+logging `CHECKLIST_TEMPLATE_MISMATCH_DETECTED` audits on these cases for
+weeks, but the CA had no UI signal — the audits only showed up in the
+database. Now a red banner surfaces on the case detail page the moment the
+case has any orphan rows.
+
+**What changed:**
+
+- `GET /cases/:id` now returns `templateMismatchRowCount` — the count of
+  checklist rows whose template plan type doesn't match the case's current
+  plan type. Server-side one-liner, no new endpoint.
+- `CaseDetail` renders a red banner (same shape as the out-of-scope plan
+  type banner) when that count is > 0. The banner names the current plan
+  type and points at `POST /admin/cases/:id/reset-plan-type` as the repair
+  path.
+
+**Steps**
+
+1. Pick one of the known orphan-plan-type cases listed in
+   `docs/handover/orphan-plantype-cases-record.md` (there are 9). If you
+   don't have a convenient way to query which, ask Nishant for the IDs.
+2. Open the case in staging.
+3. Look at the top of the case detail page, below the header.
+
+**Expected (orphan case)**
+
+- A red-bordered banner is visible with heading **"Checklist template
+  mismatch — admin reset required"**.
+- The banner lines up vertically alongside (or in place of) the existing
+  "Plan type out of scope" banner on affected cases.
+- Message says "This case has <N> checklist rows keyed to a different
+  plan type than the case (<planType>)" with N matching the actual
+  orphan count and planType being the current Case.planType.
+- The repair command `POST /admin/cases/:id/reset-plan-type` is called
+  out in a code span.
+
+**Expected (healthy case)**
+
+- No banner. Clean case detail header as usual.
+
+**Admin-reset follow-up (optional)**
+
+- If an admin runs `POST /admin/cases/:id/reset-plan-type` on an orphan
+  case, orphan rows are deleted and the banner disappears on next page
+  load. This is unchanged behaviour — the banner just surfaces the state
+  that was already queryable in `audit_logs`.
+
+**Regression indicator**
+
+- Banner shows on a case with no orphan rows (false positive — count
+  must be > 0).
+- Banner does NOT show on a case that has orphan rows (the GET endpoint
+  isn't computing templateMismatchRowCount, or the frontend isn't
+  reading it).
+- Banner shows a wrong count (e.g. 0 but you can see from audit log that
+  mismatch audits exist). The audit log is historical; the banner tracks
+  current state — if orphan rows have been cleaned up, no banner even if
+  past audits exist. That's correct, not a bug.
+
+---
+
 # Not regressions — two things that look like they changed
 
 Please don't flag these as bugs; they are intentional consequences of fix A.
