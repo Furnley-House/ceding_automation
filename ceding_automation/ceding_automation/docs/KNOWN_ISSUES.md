@@ -48,30 +48,55 @@ breaks downstream, because nothing downstream reads the grid scalar's approval s
 ### Reproducible example in PROD
 
 **FH-2026-000256 (Karen Jacques, APPROVED)** — 71 DB rows, 71 with value, 68 approved. The 3
-unapproved rows are the three grid keys above. The case went APPROVED anyway. If the KI-09 guard
-were flipped on today, this case shape would 409 on every re-attempt — including the paraplanner
-re-approving it for a stage transition — because the guard sees `3 unapproved valued fields` and
-blocks.
+unapproved rows at the DB level are the three grid keys above. The case went APPROVED anyway. If
+the KI-09 guard were flipped on today, this case shape would 409 on every re-attempt — including
+the paraplanner re-approving it for a stage transition — because the guard reads raw
+`checklist_fields` and sees `3 unapproved valued fields`. The frontend KPI panel (Stage 10) sees
+only 2 of those 3 (fund_lines is filtered by `useChecklistFields.normaliseRows`), so the two
+numbers disagree on the same case: backend 3, frontend KPI 2.
 
 ### Where the numbers disagree across stages
 
-Every stage computes "completion" differently. Pension (71 active templates, 2 contribution scalars
-filtered, so 69 scalars visible):
+Every stage computes "completion" differently. Pension (71 active prod templates, 2 contribution
+scalars filtered by `CONTRIBUTIONS_LEGACY_FIELD_KEYS` giving 69 scalar visibleFields; the hook
+`useChecklistFields.normaliseRows` additionally drops `fund_lines` and any `fieldType === "table"`
+row before any consumer sees it, giving 70 hook-filtered rows):
 
 | Stage | File:line | Denominator | Pension total |
 |---|---|---|---|
-| 4 (AI Extraction) | `ChecklistPanel.tsx:283-322` | `visibleFields.length + 1 (Fund) + 2 (Contribs)` | **72** |
+| 4 (AI Extraction) | `ChecklistPanel.tsx:283-322` | `visibleFields.length + 1 (Fund synthetic) + 2 (Contribs synthetic)` | **72** |
 | 6 (Review Checklist) | `stages.tsx:340-370` | Same as Stage 4 | **72** |
 | 8 (Approval) | `ApprovalWorkspace.tsx:97-110` | `visibleFields.length` only — NO synthetic grids | **69** |
-| 10 (KPI) | `CaseKpiPanel.tsx:97-110` | raw `checklistRows.length` — no filter | **71** (or 108 for the 1 drift case) |
-| Export | `exportTemplate.ts:391+` | hard-coded ROWS_BY_PLAN + child-table rows | **~50 cells** |
+| 10 (KPI) | `CaseKpiPanel.tsx:97-110` | hook-filtered rows (fund_lines + table dropped) | **70** (or 107 for the 1 drift case) |
 | Backend invariant | `completionInvariant.ts` | raw `checklist_fields WHERE value AND !isApproved` | **0–71** per case |
 
-Same case, five different "totals." A paraplanner looking at a case with 68 approved sees:
+Same case, four different "totals" among the frontend-facing stages, plus a fifth count the backend
+invariant sees on the raw table. A paraplanner looking at a case with 68 approved sees:
 - Stage 4: "68/72 complete = 94%"
 - Stage 8: "68/69 approved = 99%"
-- Stage 10 KPI: "71 fields, 68 approved" (shows the 3 grid rows as unapproved-but-not-actionable)
-- Backend: 3 unapproved-valued rows (would block transition if guard on)
+- Stage 10 KPI: "70 fields, 68 approved" + 2 under the MISSING confidence band (the two contribution
+  scalars that aren't filtered by the hook but are hidden from ApprovalWorkspace — Carmel's "2 missing
+  I can't action" tile is exactly this)
+- Backend: 3 unapproved-with-value rows (reads raw DB, sees all three grid rows; would block
+  transition if guard on)
+
+**Deliberately NOT in this disagreement list: the Stage 9 export** (`exportTemplate.ts:34-114`,
+`PENSION_ROWS`). The export is a fixed-layout replica of the CA team's manual checklist XLSX template
+— 62 explicit scalar cells + a fund-details block (reads `ChecklistFundLine`) + a structured
+contributions block (reads `ContributionTransaction` with legacy free-text fallback). Verified by
+full join against prod on 2026-10-01: all 62 `PENSION_ROWS` keys match an active prod PENSION
+template; zero stale references, zero silent empty cells from mis-matched keys. The export's scope
+is intentionally different from the stage counters because it mirrors a different document (the CA's
+manual template, not the full template schema). Not a bug.
+
+**Reverse direction, filed separately as a question for the CA team, NOT as a KI:** 8 active PENSION
+template keys have no explicit row in `PENSION_ROWS`. 2 of these (`current_value_as_of`,
+`transfer_value_as_of`) are composed inline into their value counterpart's cell as "As at DD/MM/YYYY"
+(dedicated loop at `exportTemplate.ts:414-427`, covered by tests at `exportTemplate.test.ts:95-96`
+— working as intended). The remaining 6 (`contributions_breakdown_employer_personal`, `dfm_charge`,
+and four `_frequency` dropdowns) are present in the template but absent from the manual XLSX
+replica. Needs a conversation with the CA team to confirm whether each is deliberately out or an
+omission; separately captured, not pollution for KI-17.
 
 ### Role of `checklist_fields.value` for the three grid keys in PROD
 
