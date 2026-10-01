@@ -16,6 +16,7 @@ import { toast } from "sonner";
 import { checklistApi, casesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { useChecklistFields, isMissing } from "@/hooks/useChecklistFields";
+import { useCaseCompletionStats } from "@/hooks/useCaseCompletionStats";
 import {
   getTemplate,
   groupBySection,
@@ -94,20 +95,17 @@ export function ApprovalWorkspace({ caseItem }: Props) {
     [template, byKey, isPension],
   );
 
-  const stats = useMemo(() => {
-    let approved = 0,
-      review = 0,
-      pending = 0,
-      missing = 0;
-    visibleFields.forEach((f) => {
-      const r = byKey.get(f.key);
-      if (r?.status === "approved") approved++;
-      else if (r?.status === "review_requested") review++;
-      else if (isMissing(r)) missing++;
-      else pending++;
-    });
-    return { approved, review, pending, missing, total: visibleFields.length };
-  }, [visibleFields, byKey]);
+  // Shared stats via useCaseCompletionStats — canonical denominator
+  // (scalars + 1 Fund + 0/2 Contribs). See lib/computeCaseStats.ts for the
+  // migration note (Carmel's "2 missing" tile). The Mark-case-approved
+  // gate below stays on scalars (stats.breakdown.scalarsCounted) because
+  // grid approval is a separate decision (KI-17) — the button opens when
+  // every scalar is approved, same semantic as pre-migration.
+  const { stats: _canonicalStats } = useCaseCompletionStats({
+    caseId: caseItem.id,
+    planType: caseItem.plan_type,
+  });
+  const stats = _canonicalStats;
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -284,7 +282,11 @@ export function ApprovalWorkspace({ caseItem }: Props) {
     );
   }
 
-  const allFieldsApproved = stats.approved === stats.total && stats.total > 0;
+  // Gate stays on scalars — see migration note on stats above. KI-17 covers
+  // the grid-approval UI gap; until that lands, the gate's semantic is
+  // "every scalar approved" so paraplanners can still complete cases.
+  const allFieldsApproved =
+    stats.approved === stats.breakdown.scalarsCounted && stats.breakdown.scalarsCounted > 0;
   const caseAlreadyApproved = caseItem.status === "approved" || caseItem.status === "complete";
 
   // Initial-load gate: byKey is empty on first render → every visible

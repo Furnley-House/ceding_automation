@@ -14,6 +14,7 @@ import { useEditHistory } from "@/hooks/useEditHistory";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useChecklistFields, isMissing, fundDetailsStatus, type ChecklistRow } from "@/hooks/useChecklistFields";
+import { useCaseCompletionStats } from "@/hooks/useCaseCompletionStats";
 import { useDocuments } from "@/hooks/useDocuments";
 import { useFundLines } from "@/hooks/useFundLines";
 import { checklistApi } from "@/lib/api";
@@ -280,46 +281,35 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
   // for the team-facing note.
   const { rows: contributions } = useContributions(caseId, isPension);
 
+  // Shared canonical stats. See lib/computeCaseStats.ts for the migration
+  // note. Stage 4's display shape (HIGH/MEDIUM/LOW with Fund + Contribs
+  // folded in) is derived locally below from the canonical bands + grid
+  // primitives so the chip semantics are preserved exactly.
+  const { stats: _canonicalStats, fundStatus: _canonicalFundStatus, contribProgress: _canonicalContribProgress } =
+    useCaseCompletionStats({ caseId, planType });
   const stats = useMemo(() => {
-    const counts = { high: 0, medium: 0, low: 0, conflict: 0, missing: 0, approved: 0, review: 0 };
-    countedFields.forEach((f) => {
-      const r = byKey.get(f.key);
-      // Missing wins over confidence buckets — a value-says-"MISSING" row
-      // would otherwise be counted under HIGH (which it technically came
-      // back as) and skew the completion progress bar.
-      if (isMissing(r)) {
-        counts.missing++;
-      } else {
-        const conf = (r?.confidence ?? "").toUpperCase();
-        if (conf === "HIGH") counts.high++;
-        else if (conf === "MEDIUM") counts.medium++;
-        // CONFLICT folds into counts.low (same review bucket, needs human
-        // decision before approval) AND is tracked separately in
-        // counts.conflict so the "Needs review" chip can surface conflict
-        // size as a sub-line.
-        else if (conf === "LOW" || conf === "CONFLICT") {
-          counts.low++;
-          if (conf === "CONFLICT") counts.conflict++;
-        }
-      }
-      if (r?.status === "approved") counts.approved++;
-      if (r?.status === "review_requested") counts.review++;
-    });
-    // Fold Fund Details into the buckets as a single logical section.
-    if (fundStatus === "missing") counts.missing++;
-    else if (fundStatus === "review") counts.low++;
-    else if (fundStatus === "filled") counts.high++;
-    // Fold the two contributions grids. Non-Pension returns {add:0, filled:0}.
-    const contribProgress = contributionsProgress(
-      contributions,
-      isPension ? "PENSION" : null,
-    );
-    counts.high += contribProgress.filled;
-    counts.missing += contribProgress.add - contribProgress.filled;
-    const total = countedFields.length + 1 + contribProgress.add;
-    const completion = total === 0 ? 0 : Math.round(((total - counts.missing) / total) * 100);
-    return { ...counts, total, completion };
-  }, [countedFields, byKey, fundStatus, contributions, isPension]);
+    const bands = _canonicalStats.confidenceBands;
+    const high =
+      (bands.HIGH ?? 0) +
+      _canonicalContribProgress.filled +
+      (_canonicalFundStatus === "filled" ? 1 : 0);
+    const medium = bands.MEDIUM ?? 0;
+    const low =
+      (bands.LOW ?? 0) +
+      (bands.CONFLICT ?? 0) +
+      (_canonicalFundStatus === "review" ? 1 : 0);
+    return {
+      high,
+      medium,
+      low,
+      conflict: _canonicalStats.conflict,
+      missing: _canonicalStats.missing,
+      approved: _canonicalStats.approved,
+      review: _canonicalStats.review,
+      total: _canonicalStats.total,
+      completion: _canonicalStats.completion,
+    };
+  }, [_canonicalStats, _canonicalFundStatus, _canonicalContribProgress]);
 
   // Assemble the two-candidate resolver pack for a CONFLICT field. Returns
   // undefined when not conflicted or when the row lacks conflict_values

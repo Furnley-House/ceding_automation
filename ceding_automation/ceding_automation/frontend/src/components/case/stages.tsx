@@ -28,6 +28,7 @@ import { useDocuments } from "@/hooks/useDocuments";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useChecklistFields, isMissing, displayValue, fundDetailsStatus } from "@/hooks/useChecklistFields";
+import { useCaseCompletionStats } from "@/hooks/useCaseCompletionStats";
 import { useFundLines } from "@/hooks/useFundLines";
 import { useContributions } from "@/hooks/useContributions";
 import { contributionsProgress } from "@/lib/contributionsDerivation";
@@ -337,37 +338,27 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
   // Pension case pre-PR3). See commit message for team-facing note.
   const { rows: contributions } = useContributions(caseItem.id, isPension);
 
-  const totals = useMemo(() => {
-    const fieldTotal = visibleFields.length;
-    let filled = 0;
-    let returned = 0;
-    visibleFields.forEach((f) => {
-      const r = byKey.get(f.key);
-      if (!isMissing(r)) filled += 1;
-      if (r?.status === "review_requested") returned += 1;
-    });
-    // +1 row for Fund Details. Filled when fundStatus is "filled" OR "review"
-    // (the section has data, just not all high-confidence); missing only when
-    // there are no rows / every row is empty.
-    const fundFilled = fundStatus !== "missing";
-    if (fundFilled) filled += 1;
-    // +2 for the two contributions grids on Pension. contributionsProgress
-    // returns {add: 0, filled: 0} for non-Pension.
-    const contribProgress = contributionsProgress(
-      contributions,
-      isPension ? "PENSION" : null,
-    );
-    filled += contribProgress.filled;
-    const total = fieldTotal + 1 + contribProgress.add;
-    const missing = total - filled;
-    return {
-      total,
-      filled,
-      missing,
-      returned,
-      complete: total > 0 && missing === 0 && returned === 0,
-    };
-  }, [visibleFields, byKey, fundStatus, contributions, isPension]);
+  // Shared stats via useCaseCompletionStats. Change vs pre-migration: this
+  // stage now honours the off-sections filter (sections toggled not-applicable
+  // reduce the denominator), matching Stage 4's convention. See
+  // lib/computeCaseStats.ts.
+  const { stats: _canonicalStats } = useCaseCompletionStats({
+    caseId: caseItem.id,
+    planType: caseItem.plan_type,
+  });
+  const totals = useMemo(
+    () => ({
+      total: _canonicalStats.total,
+      filled: _canonicalStats.total - _canonicalStats.missing,
+      missing: _canonicalStats.missing,
+      returned: _canonicalStats.review,
+      complete:
+        _canonicalStats.total > 0 &&
+        _canonicalStats.missing === 0 &&
+        _canonicalStats.review === 0,
+    }),
+    [_canonicalStats],
+  );
 
   const grouped = useMemo(() => groupBySection(visibleFields), [visibleFields]);
 

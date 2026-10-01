@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { auditApi } from "@/lib/api";
 import { useChecklistFields } from "@/hooks/useChecklistFields";
+import { useCaseCompletionStats } from "@/hooks/useCaseCompletionStats";
 import { useDocuments } from "@/hooks/useDocuments";
 import { getTemplate } from "@/lib/checklistTemplates";
 import type { CaseRow } from "@/lib/caseHelpers";
@@ -94,20 +95,23 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
 
   // 3. AI extraction summary — confidence bands (manual override wins).
   // 4. Manual override count.
-  const { bands, manualOverrides } = useMemo(() => {
-    const b: Record<string, number> = {};
-    let mo = 0;
-    for (const r of checklistRows as Array<Record<string, unknown>>) {
-      const statusVal = typeof r.status === "string" ? r.status.toLowerCase() : "";
-      const isManual = r.manually_edited === true || statusVal === "manually_overridden";
-      if (isManual) mo += 1;
-      const band = isManual
-        ? "MANUALLY_OVERRIDDEN"
-        : (typeof r.confidence === "string" ? r.confidence.toUpperCase() : "MISSING");
-      b[band] = (b[band] ?? 0) + 1;
-    }
-    return { bands: b, manualOverrides: mo };
-  }, [checklistRows]);
+  //
+  // Shared stats via useCaseCompletionStats. Carmel's "2 missing" tile
+  // (27 of her PENSION cases) is resolved here: pre-migration, Stage 10
+  // iterated hook-filtered rows which still included the two contribution
+  // scalars (confidence="MISSING" strings), landing them in the MISSING
+  // band with no CA-accessible way to action them (ApprovalWorkspace hides
+  // them). Post-migration the shared helper applies the same
+  // CONTRIBUTIONS_LEGACY_FIELD_KEYS filter the other stages use, so those
+  // scalars are no longer counted individually — they fold into the
+  // Contributions grid synthetic slots which appear on the new "Grids
+  // reviewed" line below.
+  const { stats: _caseStats } = useCaseCompletionStats({
+    caseId,
+    planType: caseItem.plan_type,
+  });
+  const bands = _caseStats.confidenceBands;
+  const manualOverrides = _caseStats.manualOverrides;
   const bandOrder = ["HIGH", "MEDIUM", "LOW", "CONFLICT", "MISSING", "MANUALLY_OVERRIDDEN"];
   const bandSummary = bandOrder
     .filter((k) => bands[k])
@@ -145,6 +149,23 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
         label="AI extraction"
         value={`${totalFields} fields`}
         sub={bandSummary || undefined}
+      />,
+    );
+  }
+
+  // Grids reviewed card — new post-migration. Shows the Fund + Contribs
+  // synthetic slots so the KPI panel accounts for every logical section
+  // (not just scalars). Reviewed count stays at 0 pre-grid-approval-UI
+  // (KI-17); display shows filled vs total so a CA sees whether the grids
+  // have data at all. Only shows when gridSlots.total > 0 (always true
+  // for Pension/ISA/GIA — there's always at least the Fund slot).
+  if (_caseStats.gridSlots.total > 0) {
+    cards.push(
+      <StatCard
+        key="grids"
+        label="Grids reviewed"
+        value={`${_caseStats.gridSlots.reviewed}/${_caseStats.gridSlots.total}`}
+        sub={`${_caseStats.gridSlots.filled} populated with data`}
       />,
     );
   }
