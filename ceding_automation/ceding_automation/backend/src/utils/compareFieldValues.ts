@@ -104,9 +104,17 @@ function isNoneLike(v: string | null | undefined): boolean {
 }
 
 function normalizeText(s: string): string {
+  // Possessive 's (both ASCII ' and curly ’) collapses — "St James's
+  // Place" vs "St James Place" was coming back as "different" because the
+  // 85% prefix rule didn't match once the apostrophe-s split the longer
+  // string. Strip 's at word boundaries first, then any residual
+  // apostrophes (so "St James'" also folds), then the trailing-punctuation
+  // normalisation runs as before.
   return s
     .toLowerCase()
     .replace(/\s+/g, " ")
+    .replace(/[’']s\b/g, "")
+    .replace(/[’']/g, "")
     .replace(/[.,;:!?]$/, "")
     .trim();
 }
