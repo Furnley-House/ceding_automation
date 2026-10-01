@@ -5,6 +5,176 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-17 — "Approved" means three different things, and three fields can never be any of them
+
+**Filed:** 2026-10-01
+**Owner:** unassigned (resolution needs an Aruna-level workflow decision, not just eng)
+**Severity:** High. Not a data-loss bug; a definition-of-done bug that blocks the KI-09 guard from
+being safely flipped on. Discovered during the 2026-10-01 attempt to validate the item 1 completion
+guard on staging and corroborated with a PROD audit the same day.
+
+### Two angles on the same root cause
+
+**Angle A — three grid-shaped fields have no approve UI.**
+`fund_lines`, `contributions_4yr_history`, `contributions_breakdown_employer_personal` all seed a
+`checklist_fields` row at `documents.ts:518` first-extraction, but the paraplanner-facing
+`ApprovalWorkspace` filters them out of its field list — the first two via
+`CONTRIBUTIONS_LEGACY_FIELD_KEYS` (`ApprovalWorkspace.tsx:88-89`, Pension-only), the third via the
+template-load-time `fieldType === "table"` filter. The read-only widgets (`ContributionsTable`,
+`FundDetailsTable`) that replace them don't carry Approve controls. Consequence: `isApproved = false`
+on these rows **for every PROD case ever** — 61 of 61 PENSION cases sampled, including those in
+APPROVED and STAGE_10_COMPLETE.
+
+**Angle B — three completion paths with three different rulebooks.**
+The same user action ("complete this case") lands via three different frontend paths, each gated
+differently:
+
+| Path | Missing fields block? | Unapproved valued fields block? |
+|---|---|---|
+| ApprovalWorkspace "Mark case approved" | ✅ YES (frontend gate on every `visibleFields` entry) | ✅ YES (same gate) |
+| CaseDetail stepper "Mark complete & continue" at Stage 9 | ❌ NO | ⚠️ Only with `COMPLETION_GUARD_ENABLED=true` |
+| "Approve all filled" → case-status auto-flip | ❌ NO | ⚠️ Only with the guard on |
+
+Prod data: 10 of 103 completed PENSION cases (9.7%) completed with 1–5 missing template rows — the
+workspace gate blocked them, their paraplanner used the stepper instead. 1 ISA case completed with
+**20+** missing rows via the stepper path. This isn't rare opportunism; it's the established
+workaround for workspace-gate-blocked cases.
+
+Together these mean: for any case where the only unapproved fields are grid keys (which is the
+default state of every PENSION case), the workspace gate passes but the backend invariant would 409.
+The stepper path proves that cases DO complete today with those grid fields unapproved — and nothing
+breaks downstream, because nothing downstream reads the grid scalar's approval state.
+
+### Reproducible example in PROD
+
+**FH-2026-000256 (Karen Jacques, APPROVED)** — 71 DB rows, 71 with value, 68 approved. The 3
+unapproved rows are the three grid keys above. The case went APPROVED anyway. If the KI-09 guard
+were flipped on today, this case shape would 409 on every re-attempt — including the paraplanner
+re-approving it for a stage transition — because the guard sees `3 unapproved valued fields` and
+blocks.
+
+### Where the numbers disagree across stages
+
+Every stage computes "completion" differently. Pension (71 active templates, 2 contribution scalars
+filtered, so 69 scalars visible):
+
+| Stage | File:line | Denominator | Pension total |
+|---|---|---|---|
+| 4 (AI Extraction) | `ChecklistPanel.tsx:283-322` | `visibleFields.length + 1 (Fund) + 2 (Contribs)` | **72** |
+| 6 (Review Checklist) | `stages.tsx:340-370` | Same as Stage 4 | **72** |
+| 8 (Approval) | `ApprovalWorkspace.tsx:97-110` | `visibleFields.length` only — NO synthetic grids | **69** |
+| 10 (KPI) | `CaseKpiPanel.tsx:97-110` | raw `checklistRows.length` — no filter | **71** (or 108 for the 1 drift case) |
+| Export | `exportTemplate.ts:391+` | hard-coded ROWS_BY_PLAN + child-table rows | **~50 cells** |
+| Backend invariant | `completionInvariant.ts` | raw `checklist_fields WHERE value AND !isApproved` | **0–71** per case |
+
+Same case, five different "totals." A paraplanner looking at a case with 68 approved sees:
+- Stage 4: "68/72 complete = 94%"
+- Stage 8: "68/69 approved = 99%"
+- Stage 10 KPI: "71 fields, 68 approved" (shows the 3 grid rows as unapproved-but-not-actionable)
+- Backend: 3 unapproved-valued rows (would block transition if guard on)
+
+### Role of `checklist_fields.value` for the three grid keys in PROD
+
+Confirmed by the 2026-10-01 audit against prod:
+
+| Key | Cases with child-table rows | Cases with scalar `value` populated | Readers of the scalar |
+|---|---|---|---|
+| `fund_lines` | 61/61 | 24/61 (mostly `"N/A"` from bulk fill, or null) | **None.** Frontend filters, export reads `ChecklistFundLine`. Vestigial. |
+| `contributions_4yr_history` | 61/61 | 34/61 (mix of `"N/A"`, empty, real free-text strings on some) | **Legacy fallback in export** (`exportTemplate.ts:474`) when no structured `ContributionTransaction` rows exist. **Load-bearing on at least 1 prod case (FH-2026-000260).** |
+| `contributions_breakdown_employer_personal` | 61/61 | <10 of 10 samples (1 real string, 2 N/A, 7 null) | **None.** No reader anywhere. True vestigial template placeholder. |
+
+### Three resolution options, ordered by scope
+
+**(c) Remove the vestigial seed rows — framed first, as requested, but with a caveat.**
+
+Change `ensureCaseSeededForExtraction` at `documents.ts:518-565` to skip seeding for grid-shaped
+template keys. Specifically: filter `templates` to exclude `fund_lines` (and the two contribution
+keys, Pension-only) before the `createMany`. For existing cases, a one-shot cleanup migration deletes
+the orphan grid-scalar rows. With no scalar row, the backend invariant has nothing to match on; the
+guard passes naturally on cases where only the grid "value" is missing. Workspace gate also stops
+treating these as fields.
+
+**Caveat that stops this being pure win:** `contributions_4yr_history` IS load-bearing on at least
+one prod case (`FH-2026-000260`) as a legacy fallback — the export at `exportTemplate.ts:474` reads
+its scalar when no structured `ContributionTransaction` rows exist. Removing the seed for this key
+means (a) that fallback stops working, and (b) the one case using it gets an empty export cell.
+Options sub-A/B/C:
+
+- (c.i) Remove the seed row only for `fund_lines` and `contributions_breakdown_employer_personal`
+  (both confirmed vestigial by the audit). Leave `contributions_4yr_history` seeded. Small scope,
+  no readers broken.
+- (c.ii) Remove all three seed rows AND migrate the one `contributions_4yr_history` fallback case
+  by writing its scalar value into a synthesised `ContributionTransaction` row. Larger scope,
+  removes the dual-mode legacy entirely.
+- (c.iii) Remove all three seed rows AND remove the legacy fallback branch in `exportTemplate.ts`.
+  Export cell on FH-2026-000260 becomes empty; CA re-does that one case through the structured
+  grid. Cleanest schema, costs one case worth of manual re-entry.
+
+My read: **start with (c.i)** — it closes the KI-09 guard gap on 60 of 61 prod cases without touching
+the fallback. (c.ii) and (c.iii) are follow-ups once the dual-mode legacy is understood as removable
+rather than load-bearing.
+
+**(a) Build grid approval UI.**
+
+Add Approve / Request Review controls to `ContributionsTable` and `FundDetailsTable` when
+`readOnly=false` for paraplanners. Approving a widget approves its scalar seed row (and emits
+`FIELD_APPROVED`). Keeps the current schema; adds real workflow for grid review. Scope: a week+
+including UX design conversation about what "approving a 12-row fund table" means (per-row? whole
+table? partial?). The right long-term shape but requires product thinking we haven't done.
+
+**(b) Exempt the three field keys from the backend invariant.**
+
+Cheapest: ~5 loc. Teach `completionInvariant.ts` a `GRID_KEY_EXEMPTIONS` set, exclude from the WHERE
+clause. Reintroduces the frontend-vs-backend coupling KI-09 decision (c) tried to avoid, and leaves
+the grid values genuinely unsigned (nothing enforces that a paraplanner reviewed them). Defensible
+as an interim until (c) or (a) ships but doesn't actually fix the governance gap.
+
+### Three-paths resolution — separate from grid resolution but entangled
+
+The three-paths-three-rules problem persists regardless of which grid resolution ships. Options
+Aruna needs to pick:
+
+- **Workspace owns completion.** Stepper's "Mark complete & continue" at Stage 9 either delegates
+  to the workspace flow (fires the same mutation) or disappears. Backend enforces the strictest
+  rule: every active-template row populated AND approved. Blocks the 10 PENSION / 1 ISA cases in
+  prod today unless they re-work. Would require workspace gate relaxation on grid-shaped fields
+  OR option (a)/(c) above.
+- **Backend invariant owns completion.** "Every valued field approved" is the single rule;
+  workspace stops blocking on missing. Simpler, matches current stepper behaviour, drops the
+  "every applicable field populated" guarantee.
+- **Neither — document the split by design.** Formal sign-off (workspace, strict) vs informal
+  completion (stepper, lenient). Honest about today's reality; needs UI copy to make the split
+  visible.
+
+The current state is implicitly option 3 but by accident.
+
+### Prod reproduction & verification
+
+Both angles reproducible against prod today without a deploy:
+
+- **Angle A:** query `SELECT COUNT(*) FROM checklist_fields cf JOIN checklist_templates ct ON cf."templateId" = ct.id WHERE ct."fieldKey" IN ('fund_lines','contributions_4yr_history','contributions_breakdown_employer_personal') AND cf."isApproved" = true` — expected: 0.
+- **Angle B:** `FH-2026-000256` (Karen Jacques, APPROVED) has 3 unapproved-with-value rows; `FH-2026-000206` (Deborah McBeath, IN_REVIEW) has 68. Both would be 409'd by the item 1 guard flipped on.
+- **The 10 / 1 completed-with-drift cases** are the historical evidence that the stepper bypass is a real workflow (not a one-off).
+
+### Cross-refs
+
+- **KI-09** — "the guard does not exist." The item 1 2026-10-01 commit (`caf5060`) shipped the
+  guard. KI-17 is the sibling story: the guard was built to enforce an invariant that the UI
+  (and the three-path workflow) doesn't currently support.
+- **KI-04** — AI batch-vs-per-row audit. Related in that fund_lines / contributions use the
+  batch-level audit from `applyFundLines` and `applyContributionTransactions` — the per-row audit
+  gap means we can't currently reconstruct "which paraplanner approved which fund row" even if we
+  built the UI.
+- **KI-06** — multi-document fund dedup. Also entangled: dedup logic needs to live somewhere, and
+  "paraplanner signs off the deduped fund set" is the natural place — which requires the grid
+  approval UI from option (a).
+- The 2026-10-01 commit `caf5060` ships the completion guard behind
+  `COMPLETION_GUARD_ENABLED=false`. KI-17 is why the flag can't safely flip to true on prod yet.
+  Staging was flipped to true for one UI validation session on 2026-10-01; see the Alana Test
+  walkthrough in the session transcript.
+
+---
+
 ## KI-16 — Fold `role` into `useAuthStore` to retire the two-store drift permanently
 
 **Filed:** 2026-10-01
