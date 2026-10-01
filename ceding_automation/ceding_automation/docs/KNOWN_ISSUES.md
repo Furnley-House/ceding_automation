@@ -5,6 +5,111 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-18 — Templates added after a case's first extraction create unapprovable placeholder rows
+
+**Filed:** 2026-10-01
+**Owner:** unassigned
+**Severity:** Dormant in prod today (0 cases affected), **medium** the next time a template is added to
+PENSION / ISA / GIA. Any existing case that submitted extraction before the addition will carry a
+synthesised placeholder MISSING row for the new template with no CA-accessible path to populate or
+approve it from the Approval workspace.
+
+### The mechanism
+
+`backend/src/routes/documents.ts:518` guards:
+
+```ts
+if (caseRecord.extractionSubmittedAt !== null) return;
+```
+
+`ensureCaseSeededForExtraction` runs **once per case**, at first extraction submit. It snapshots the
+set of active templates for the case's planType, inserts one `checklist_fields` row per template,
+and stamps `extractionSubmittedAt`. If a new template is added later (via admin UI or seed migration),
+cases that already passed first-extraction never get a DB row for it. The guard protects against
+double-seeding; the side effect is that late template additions never backfill.
+
+Frontend's `ApprovalWorkspace.tsx:121-131` compensates by synthesising a placeholder row:
+
+```ts
+return {
+  id: `__placeholder__${f.key}`,
+  ...
+  value: null,
+  confidence: "MISSING",
+  status: "missing",
+} as ChecklistRow;
+```
+
+Which gets counted as **missing** in `stats` (line 97-110), inflates the "total" denominator
+(e.g. 67/68 instead of 67/67), and keeps the Mark-case-approved button grey because
+`stats.approved !== stats.total`.
+
+The placeholder is **filtered out of the default Pending tab** (filter excludes `isMissing(r)` at
+line 136-138) → **"Nothing to show"**. Visible only when the Missing tab is selected explicitly.
+
+The per-row Approve button on the placeholder is **disabled** at `FieldRow` line 767
+(`disabled={busy || !row.value || status === "approved"}`) — paraplanner has no action from this
+workspace.
+
+### Reproducible example (staging, not prod)
+
+**FH-2026-000111 (Alana Test), PENSION, IN_REVIEW.** 67/68 approved. The 1 missing is
+`other_notes` ("Additional Notes" in the Notes section) — template was added to staging on
+2026-08-06, Alana was seeded before that date. No DB row for her on this template; placeholder
+synthesised; sign-off blocked; field invisible on the default Pending tab.
+
+Workaround for a stuck CA: navigate to Stage 4 / Stage 6 (where editing is enabled), type any
+non-whitespace value into the field (even `"N/A"`). The `updateField` upsert path at
+`useChecklistFields.ts:243+` materialises a DB row. Return to Stage 8, approve.
+
+### Prod risk profile
+
+- **Today**: 0 occurrences. All 62 non-DRAFT extraction-submitted PENSION cases in prod have exactly
+  71 rows matching the 71 active templates. Verified by prod audit 2026-10-01.
+- **Next template addition**: every pre-existing case for that plan type is suddenly 1 placeholder
+  short on the denominator. Approval workspace shows the extra "1 missing" count, Pending tab shows
+  "Nothing to show", paraplanners can't reach sign-off without the Stage-4-edit workaround.
+- **Historical echo**: Alana Test is the live example of what prod will look like after any template
+  addition. Staging has drift because templates were added across a 2-month onboarding period
+  (2026-05 to 2026-08); prod has none because its templates stabilised before cases started.
+
+### Fix directions
+
+**(a) Backfill on template addition.** When a template is added or activated, run a one-shot
+migration that seeds a row for every case where the case's planType matches the new template's
+planType AND the case has `extractionSubmittedAt !== null`. Trivial Prisma `createMany` with
+`skipDuplicates: true`. Needs to be built into the template-admin flow (`routes/checklistTemplates.ts`)
+or a sidecar migration script that runs on template changes.
+
+**(b) Make `ensureCaseSeededForExtraction` idempotent across template additions.** Change the
+guard from "has extractionSubmittedAt" to "has a row for every active template." Would re-seed on
+every extraction submit after a template addition. More code, same effect as (a). Risk: subtle
+behaviour change on existing cases if the current short-circuit guards against anything else
+(need to re-read the H23 design to confirm no race).
+
+**(c) Give the paraplanner an inline "fill from Approval workspace" affordance** that seeds the
+row with a typed value on the spot. Doesn't fix the inflated denominator problem — just makes the
+Missing-tab fields actionable without going back to Stage 4. Less tidy, lower impact.
+
+My read: **(a)** is the cleanest. One codepath, runs when templates change, no behaviour change on
+seed. (b) is a close second if we want the self-healing property. (c) is a UX patch rather than a
+fix.
+
+### Notes for whoever picks this up
+
+- This is the **inverse** of the KI-09 / KI-17 / "FH-098 shape" story. Those are about rows
+  existing for templates the UI doesn't know how to action (grid gap) or templates for the WRONG
+  plan type (orphan rows). KI-18 is about rows that DON'T exist for templates the UI does know
+  about.
+- The three "silent counts" KIs are now a trilogy: KI-17 (grids counted silent), KI-18 (missing
+  rows for added templates counted silent), KI-09 (approval status counted silent at completion).
+  Different mechanisms, same shape of problem: the frontend's stats disagree with what the DB
+  actually has, and the paraplanner is left stuck.
+- Cross-ref `docs/handover/orphan-plantype-cases-record.md` for the OTHER direction of template
+  drift (orphan rows from planType flip).
+
+---
+
 ## KI-17 — "Approved" means three different things, and three fields can never be any of them
 
 **Filed:** 2026-10-01
