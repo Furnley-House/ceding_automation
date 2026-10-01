@@ -524,6 +524,39 @@ const CaseDetail = () => {
               </div>
             </div>
           )}
+          {/* Template mismatch banner — the case's planType was flipped
+              after a previous extraction seeded checklist rows keyed to a
+              different template. The system already logs
+              CHECKLIST_TEMPLATE_MISMATCH_DETECTED once per submit on
+              these cases, but until now the CA had no UI signal. Admin
+              reset-plan-type is the repair path. Mirrors the shape of
+              the out-of-scope banner above so the CA reads it the same
+              way. */}
+          {(() => {
+            const n = Number((caseItem as any).templateMismatchRowCount ?? 0);
+            if (!(n > 0)) return null;
+            return (
+              <div className="rounded-lg border-2 border-overdue bg-overdue/10 p-4 flex items-start gap-3">
+                <AlertTriangle className="h-5 w-5 text-overdue shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <h3 className="text-sm font-bold text-overdue theme-heading">
+                    Checklist template mismatch — admin reset required
+                  </h3>
+                  <p className="text-xs text-foreground mt-1">
+                    This case has <strong>{n}</strong> checklist row{n === 1 ? "" : "s"} keyed
+                    to a different plan type than the case
+                    (<strong>{String(caseItem.plan_type)}</strong>) — likely the result of a
+                    planType change after an earlier extraction. Extractions on this case will
+                    skip the orphan rows and may appear incomplete. An admin needs to run
+                    <code className="mx-1 px-1 py-0.5 bg-muted rounded text-[10px]">
+                      POST /admin/cases/:id/reset-plan-type
+                    </code>
+                    to clear the orphans.
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
           {(caseItem as any).zoho_task_id &&
             (!caseItem.Provider_group || !(caseItem as any).plan_number) && (
               <Button size="sm" variant="outline" onClick={syncFromZoho} className="text-xs">

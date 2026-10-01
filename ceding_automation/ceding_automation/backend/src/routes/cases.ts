@@ -733,7 +733,20 @@ router.get("/:id", requireAuth, requireCaseAccess, async (req: Request, res: Res
   // without a second endpoint. Derived from audit_logs — see the
   // getLockedFieldAttempts helper for the derivation contract.
   const lockedFieldAttempts = await getLockedFieldAttempts(req.params.id);
-  res.json({ ...caseRecord, lockedFieldAttempts });
+
+  // Template mismatch surfacing. Count checklist rows whose template
+  // planType differs from the case's current planType — the "orphan rows"
+  // scenario documented in docs/handover/orphan-plantype-cases-record.md.
+  // The system already emits CHECKLIST_TEMPLATE_MISMATCH_DETECTED once per
+  // extract-submit run on an orphan case; this surfaces the current state
+  // (how many orphan rows survive right now) so the frontend can render a
+  // banner without a second endpoint. Admin repair is
+  // POST /admin/cases/:id/reset-plan-type.
+  const templateMismatchRowCount = caseRecord.checklistFields.filter(
+    (f) => f.template.planType !== caseRecord.planType,
+  ).length;
+
+  res.json({ ...caseRecord, lockedFieldAttempts, templateMismatchRowCount });
 });
 
 // ── General Case Update (frontend "Mark complete & continue", etc.) ────
