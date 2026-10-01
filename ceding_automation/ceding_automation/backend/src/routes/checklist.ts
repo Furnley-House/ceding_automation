@@ -120,9 +120,10 @@ router.post(
       update: {}, // leave existing data untouched
     });
 
-    // If the seed carried a value, mirror it to the Case row.
+    // If the seed carried a value, mirror it to the Case row. CA path
+    // (admin seed from the UI) — source="ca" so the mirror proceeds.
     if (value) {
-      await mirrorChecklistToCase(req.params.caseId, template.fieldKey, value);
+      await mirrorChecklistToCase(req.params.caseId, template.fieldKey, value, "ca");
     }
 
     // Return the field with template fields flattened so the frontend can use
@@ -218,7 +219,8 @@ router.patch(
 
     // Propagate provider_name / plan_number / start_date to the Case row
     // so the header and dashboard reflect the latest value immediately.
-    await mirrorChecklistToCase(req.params.caseId, field.template.fieldKey, value);
+    // CA path (manual edit via PATCH) — source="ca" so the mirror proceeds.
+    await mirrorChecklistToCase(req.params.caseId, field.template.fieldKey, value, "ca");
 
     res.json(updated);
   }
@@ -477,8 +479,13 @@ router.post(
           },
         });
       }
-      // Mirror to Case columns (provider / policy ref / start date).
-      await mirrorChecklistToCase(caseRecord.id, tpl.fieldKey, NA_VALUE);
+      // Mirror to Case columns (provider / policy ref / start date). CA
+      // path (bulk mark-missing-as-N/A) — source="ca" so the mirror
+      // proceeds. In practice N/A values don't trigger any mirror branch
+      // (none of the three parse "N/A" as a value worth propagating) so
+      // this call is a no-op today — but kept for consistency with the
+      // other CA write paths.
+      await mirrorChecklistToCase(caseRecord.id, tpl.fieldKey, NA_VALUE, "ca");
       filled++;
     }
 

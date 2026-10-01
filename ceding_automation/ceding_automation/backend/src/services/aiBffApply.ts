@@ -275,20 +275,15 @@ export async function applyFieldExtraction(args: {
       } as Prisma.InputJsonValue,
     },
   });
-  // Propagate this field's value to the Case row (provider, policy_ref,
-  // plan_start_date). Fail-soft — checklist write already succeeded.
-  //
-  // Team rule 2026-09-23: the AI never writes to Case.policyRef.
-  // Case.policyRef is source-of-truth from Zoho, owned by the CA. The
-  // mirror function is preserved (see caseFieldMirror.ts) for CA-initiated
-  // paths — manual checklist PATCH, seed with value, N/A bulk-fill — so
-  // that a CA who spots a wrong Case.policyRef can still correct it by
-  // typing the right value into the checklist "Plan number" row. Only
-  // this single AI call site is blocked. See the reasoning in
-  // caseFieldMirror.ts's plan_number branch comment.
-  if (field.template.fieldKey !== "plan_number") {
-    await mirrorChecklistToCase(args.caseId, field.template.fieldKey, newValueStr);
-  }
+  // Call the mirror with source="ai". The mirror early-returns with no DB
+  // write — case details are not AI-sourced, team rule enforced centrally
+  // in caseFieldMirror.ts rather than per-call-site. See the file-header
+  // boundary rule in that module. (Earlier versions of this file carried a
+  // one-off `if (fieldKey !== "plan_number")` guard here; now subsumed by
+  // the mirror's source gate — provider_name and start_date leaked through
+  // that guard-shaped-wrongly, resulting in 18 placeholder providers and
+  // 125 AI-written planStartDate values in prod.)
+  await mirrorChecklistToCase(args.caseId, field.template.fieldKey, newValueStr, "ai");
   console.log(
     "[merge-outcome] outcome=applied case=%s field=%s job=%s doc=%s existingLen=%s incomingLen=%s",
     args.caseId,

@@ -1,27 +1,51 @@
 // backend/src/services/caseFieldMirror.ts
 // Propagate checklist-field changes back to the corresponding columns on
 // the Case row, so the header / cases list / dashboard reflect what the
-// AI extracted (or the CA team manually entered).
+// CA has manually entered on the checklist.
 //
-// The checklist is the source of truth for these values — case columns
-// are just cached projections we keep in sync.
+// ───────────────────────────────────────────────────────────────────────
+// BOUNDARY RULE (team policy, 2026-10-01):
+//
+//   The AI layer writes to the CHECKLIST ONLY. It must never write to
+//   case details. Case details come from the Zoho task and sync from
+//   there. A person deciding to update a case via a manual checklist
+//   edit is fine; the model deciding to update one is not.
+//
+// This mirror is the single surface where a checklist write could leak
+// into case details. The `source` parameter below is the enforcement
+// point: `source === "ai"` returns `{ changed: false }` immediately
+// regardless of fieldKey. CA paths pass `source === "ca"` and continue
+// to work. There is no "AI first-set is fine, only overwrite is bad"
+// nuance — the AI never writes to case details, period.
+//
+// Historical context: before this gate, three distinct leaks existed —
+//   - provider_name only had a sticky-overwrite guard; first-set from
+//     an AI extraction was open. 18 prod cases carry placeholder
+//     providers ("Unknown Provider", "Other/Unknown", "TEST") from this
+//     path. Preserved as evidence (see
+//     docs/handover/ equivalent for provider leak if filed later).
+//   - plan_number had a one-off `if (fieldKey !== "plan_number")` guard
+//     at the AI call site. Correct intent, wrong place — the rule was
+//     in a comment above one call site, not in the mirror's signature.
+//   - start_date had no guard at all. 125 prod cases have an AI-
+//     written Case.planStartDate; 94 of them have shipped (STAGE_10_
+//     COMPLETE or APPROVED) and their value was round-tripped into
+//     Zoho CRM Plan_Start_Date via the Stage 9 export writeback.
+// Encoding the rule in the mirror's signature (not in a comment above
+// one call site) prevents the next person adding a mirror branch or
+// a new AI call site from re-opening any of these.
+// ───────────────────────────────────────────────────────────────────────
 //
 // Currently mirrored:
-//   provider_name → Case.providerId    (fill-when-empty, sticky operator pick)
-//   plan_number   → Case.policyRef     (always mirror when called — BUT the
-//                                       AI merge caller in aiBffApply skips
-//                                       this fieldKey entirely, so only
-//                                       manual CA paths propagate. See
-//                                       services/aiBffApply.ts and the
-//                                       inline comment in the plan_number
-//                                       branch below for the reasoning.)
-//   start_date    → Case.planStartDate (always overwrite on difference)
+//   provider_name → Case.providerId    (CA only; AI blocked by `source` gate)
+//   plan_number   → Case.policyRef     (CA only; AI blocked by `source` gate)
+//   start_date    → Case.planStartDate (CA only; AI blocked by `source` gate)
 //
 // Called from:
-//   - applyFieldExtraction (AI write-back, both poller + PATCH path)
-//   - PATCH /cases/:id/checklist/:fieldId  (manual edit)
-//   - POST  /cases/:id/checklist/seed       (seed with value)
-//   - POST  /cases/:id/checklist/fill-test-data
+//   - applyFieldExtraction (AI write-back) — passes `source: "ai"`, becomes a no-op
+//   - PATCH /cases/:id/checklist/:fieldId   (manual edit) — passes `source: "ca"`
+//   - POST  /cases/:id/checklist/seed       (seed with value) — passes `source: "ca"`
+//   - POST  /cases/:id/checklist/mark-missing-na (bulk fill) — passes `source: "ca"`
 //
 // Fail-soft: any error here is logged and swallowed — checklist write
 // already succeeded, we don't want to fail the caller just because a
@@ -30,6 +54,8 @@
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
+
+export type MirrorSource = "ai" | "ca";
 
 // DD/MM/YYYY or ISO → Date. Returns null if unparseable.
 function parseDate(raw: string): Date | null {
@@ -64,12 +90,25 @@ async function upsertProviderByName(name: string): Promise<string> {
  * No-op for fields that aren't mirrored. Idempotent — re-running with
  * the same value won't generate spurious writes (we read the current
  * column first and skip if equal).
+ *
+ * @param source `"ai"` (AI write-back) returns `{ changed: false }` immediately
+ *               with no DB write — case details must not be AI-sourced.
+ *               `"ca"` (CA-initiated edit, seed, or bulk-fill) proceeds
+ *               with the mirror.
  */
 export async function mirrorChecklistToCase(
   caseId: string,
   fieldKey: string,
   value: string | null,
+  source: MirrorSource,
 ): Promise<{ changed: boolean; column?: string }> {
+  if (source === "ai") {
+    // Boundary rule — see file header. AI writes to the checklist row
+    // (via applyFieldExtraction) but never to the case columns the
+    // mirror would propagate to. CA edits still propagate.
+    return { changed: false };
+  }
+
   if (!value || !value.trim()) {
     return { changed: false };
   }
