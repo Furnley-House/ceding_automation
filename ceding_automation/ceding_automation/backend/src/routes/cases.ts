@@ -1128,6 +1128,24 @@ router.patch(
     } catch (err) {
       const e = err as { code?: string; message?: string };
       if (e.code === "P2025") return res.status(404).json({ error: "Case not found" });
+      // Structured log on 5xx so the next silent-looking completion /
+      // status flip leaves a trace in Azure App Insights / docker logs.
+      // Item 8 (FH-2026-000124): a case sat at APPROVED for 9 days with
+      // no completion date and no audit of a failed attempt. The frontend
+      // toasts the error but auto-dismisses in ~5s; if the CA missed it
+      // the attempt was invisible to us. This line names the case, user,
+      // what they tried to change, and the Prisma error — enough to
+      // correlate with a user report.
+      // eslint-disable-next-line no-console
+      console.error(JSON.stringify({
+        event: "case-patch-failed",
+        caseId: req.params.id,
+        userId: req.user?.id ?? null,
+        attemptedStatus: typeof data.status === "string" ? data.status : null,
+        attemptedKeys: Object.keys(data),
+        prismaCode: e.code ?? null,
+        error: e.message ?? String(err),
+      }));
       return res.status(500).json({ error: e.message ?? "Update failed" });
     }
 
