@@ -16,7 +16,7 @@ export const SYSTEM_USER_ID = "system-ai-bff";
 export type ApplyFieldOutcome =
   | "applied"
   | "conflict"
-  | "preserved" // isApproved or isManuallyOverridden
+  | "preserved" // isApproved, isManuallyOverridden, or reviewRequestedAt != null
   | "no-overwrite-missing" // incoming was MISSING; existing value held
   | "skipped-manual-only" // template flagged manual-entry-only; AI never writes
   | "field-not-found";
@@ -84,8 +84,13 @@ export async function applyFieldExtraction(args: {
     return { outcome: "skipped-manual-only", fieldId: field.id };
   }
 
-  // (1) Preservation guard — never stomp CA-Team edits or paraplanner approvals.
-  if (field.isApproved || field.isManuallyOverridden) {
+  // (1) Preservation guard — never stomp CA-Team edits, paraplanner
+  // approvals, or paraplanner review-requests. The reviewRequestedAt
+  // check was added after re-extraction was observed silently resetting
+  // a review-requested field back to AI_EXTRACTED — destroying the
+  // paraplanner's "please re-check this" marker with no visible signal
+  // in the UI.
+  if (field.isApproved || field.isManuallyOverridden || field.reviewRequestedAt !== null) {
     console.log(
       "[merge-outcome] outcome=preserved case=%s field=%s job=%s doc=%s",
       args.caseId,
