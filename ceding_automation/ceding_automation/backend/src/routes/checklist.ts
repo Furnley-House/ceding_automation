@@ -6,7 +6,6 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { requireCaseAccess } from "../middleware/requireCaseAccess";
 import { requireInternalKey } from "../middleware/internalKey";
 import { applyFieldExtraction } from "../services/aiBffApply";
-import { mirrorChecklistToCase } from "../services/caseFieldMirror";
 import { shouldClearApproval } from "../utils/approvalOnEdit";
 import { canMarkMissingAsNA } from "../utils/checklistReadiness";
 import { approveAllChecklist } from "../utils/approveAllChecklist";
@@ -120,12 +119,6 @@ router.post(
       update: {}, // leave existing data untouched
     });
 
-    // If the seed carried a value, mirror it to the Case row. CA path
-    // (admin seed from the UI) — source="ca" so the mirror proceeds.
-    if (value) {
-      await mirrorChecklistToCase(req.params.caseId, template.fieldKey, value, "ca");
-    }
-
     // Return the field with template fields flattened so the frontend can use
     // field.fieldKey / field.label / field.section directly (after snake_keys).
     res.status(201).json({
@@ -217,10 +210,14 @@ router.patch(
       },
     });
 
-    // Propagate provider_name / plan_number / start_date to the Case row
-    // so the header and dashboard reflect the latest value immediately.
-    // CA path (manual edit via PATCH) — source="ca" so the mirror proceeds.
-    await mirrorChecklistToCase(req.params.caseId, field.template.fieldKey, value, "ca");
+    // Case details (Case.providerId / policyRef / planStartDate) are
+    // Zoho-sourced only — see the three-layer rule in CLAUDE.md.
+    // Checklist edits land in checklist_fields and flow into the Excel
+    // export, but never propagate to the Case row. The old mirror call
+    // here was removed on 2026-10-03 to make the rule enforceable in
+    // code rather than policy. A CA correcting a wrong Case.policyRef
+    // or Case.providerId has to do it in Zoho (which syncs down), not
+    // via the checklist.
 
     res.json(updated);
   }
@@ -479,13 +476,9 @@ router.post(
           },
         });
       }
-      // Mirror to Case columns (provider / policy ref / start date). CA
-      // path (bulk mark-missing-as-N/A) — source="ca" so the mirror
-      // proceeds. In practice N/A values don't trigger any mirror branch
-      // (none of the three parse "N/A" as a value worth propagating) so
-      // this call is a no-op today — but kept for consistency with the
-      // other CA write paths.
-      await mirrorChecklistToCase(caseRecord.id, tpl.fieldKey, NA_VALUE, "ca");
+      // No mirror to Case columns — case details are Zoho-sourced only
+      // per the three-layer rule (see CLAUDE.md). N/A on the checklist
+      // stays on the checklist.
       filled++;
     }
 

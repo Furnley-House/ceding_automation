@@ -8,7 +8,6 @@
 import { PrismaClient, Prisma } from "@prisma/client";
 import type { BffExtractedField, BffJobResult } from "./aiBffClient";
 import { compareFieldValues } from "../utils/compareFieldValues";
-import { mirrorChecklistToCase } from "./caseFieldMirror";
 
 const prisma = new PrismaClient();
 export const SYSTEM_USER_ID = "system-ai-bff";
@@ -275,15 +274,11 @@ export async function applyFieldExtraction(args: {
       } as Prisma.InputJsonValue,
     },
   });
-  // Call the mirror with source="ai". The mirror early-returns with no DB
-  // write — case details are not AI-sourced, team rule enforced centrally
-  // in caseFieldMirror.ts rather than per-call-site. See the file-header
-  // boundary rule in that module. (Earlier versions of this file carried a
-  // one-off `if (fieldKey !== "plan_number")` guard here; now subsumed by
-  // the mirror's source gate — provider_name and start_date leaked through
-  // that guard-shaped-wrongly, resulting in 18 placeholder providers and
-  // 125 AI-written planStartDate values in prod.)
-  await mirrorChecklistToCase(args.caseId, field.template.fieldKey, newValueStr, "ai");
+  // No mirror call. Case.providerId / policyRef / planStartDate are
+  // Zoho-sourced only per the three-layer rule in CLAUDE.md. The AI
+  // write-back has landed on the checklist row above; nothing propagates
+  // to the Case row. The mirror module itself was removed on 2026-10-03
+  // to make this rule enforceable in code rather than policy.
   console.log(
     "[merge-outcome] outcome=applied case=%s field=%s job=%s doc=%s existingLen=%s incomingLen=%s",
     args.caseId,

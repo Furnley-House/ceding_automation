@@ -23,6 +23,32 @@ See `project-context/sprint-plan-draft.md` for the live sprint plan (7 sprints, 
 - **Hard gate:** ≥85% HIGH-confidence AI extraction on 50+ PDFs / 6+ providers before UAT (NFR-04)
 - **In scope (Phase 1):** Pension, ISA, GIA · **Phase 2:** Bond, Final Salary / DB, Protection
 
+## Data model — three-layer rule (never violate)
+
+Three write surfaces, three sources of truth, no propagation between them:
+
+1. **Case details** (`cases` table — `providerId`, `policyRef`, `planStartDate`,
+   client / plan metadata) are **Zoho-sourced only.** The only writer is the
+   Zoho sync path. Nothing else — not AI extraction, not a CA resolving a
+   conflict, not a manual edit on the checklist — may change these columns.
+2. **Checklist** (`checklist_fields` table) is where corrections happen. CAs
+   type, approve, request-review, and resolve conflicts here. AI write-back
+   also lands here. Everything flows **into** the checklist and **out of** it
+   to the Excel; nothing flows **up** from the checklist to case details.
+3. **Excel export** is built from the checklist row values at Stage 9.
+
+Enforcement checkpoints (if any of these fail, the rule is already broken):
+- `services/aiBffApply.ts` — AI write-back; may update `checklist_fields` and
+  create audit rows. Must never update `cases`.
+- `routes/checklist.ts` PATCH / seed / mark-missing-N/A / resolve-conflict —
+  CA write surfaces. All update `checklist_fields` only.
+- The old `services/caseFieldMirror.ts` which propagated checklist edits up
+  to Case was removed on 2026-10-03. Any PR that re-introduces a
+  checklist→case write is a rule violation.
+
+Correction path for a wrong case detail: fix it in Zoho, let the sync
+down-propagate. Not via the checklist.
+
 ## Deployment — MUST READ before any deploy
 
 **Before proposing or executing any deploy command** (`az containerapp update`,
