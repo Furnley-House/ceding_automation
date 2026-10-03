@@ -441,16 +441,25 @@ export function ChecklistField({
               </Tooltip>
 
               <Dialog open={reviewOpen} onOpenChange={setReviewOpen}>
-                <DialogTrigger asChild>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
+                {/* Correct asChild composition: Tooltip wraps TooltipTrigger
+                    which wraps DialogTrigger which wraps the Button. Both
+                    triggers merge their behaviour onto the leaf Button via
+                    chained asChild — so the one Button is both a tooltip
+                    anchor and a dialog opener. The previous shape
+                    (DialogTrigger asChild > Tooltip > ...) failed because
+                    Tooltip is a Radix Context provider that renders no DOM
+                    element at its root, so DialogTrigger's merged click
+                    handler went nowhere — the button opened nothing. */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DialogTrigger asChild>
                       <Button size="sm" variant="outline" className="h-9 px-2">
                         <RotateCcw className="h-3.5 w-3.5" />
                       </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Request review</TooltipContent>
-                  </Tooltip>
-                </DialogTrigger>
+                    </DialogTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent>Request review</TooltipContent>
+                </Tooltip>
                 <DialogContent className="max-w-md">
                   <DialogHeader>
                     <DialogTitle>Request review on “{def.label}”</DialogTitle>
@@ -468,16 +477,19 @@ export function ChecklistField({
               </Dialog>
 
               <Dialog open={commentOpen} onOpenChange={setCommentOpen}>
-                <DialogTrigger asChild>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
+                {/* Same chained-asChild pattern as above — see the Request
+                    review dialog for the explanation of why the original
+                    DialogTrigger-wraps-Tooltip shape silently did nothing. */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DialogTrigger asChild>
                       <Button size="sm" variant="outline" className="h-9 px-2">
                         <MessageSquare className="h-3.5 w-3.5" />
                       </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Add comment</TooltipContent>
-                  </Tooltip>
-                </DialogTrigger>
+                    </DialogTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent>Add comment</TooltipContent>
+                </Tooltip>
                 <DialogContent className="max-w-md">
                   <DialogHeader>
                     <DialogTitle>Comment on “{def.label}”</DialogTitle>
