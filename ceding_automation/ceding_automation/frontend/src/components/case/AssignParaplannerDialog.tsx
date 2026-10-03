@@ -18,6 +18,7 @@ import { casesApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { PARAPLANNERS, type Paraplanner } from "@/lib/paraplanners";
 import type { CaseRow } from "@/lib/caseHelpers";
+import { ukDatePlusDays } from "@/lib/dates";
 
 interface Props {
   caseItem: CaseRow;
@@ -26,10 +27,12 @@ interface Props {
   onAssigned?: () => void;
 }
 
+// Default due date = UK calendar today + 3 days. The previous
+// `new Date().toISOString().slice(0, 10)` returned the UTC date,
+// which was 1 day off during the 00:00-01:00 BST window — the same
+// bug class as item 9. See lib/dates.ts.
 function defaultDueDate() {
-  const d = new Date();
-  d.setDate(d.getDate() + 3);
-  return d.toISOString().slice(0, 10);
+  return ukDatePlusDays(3);
 }
 
 export function AssignParaplannerDialog({ caseItem, open, onOpenChange, onAssigned }: Props) {

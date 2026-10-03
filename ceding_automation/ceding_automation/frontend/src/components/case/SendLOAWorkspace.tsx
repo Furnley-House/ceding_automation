@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { updateCase } from "@/services/api";
 import type { CaseRow } from "@/lib/caseHelpers";
+import { todayUkDate } from "@/lib/dates";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -225,7 +226,9 @@ Kind regards,`;
       {
         loa_method: method,
         loa_status: "sent",
-        loa_sent_date: new Date().toISOString().slice(0, 10),
+        // UK calendar date, not UTC. Same bug class as item 9 (completion
+        // date day-early in BST overnight window). See lib/dates.ts.
+        loa_sent_date: todayUkDate(),
         ...fieldsForMethod(method),
       },
       { onSuccess: () => toast.success("LOA marked as sent") },

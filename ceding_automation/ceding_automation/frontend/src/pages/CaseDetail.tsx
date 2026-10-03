@@ -5,6 +5,7 @@ import axios from "axios";
 import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, AlertTriangle, ExternalLink, RefreshCw, Search, Plus } from "lucide-react";
 import type { AppLayoutContext } from "@/components/layout/AppLayout";
 import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho, type SyncDebug } from "@/services/api";
+import { todayUkDate } from "@/lib/dates";
 import { optionalSectionsApi } from "@/lib/api";
 import { CEDING_STAGES, STATUS_LABELS, STATUS_STYLES, RAG_STYLES, calculateRag } from "@/lib/caseHelpers";
 import { isSupportedPlanType, SUPPORTED_PLAN_TYPES } from "@/lib/checklistTemplates";
@@ -307,7 +308,10 @@ const CaseDetail = () => {
     // Stamp completion when crossing into the final stage
     if (currentStage === 9 && next === 10) {
       updates.status = "complete";
-      updates.ceding_complete_date = new Date().toISOString().slice(0, 10);
+      // UK calendar date, not UTC — avoids the "day early" bug on
+      // overnight completions in BST (00:00-01:00 BST is still the
+      // previous day in UTC). See lib/dates.ts.
+      updates.ceding_complete_date = todayUkDate();
       // Mirror to the Zoho ceding status so the dashboard SR-ready panel picks it up.
       // In production this happens via a Zoho CRM webhook; here we mark it locally.
       (updates as any).zoho_ceding_status = "ceding_complete";
