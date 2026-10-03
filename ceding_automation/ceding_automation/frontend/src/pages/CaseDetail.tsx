@@ -1,6 +1,7 @@
 import { useParams, useNavigate, Link, useLocation, useOutletContext } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import axios from "axios";
 import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, AlertTriangle, ExternalLink, RefreshCw, Search, Plus } from "lucide-react";
 import type { AppLayoutContext } from "@/components/layout/AppLayout";
 import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho, type SyncDebug } from "@/services/api";
@@ -34,10 +35,21 @@ const CaseDetail = () => {
   // it from Stage 4 (PDF↔extraction comparison wants every pixel it can get).
   const layoutCtx = useOutletContext<AppLayoutContext | undefined>();
 
-  const { data: caseItem, isLoading } = useQuery({
+  const { data: caseItem, isLoading, error: caseLoadError } = useQuery({
     queryKey: ["case", id],
     queryFn: () => getCaseById(id!),
     enabled: !!id,
+    // Don't retry on 404 / 403 / 429 — they're not transient. Default
+    // retry would hammer a 429 three more times and lock the user out
+    // for longer, and would briefly flash "Case not found" between
+    // retries for a genuine 404.
+    retry: (failureCount, err) => {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        if (status === 404 || status === 403 || status === 429) return false;
+      }
+      return failureCount < 2;
+    },
   });
 
   const syncFromZoho = async () => {
@@ -188,9 +200,29 @@ const CaseDetail = () => {
   }
 
   if (!caseItem) {
+    // Differentiate the empty state by what came back from the server.
+    // Previously every error — 404, 403, 429, network — fell into a
+    // single "Case not found." message, which was misleading on a 429
+    // (the case does exist; the user has just hit the rate limit).
+    const status = axios.isAxiosError(caseLoadError) ? caseLoadError.response?.status : null;
+    let heading = "Case not found.";
+    let detail: string | null = null;
+    if (status === 429) {
+      heading = "Too many requests — please wait a minute and try again.";
+      detail = "You've hit the per-user rate limit. The case still exists.";
+    } else if (status === 403) {
+      heading = "You don't have access to this case.";
+      detail = "If you think this is wrong, ask an admin to re-assign you.";
+    } else if (status === 404) {
+      heading = "Case not found.";
+    } else if (caseLoadError) {
+      heading = "Couldn't load this case.";
+      detail = "Something went wrong on the server — refresh to try again.";
+    }
     return (
       <div className="p-8 text-center">
-        <p className="text-muted-foreground mb-4">Case not found.</p>
+        <p className="text-foreground font-medium mb-1">{heading}</p>
+        {detail && <p className="text-xs text-muted-foreground mb-4">{detail}</p>}
         <Link to="/cases" className="text-teal hover:underline text-sm">
           ← Back to cases
         </Link>
