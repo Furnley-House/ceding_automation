@@ -546,9 +546,32 @@ case has any orphan rows.
 
 ---
 
-# Not regressions — two things that look like they changed
+# Not regressions — three things that look like they changed
 
-Please don't flag these as bugs; they are intentional consequences of fix A.
+Please don't flag these as bugs; they are intentional consequences of this
+round's work.
+
+## Checklist edits to provider name / plan number / start date no longer update the case header
+
+Before commit `102bc50`, typing a new value into the Stage 4 checklist
+"Provider name", "Plan number" or "Start date" row propagated up to the Case
+header — the header on the top of the page would reflect your edit within a
+second. That mirror path has been removed.
+
+Now: editing those three fields on the checklist writes to the checklist row
+only. The Case header shows what Zoho sent and doesn't move when you edit
+the checklist. This is the three-layer rule in action — Case details come
+from Zoho only, the checklist is where corrections happen, the Excel is
+built from the checklist.
+
+If the Case header is wrong, the fix path is Zoho (which syncs down), not
+the checklist. If you spot cases where the header is clearly stale, flag the
+operator to update Zoho — the checklist edit on its own won't do it.
+
+This affects every CA edit on those three fields, including the "pick the
+Case header value" button in the new provider mismatch resolver (item C).
+Picking either side updates the checklist only; the header stays put. That
+is deliberate — see the regression indicator in item C.
 
 ## Stage 8 progress bar sometimes drops by ~4 points
 
