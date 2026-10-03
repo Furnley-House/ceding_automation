@@ -233,6 +233,21 @@ const CaseDetail = () => {
   };
 
   const completeAndNext = async () => {
+    // Regression guard. completeAndNext computes `next` from `currentStage`
+    // (= viewStage), and the stepper's click handler updates viewStage
+    // view-only. So a CA who view-navigated to an earlier stage and then
+    // clicks "Mark complete & continue" was writing `current_stage: next`
+    // with next < backend's current_stage, regressing the case silently.
+    // Viewing a completed stage is not re-doing it. See item 7 in Revathy's
+    // 2026-10-03 re-test report. The button for this case is also swapped
+    // to a view-only "Next step" below, but the guard here is the
+    // correctness mechanism — the button swap is UX.
+    if (currentStage < rawStage) {
+      toast.message("Step already complete", {
+        description: `Step ${currentStage} is done — this is a view-only visit. Advance from step ${rawStage}.`,
+      });
+      return;
+    }
     // Stage 4 (Extract & Fill): optional sections the CA left switched off
     // (With-Profit Funds / Guarantees / Protected Tax-Free Cash) get their
     // fields written as N/A now. Best-effort — never blocks moving on.
@@ -587,7 +602,17 @@ const CaseDetail = () => {
             <p className="text-xs text-muted-foreground">
               Step {currentStage} of 10 · {CEDING_STAGES[currentStage - 1]?.label ?? ""}
             </p>
-            {isCA && currentStage < 10 ? (
+            {/* Button variant depends on three things:
+                  - Role (CA sees the completion button; everyone else gets
+                    view-only navigation).
+                  - Whether this is the final stage (no button past 10).
+                  - Whether the CA is viewing a stage that's ALREADY past
+                    the backend's current_stage. If so, the completion
+                    button would regress the case (see completeAndNext's
+                    guard) — swap to a view-only Next step so the CA can
+                    walk forward through completed stages without the
+                    regression trap. */}
+            {isCA && currentStage < 10 && currentStage >= rawStage ? (
               <Button
                 onClick={completeAndNext}
                 className="gap-2"
