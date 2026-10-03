@@ -74,7 +74,10 @@ function buildPlanFields(
   caseRecord: {
     planType: string;
     policyRef: string | null;
-    planStartDate: Date | null;
+    // Note: Case.planStartDate is NOT read here. Plan_Start_Date comes
+    // from the approved checklist row (fieldKey "start_date") per the
+    // three-layer rule in CLAUDE.md — Excel + Zoho export are built from
+    // the checklist, not from Case columns. See the setIf below.
     // Cached at sync time; consumed verbatim here.
     zohoOwnerId: string | null;
     zohoClientOwnerIds: string[];
@@ -110,9 +113,6 @@ function buildPlanFields(
   // ─ Simple scalars ─
   setIf("Plan_Type", mapPlanTypePicklist(caseRecord.planType));    // Pick list
   setIf("Policy_Ref", caseRecord.policyRef);                       // Single Line
-  if (caseRecord.planStartDate) {
-    setIf("Plan_Start_Date", caseRecord.planStartDate.toISOString().slice(0, 10));
-  }
 
   // ─ Hard-coded business-rule defaults (D6) ─
   // Both fields are fixed values per Furnley House process — they are no
@@ -123,6 +123,7 @@ function buildPlanFields(
   out["Plan_Status"] = "In Force";
 
   // ─ Checklist-derived ─ keys match field_keys used elsewhere in the app
+  setIf("Plan_Start_Date", parseDateISO(fieldsByKey.get("start_date")?.value));     // Date — approved checklist value, not Case.planStartDate (three-layer rule)
   setIf("Crystallisation_Status", fieldsByKey.get("crystallisation_status")?.value); // Pick list
   setIf("Valuation", parseNumeric(fieldsByKey.get("current_value")?.value));  // Currency
   setIf("Valuation_Date", parseDateISO(fieldsByKey.get("valuation_date")?.value)); // Date
