@@ -759,6 +759,11 @@ async function triggerExtraction(docId: string, caseId: string, userId: string) 
           data: {
             hasConflict: true,
             conflictValues: {
+              // Discriminator keeps this path and aiBffApply.ts in sync.
+              // case-vs-ai mismatch is only set from aiBffApply (the
+              // current BFF-based write-back path); this triggerExtraction
+              // fallback only ever sees doc-vs-doc.
+              source: "doc-vs-doc",
               existing: field.value,
               new: result.value,
               newDocId: docId,

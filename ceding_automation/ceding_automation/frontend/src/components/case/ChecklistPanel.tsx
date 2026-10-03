@@ -319,10 +319,20 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     const r = byKey.get(f.key) as
       | (ChecklistRow & {
           conflict_values?: {
+            // Discriminator written by the backend. Missing (undefined) on
+            // legacy CONFLICT rows written before the discriminator landed
+            // — treat those as doc-vs-doc (the only shape that existed).
+            source?: "doc-vs-doc" | "case-vs-ai";
+            // doc-vs-doc shape
             existing?: string | null;
             new?: string | null;
             new_document_id?: string | null;
             new_page?: number | null;
+            // case-vs-ai shape — `case` is Case.provider.name at the time
+            // the mismatch was detected (held in the JSON so a later
+            // operator change on the case doesn't change the frozen
+            // comparison values the CA sees in the resolver).
+            case?: string | null;
           } | null;
           source_document?: { original_name?: string | null; filename?: string | null } | null;
           source_page_number?: number | null;
@@ -332,12 +342,50 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
     if ((r.confidence ?? "").toUpperCase() !== "CONFLICT") return undefined;
     const cv = r.conflict_values;
     if (!cv) return undefined;
+    const onResolve = async (chosenValue: string) => {
+      try {
+        await checklistApi.resolveConflict(caseId, r.id, chosenValue);
+        await refresh();
+        toast.success("Conflict resolved", { description: `Set to "${chosenValue}"` });
+      } catch (err) {
+        console.error("resolveConflict failed", err);
+        toast.error("Could not resolve conflict — try again");
+      }
+    };
+    // Case-vs-AI branch — the "existing" slot holds the Case.provider.name
+    // snapshot from when the mismatch was detected; the "incoming" slot
+    // holds the AI's reading (currently also sitting as r.value). Picking
+    // either side writes only to the checklist row — Case.providerId stays
+    // Zoho-sourced per the three-layer rule (CLAUDE.md).
+    if (cv.source === "case-vs-ai") {
+      return {
+        source: "case-vs-ai",
+        existing: {
+          value: cv.case ?? null,
+          docName: null,
+          page: null,
+          fromCase: true,
+        },
+        incoming: {
+          value: cv.new ?? r.value ?? null,
+          // case-vs-ai is set from aiBffApply which carries the source
+          // document id/page — surface the doc provenance so the CA can
+          // click back to the PDF the AI read it from.
+          docName: cv.new_document_id ? documentNamesById.get(cv.new_document_id) ?? null : null,
+          page: cv.new_page ?? null,
+        },
+        onResolve,
+      };
+    }
+    // Doc-vs-doc (default) — same two-document shape the resolver has
+    // always rendered.
     const newDocId = cv.new_document_id ?? null;
     const incomingDocName = newDocId ? documentNamesById.get(newDocId) ?? null : null;
     const existingDocName =
       r.source_document?.original_name ?? r.source_document?.filename ?? null;
     const existingPage = r.source_page_number ?? r.source_page ?? null;
     return {
+      source: "doc-vs-doc",
       existing: {
         value: r.value ?? null,
         docName: existingDocName,
@@ -348,16 +396,7 @@ export function ChecklistPanel({ planType, caseId, onJumpToSource, currentDocume
         docName: incomingDocName,
         page: cv.new_page ?? null,
       },
-      onResolve: async (chosenValue: string) => {
-        try {
-          await checklistApi.resolveConflict(caseId, r.id, chosenValue);
-          await refresh();
-          toast.success("Conflict resolved", { description: `Set to "${chosenValue}"` });
-        } catch (err) {
-          console.error("resolveConflict failed", err);
-          toast.error("Could not resolve conflict — try again");
-        }
-      },
+      onResolve,
     };
   };
 

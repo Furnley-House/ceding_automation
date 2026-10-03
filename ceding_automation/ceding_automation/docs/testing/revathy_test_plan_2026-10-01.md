@@ -367,100 +367,115 @@ continue to work exactly as before.
 
 ---
 
-## C — Provider name mismatch flag (case-vs-AI conflict) — PARKED
+## C — Provider name mismatch flag (case-vs-AI conflict)
 
-**Status:** NOT on staging. Original commit `268a139` was reverted in `a073df5`
-after the pre-deploy prod verification showed 29 cases would flag — far above the
-~4 we were aiming for. 23 of those 29 are alias noise (Aegon Platform ≡ Aegon,
-Legal & General ≡ Legal and General, Octopus Investments Ltd ≡ Octopus, etc.).
-
-**What's happening in the background:** three stopgap comparator rules are being
-added — substring collapse, "and" ↔ "&" alias, mid-string period strip —
-followed by a re-verify against the same 29 cases. Target: ≤5 flags. People's
-Pension and True Potential cases will intentionally still flag (genuine Case
-typos worth surfacing). The proper fix is a provider alias registry; see KI-19
-for the writeup and the 23 cases as seed data.
-
-**What you can do today:** nothing to click. Everything below describes the
-flow that will be in place once the extended comparator ships. Keeping it here
-so you can test immediately when it does.
-
-<details>
-<summary>Click-steps for when it ships (not applicable to this build)</summary>
+**Status:** fixed, on staging. Three commits: comparator extension (`0634a76`),
+mirror full closure (`102bc50`), mismatch wiring (this round's final commit).
 
 **What it closes:** before this, an AI extraction that read a different
-provider name from the operator-picked Case provider wrote silently to the
-checklist. The CA had no way to notice. Now the row is flagged CONFLICT
-with a two-side "pick a value" resolver — one side showing the Case header
-value, the other showing the extraction. **Neither side writes to
-Case.providerId.** The Case stays operator-owned.
+provider name from the Case header provider wrote silently to the checklist.
+The CA had no way to notice unless they happened to compare the two values by
+eye. The row is now flagged CONFLICT with a two-side resolver — one side
+shows the Case header value, the other shows the extraction.
 
-**Fire conditions** (all four required, or the flag doesn't fire):
+**Three-layer rule — the invariant to test:** Case details (header
+provider, policy ref, plan start date) are **Zoho-sourced only**. Nothing in
+this change — AI extraction, resolving the conflict, or typing manually into
+the checklist — can change the Case header provider. If you ever see the
+header change as a result of a checklist action, that's the regression.
 
-- The checklist "Provider name" field is not null and not "N/A".
+**Fire conditions** (all four required):
+
+- The checklist "Provider name" has a value (not null, not "N/A").
 - The Case header provider is set AND is not one of the placeholder stubs
-  (`TEST`, `Unknown Provider`, `Other/Unknown`, `Unknown`, `N/A` — these
-  all came from pre-mirror-gate AI writes on 18 historical cases; we
-  don't flag against them).
-- `compareFieldValues` with `Case.provider.name` as the canonical returns
-  "different". This commit also fixed the possessive normaliser, so
-  "St James's Place" vs "St James Place" no longer false-flags.
+  (`TEST`, `Unknown Provider`, `Other/Unknown`, `Unknown`, `N/A`).
+- The extended comparator returns "different" — substring collapse,
+  "and" ↔ "&" alias, mid-string period strip, and possessive 's are all
+  applied first, so Aegon / Aegon Platform, Legal and General / Legal &
+  General Assurance Society Limited, St James / St. James's Place, etc.
+  do NOT fire.
 
-**Steps**
+**Known prod flags today (14 cases, after the stopgap rules):** 7 are
+intentional keepers (People's Pension typo on the Case ×6, True Potential
+word rearrangement ×1 — these are genuine Case data issues worth surfacing).
+The other 7 are legitimate different-provider pairs (Scottish Widows vs
+Halifax ×2, Friends Life vs Aviva, Fidelity brand variants ×3, AEGON
+Retirement Choices vs Aegon UK plc). The proper fix is a provider alias
+registry — see KI-19.
 
-1. Open any PENSION case where the Case header shows a real provider
-   (not blank, not one of the placeholders). The best test case is one
-   where you can run or re-run the AI extraction on a document whose
-   provider reads differently from the header.
-2. Trigger the AI extraction (Stage 3). Wait for Stage 4 to populate.
-3. Scroll to the "Provider name" row in the Stage 4 checklist.
+### Steps
 
-**Expected (mismatch case)**
+1. Open a PENSION case where the Case header shows a real provider. Easiest
+   to pick one of the known 14 flagged cases if you want a guaranteed
+   mismatch — ask Nishant for the list.
+2. Go to Stage 4 (Checklist review).
+3. Scroll to the "Provider name" row.
 
-- Row shows a red CONFLICT chip, same style as a doc-vs-doc conflict.
-- Below the row, a two-candidate resolver appears with heading
-  **"Case header disagrees with the extraction — pick a value"**.
-- First card labelled **"Case header"** shows the Case provider name
-  with the line "from case header" (no "from X.pdf").
-- Second card labelled **"Extracted"** shows the AI's reading with
-  "from <doc name>, p.<n>".
-- Clicking "Use this value" on either card:
-  - picking Case header → checklist row flips to the Case provider name
-  - picking Extracted → checklist row keeps the AI reading
-  - either way, the Case header provider on the top of the page does
-    NOT change.
+### Expected (mismatch case)
 
-**Expected (no mismatch)**
+The row shows a red confidence chip reading **"Conflicting sources"**. Below
+the row, a resolver panel appears with:
 
-- If the AI reads the same provider as the Case header (possibly after
-  the possessive / alias normalisation), no conflict chip appears. The
-  row shows HIGH / MEDIUM / LOW confidence as usual.
+> ⚠ **The document names a different provider — choose which to record**
+> Providers often appear under a parent, administrator or former name.
+> Neither choice updates the case header — that comes from Zoho.
 
-**Possessive-check sub-test**
+Two cards, each with a **"Use this value"** button:
 
-- Set the Case header to a provider called "St James Place" (or any
-  provider whose true name has a possessive apostrophe). Run the AI
-  against a doc that calls it "St James's Place" or vice versa. The
-  mismatch flag should NOT fire — these are now treated as equivalent.
+- **CASE HEADER** — shows the Case provider name, with the line "from case
+  header" (no PDF/page).
+- **EXTRACTED** — shows the AI's reading, with "from <doc name>, p.<n>".
 
-**Regression indicator**
+### Expected (no mismatch)
 
-- Case header provider changes after you resolve the conflict. The
-  mirror boundary from 993141f means this must never happen.
-- Mismatch flag fires on St James's Place vs St James Place (possessive
-  normaliser broken).
-- Mismatch flag fires when the Case header is one of the placeholder
-  stubs (`TEST`, `Unknown Provider`, `Other/Unknown`, `Unknown`, `N/A`)
-  — we shouldn't flag against a placeholder.
-- Mismatch flag does NOT fire on a case with a real Case provider +
-  AI reading a genuinely different provider (e.g. Case says "Aviva",
-  AI reads "Prudential").
-- Legacy doc-vs-doc conflicts (two PDFs disagree on the same field)
-  still show the old heading "Two sources disagree — pick a value"
-  and labels "Existing" / "New" with doc provenance. If those also
-  changed, something's wrong with the source discriminator.
+If the AI reads the same provider as the Case header (after the alias
+normalisation), no conflict chip. Row shows HIGH / MEDIUM / LOW as usual.
 
-</details>
+### Alias sub-tests (should NOT fire)
+
+Open any case where you can trigger extraction. Set the Case header provider
+to any of these, and have the AI read the paired value. The conflict should
+NOT appear:
+
+- Case: `St James Place` · AI: `St. James's Place Wealth Management`
+- Case: `Legal and General` · AI: `Legal & General Assurance Society Limited`
+- Case: `Octopus Investments Ltd` · AI: `Octopus`
+- Case: `Aegon Platform` · AI: `Aegon`
+- Case: `Wesleyan Assurance Society` · AI: `Wesleyan`
+
+### The interaction — what each button does
+
+- **"Use this value" on Case header card** → checklist "Provider name"
+  updates to the Case provider name. Confidence HIGH. Conflict cleared.
+  Toast: "Conflict resolved — Set to '<name>'".
+- **"Use this value" on Extracted card** → checklist stays with the AI's
+  reading. Confidence HIGH. Conflict cleared. Toast same shape.
+- **Type a new value into the input** → the row updates to the typed value,
+  conflict clears as a side effect.
+- **Do nothing** → the row stays CONFLICT. Approve-all skips it with the
+  toast "N approved, M skipped — Skipped: provider_name… These are missing,
+  review-requested, or have **unresolved conflicts**. Send them back to CA
+  Team to progress."
+
+In **every** case: the Case header at the top of the page does NOT change.
+
+### Regression indicators
+
+- **Case header provider changes** as a result of ANY of the four actions
+  above (resolver pick, resolver pick, typed edit, do nothing). This is
+  the main invariant — report immediately. The three-layer rule
+  (CLAUDE.md) is broken if this happens.
+- **Mismatch flag fires on an alias pair** from the sub-tests above —
+  comparator regression.
+- **Mismatch flag fires when the Case header is a placeholder stub** —
+  gate check regression.
+- **Legacy doc-vs-doc conflicts** (two PDFs disagree on the same field)
+  no longer show the old heading "Two sources disagree — pick a value"
+  / labels "Existing" / "New" / "from X.pdf" provenance. The source
+  discriminator defaults to doc-vs-doc for legacy rows; if those also
+  changed, something's wrong with the dispatch.
+- **Manual CA edit of provider name on the checklist** propagates to the
+  Case header. Should NOT — the mirror was removed in `102bc50`.
 
 ---
 

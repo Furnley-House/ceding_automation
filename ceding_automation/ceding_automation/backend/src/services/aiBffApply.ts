@@ -53,7 +53,11 @@ export async function applyFieldExtraction(args: {
   // surface the case for admin repair.
   const caseRow = await prisma.case.findUnique({
     where: { id: args.caseId },
-    select: { planType: true },
+    // provider.name is only consulted by the provider_name case-vs-ai
+    // mismatch check at the end of the apply path. All other fieldKeys
+    // ignore it. Pulling it unconditionally avoids a second round-trip
+    // for the common case where the field being written IS provider_name.
+    select: { planType: true, provider: { select: { name: true } } },
   });
   if (!caseRow) return { outcome: "field-not-found" };
   const field = await prisma.checklistField.findFirst({
@@ -144,6 +148,13 @@ export async function applyFieldExtraction(args: {
       data: {
         hasConflict: true,
         conflictValues: {
+          // Discriminator for the frontend resolver UI. Doc-vs-doc means
+          // both candidates are from source PDFs (one earlier, one the
+          // one that just arrived). "case-vs-ai" (set further down, only
+          // for provider_name) means the AI's reading disagrees with
+          // Case.provider.name. Legacy CONFLICT rows written before this
+          // discriminator default to "doc-vs-doc" on the frontend.
+          source: "doc-vs-doc",
           existing: field.value,
           new: newValueStr,
           newJobId: args.jobId,
@@ -279,6 +290,100 @@ export async function applyFieldExtraction(args: {
   // write-back has landed on the checklist row above; nothing propagates
   // to the Case row. The mirror module itself was removed on 2026-10-03
   // to make this rule enforceable in code rather than policy.
+
+  // Case-vs-AI provider_name mismatch. Fires AFTER the apply write — the
+  // checklist row carries the AI's reading; this flags the row as
+  // CONFLICT when it disagrees with Case.provider.name. Only writes to
+  // the checklist (hasConflict / conflictValues / confidence) and an
+  // audit row. Does NOT touch Case.providerId — the three-layer rule
+  // means the Case stays Zoho-sourced regardless of what the AI reads.
+  //
+  // Fire conditions (all four required):
+  //  - fieldKey === "provider_name"
+  //  - newValueStr is not null and not literal "N/A"
+  //  - Case.provider is set AND its name is not a placeholder stub
+  //    (TEST / Unknown Provider / Other/Unknown / Unknown / N/A — all
+  //    historical pre-mirror-gate AI writes; flagging against them is
+  //    noise). A placeholder on the Case means there's no operator pick
+  //    worth comparing against.
+  //  - compareFieldValues with Case.provider.name as canonical returns
+  //    "different". Uses the extended comparator (substring collapse,
+  //    "and" ↔ "&", mid-string period, possessive 's) so Aegon /
+  //    Aegon Platform, Legal and General / Legal & General Assurance
+  //    Society Limited, St James / St. James's Place, etc. don't flag.
+  //    See KI-19 for the eventual provider alias registry.
+  if (field.template.fieldKey === "provider_name" && newValueStr !== null) {
+    const PLACEHOLDER_PROVIDERS = new Set([
+      "test",
+      "unknown provider",
+      "other/unknown",
+      "unknown",
+      "n/a",
+    ]);
+    const caseProviderName = caseRow.provider?.name ?? null;
+    const checklistIsReal = newValueStr.trim().toUpperCase() !== "N/A";
+    const caseIsReal =
+      caseProviderName !== null &&
+      !PLACEHOLDER_PROVIDERS.has(caseProviderName.trim().toLowerCase());
+    if (checklistIsReal && caseIsReal) {
+      const mismatches =
+        compareFieldValues(
+          newValueStr,
+          caseProviderName,
+          field.template.fieldType,
+          "provider_name",
+          { providerCanonical: caseProviderName! },
+        ) === "different";
+      if (mismatches) {
+        await prisma.checklistField.update({
+          where: { id: field.id },
+          data: {
+            hasConflict: true,
+            conflictValues: {
+              source: "case-vs-ai",
+              case: caseProviderName,
+              new: newValueStr,
+              newJobId: args.jobId,
+              newDocumentId: args.documentId,
+              newPage: args.data.sourcePage,
+            } as Prisma.InputJsonValue,
+            confidence: "CONFLICT",
+          },
+        });
+        await prisma.auditLog.create({
+          data: {
+            caseId: args.caseId,
+            userId,
+            action: "FIELD_EXTRACTED",
+            source: "AI",
+            fieldId: field.id,
+            fieldKey: field.template.fieldKey,
+            oldValue: caseProviderName,
+            newValue: newValueStr,
+            metadata: {
+              fieldLabel: field.template.fieldName,
+              confidence: "CONFLICT",
+              conflictSource: "case-vs-ai",
+              jobId: args.jobId,
+              documentId: args.documentId,
+              page: args.data.sourcePage ?? null,
+              caseProviderName,
+            } as Prisma.InputJsonValue,
+          },
+        });
+        console.log(
+          "[merge-outcome] outcome=applied-mismatch-case-vs-ai case=%s field=%s job=%s caseProvider=%s aiProvider=%s",
+          args.caseId,
+          args.fieldKey,
+          args.jobId,
+          caseProviderName,
+          newValueStr,
+        );
+        return { outcome: "applied", fieldId: field.id };
+      }
+    }
+  }
+
   console.log(
     "[merge-outcome] outcome=applied case=%s field=%s job=%s doc=%s existingLen=%s incomingLen=%s",
     args.caseId,

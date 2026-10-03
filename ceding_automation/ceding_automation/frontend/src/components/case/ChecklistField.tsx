@@ -44,9 +44,20 @@ export interface ChecklistFieldState {
  *  in CONFLICT state. ChecklistField stays pure — no API knowledge here;
  *  the parent supplies `onResolve` which closes over caseId + fieldId +
  *  the refetch, and routes through the existing api.resolveConflict
- *  wrapper. */
+ *  wrapper.
+ *
+ *  `source` discriminates:
+ *   - "doc-vs-doc": both candidates are from source PDFs (default when
+ *      the backend didn't tag it — legacy rows pre-source-discriminator).
+ *   - "case-vs-ai": the AI's reading disagrees with the operator-picked
+ *      Case.provider.name. The "existing" slot holds the Case header
+ *      value snapshot (fromCase: true, no doc / page); the "incoming"
+ *      slot holds the extraction. Picking either value writes to the
+ *      checklist row only — Case.providerId stays Zoho-sourced per the
+ *      three-layer rule (CLAUDE.md). */
 export interface ConflictResolution {
-  existing: { value: string | null; docName: string | null; page: number | null };
+  source?: "doc-vs-doc" | "case-vs-ai";
+  existing: { value: string | null; docName: string | null; page: number | null; fromCase?: boolean };
   incoming: { value: string | null; docName: string | null; page: number | null };
   onResolve: (chosenValue: string) => Promise<void>;
 }
@@ -489,10 +500,18 @@ export function ChecklistField({
         <div className="mt-3 pt-3 border-t border-overdue/30 space-y-2">
           <p className="text-[11px] font-semibold text-foreground flex items-center gap-1">
             <AlertTriangle className="h-3 w-3 text-overdue" />
-            Two sources disagree — pick a value
+            {conflict.source === "case-vs-ai"
+              ? "The document names a different provider — choose which to record"
+              : "Two sources disagree — pick a value"}
           </p>
+          {conflict.source === "case-vs-ai" && (
+            <p className="text-[11px] text-muted-foreground leading-snug">
+              Providers often appear under a parent, administrator or former name.
+              Neither choice updates the case header — that comes from Zoho.
+            </p>
+          )}
           <ConflictCandidate
-            label="Existing"
+            label={conflict.source === "case-vs-ai" ? "Case header" : "Existing"}
             candidate={conflict.existing}
             disabled={resolving}
             onPick={async (chosen) => {
@@ -501,7 +520,7 @@ export function ChecklistField({
             }}
           />
           <ConflictCandidate
-            label="New"
+            label={conflict.source === "case-vs-ai" ? "Extracted" : "New"}
             candidate={conflict.incoming}
             disabled={resolving}
             onPick={async (chosen) => {
@@ -539,22 +558,25 @@ export function ChecklistField({
 
 interface ConflictCandidateProps {
   label: string;
-  candidate: { value: string | null; docName: string | null; page: number | null };
+  candidate: { value: string | null; docName: string | null; page: number | null; fromCase?: boolean };
   disabled: boolean;
   onPick: (chosen: string) => Promise<void>;
 }
 
 function ConflictCandidate({ label, candidate, disabled, onPick }: ConflictCandidateProps) {
   const displayValue = candidate.value ?? "(empty)";
-  const docLabel = candidate.docName ?? "another document";
-  const pageSuffix = candidate.page != null ? `, p.${candidate.page}` : "";
+  // Case-vs-AI candidate has no source document — show "from case header"
+  // instead of a bogus "from another document" line.
+  const provenance = candidate.fromCase
+    ? "from case header"
+    : `from ${candidate.docName ?? "another document"}${candidate.page != null ? `, p.${candidate.page}` : ""}`;
   return (
     <div className="flex items-start justify-between gap-3 px-3 py-2 rounded border border-overdue/30 bg-overdue/5">
       <div className="min-w-0 flex-1">
         <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</p>
         <p className="text-sm font-semibold text-foreground break-words">{displayValue}</p>
         <p className="text-[10px] text-muted-foreground mt-0.5">
-          from {docLabel}{pageSuffix}
+          {provenance}
         </p>
       </div>
       <Button
