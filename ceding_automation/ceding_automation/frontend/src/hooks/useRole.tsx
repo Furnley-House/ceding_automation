@@ -23,16 +23,6 @@ export const ROLE_MAP: Record<string, Role> = {
   ADMIN: "admin",
 };
 
-// Display labels shown on the role-picker tiles (before sign-in).
-// Once signed in, the rest of the app uses the actual user's name from the auth
-// store (not these labels), so ownership checks reflect the JWT identity.
-export const ROLE_USERS: Record<Role, string> = {
-  ca_team: "Revathy S",
-  adviser: "James Whitfield",
-  paraplanner: "Megan Doherty",
-  admin: "Nicki Foster",
-};
-
 interface RoleCtx {
   role: Role | null;
   userName: string | null;
@@ -80,10 +70,18 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
     setRoleState(null);
   };
 
-  // Prefer the signed-in user's real name (from the JWT) so ownership checks line
-  // up with what the backend assigns. Fall back to the static ROLE_USERS label
-  // only in the rare dev-mode case where login didn't succeed.
-  const userName = authUserName ?? (role ? ROLE_USERS[role] : null);
+  // userName is the signed-in user's real name from the JWT, or null.
+  // The previous `?? ROLE_USERS[role]` fallback was removed on 2026-10-03
+  // after it was caught leaking the demo paraplanner name "Megan Doherty"
+  // into production error UI — any time authUserName was null but
+  // fh_role was still set in localStorage (e.g. after a 401-triggered
+  // logout that cleared auth but not role, see store.ts logout), the
+  // fallback picked a hardcoded demo name and consumers wrote it to the
+  // audit trail (ChecklistField.manuallyEditedBy, useChecklistFields
+  // actorName) and to "my cases" filters (MyInbox, Cases). A hardcoded
+  // name is worse than null — callers already handle null with their own
+  // guards ("Unknown user" / "there" / empty state).
+  const userName = authUserName;
 
   const value: RoleCtx = {
     role,

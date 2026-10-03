@@ -11,9 +11,15 @@ import { calculateRag, RAG_STYLES, STATUS_LABELS, STATUS_STYLES, type CaseRow } 
 
 const MyInbox = () => {
   const { userName } = useRole();
-  // Match logged-in paraplanner by name.
+  // Match logged-in paraplanner by name. Returns undefined if the
+  // signed-in user isn't in the PARAPLANNERS list or if userName is
+  // null (e.g. mid-flight after a 401 logout). The previous
+  // `?? PARAPLANNERS[0]` fallback silently assigned every viewer to
+  // Megan Doherty's inbox when userName didn't resolve — same leak
+  // class as the ROLE_USERS fallback in useRole.tsx (fixed 2026-10-03).
+  // Empty state below handles the undefined case.
   const me = useMemo(
-    () => PARAPLANNERS.find((p) => p.full_name === userName) ?? PARAPLANNERS[0],
+    () => PARAPLANNERS.find((p) => p.full_name === userName),
     [userName],
   );
 
@@ -86,7 +92,13 @@ const MyInbox = () => {
         <div className="flex-1">
           <h1 className="text-2xl font-bold theme-heading text-foreground">My Inbox</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Cases assigned to <strong className="text-foreground">{me.full_name}</strong> · sorted by due date.
+            {me ? (
+              <>
+                Cases assigned to <strong className="text-foreground">{me.full_name}</strong> · sorted by due date.
+              </>
+            ) : (
+              <>Sign-in context not resolved — sign out and back in to see your inbox.</>
+            )}
           </p>
         </div>
       </div>
