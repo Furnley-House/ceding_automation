@@ -25,8 +25,12 @@ interface AuthState {
 // than the hook (would create a circular dep via React Context). The
 // logout() below clears it alongside auth so a stale role can't
 // coexist with a null signed-in user — that mismatch was the cause of
-// the "Megan Doherty" leak into prod audit trails and "my cases"
-// filters (see 2026-10-03 retest, 4b).
+// the "Megan Doherty" display-only leak in the UI (AppHeader, Dashboard
+// greeting, MyInbox stat bar, "my cases" filters) seen in Revathy's
+// 2026-10-03 retest (4b). The leak never reached a persisted audit row
+// — backend audit writes use req.user.id from the JWT, not any
+// frontend-supplied name string. See hooks/useRole.tsx for the full
+// correction note.
 const ROLE_STORAGE_KEY = "fh_role";
 
 export const useAuthStore = create<AuthState>()(

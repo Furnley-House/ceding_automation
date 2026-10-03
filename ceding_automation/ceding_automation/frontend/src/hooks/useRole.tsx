@@ -72,15 +72,24 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
 
   // userName is the signed-in user's real name from the JWT, or null.
   // The previous `?? ROLE_USERS[role]` fallback was removed on 2026-10-03
-  // after it was caught leaking the demo paraplanner name "Megan Doherty"
-  // into production error UI — any time authUserName was null but
-  // fh_role was still set in localStorage (e.g. after a 401-triggered
-  // logout that cleared auth but not role, see store.ts logout), the
-  // fallback picked a hardcoded demo name and consumers wrote it to the
-  // audit trail (ChecklistField.manuallyEditedBy, useChecklistFields
-  // actorName) and to "my cases" filters (MyInbox, Cases). A hardcoded
-  // name is worse than null — callers already handle null with their own
-  // guards ("Unknown user" / "there" / empty state).
+  // after it was caught showing the demo paraplanner name "Megan Doherty"
+  // in production UI — any time authUserName was null but fh_role was
+  // still set in localStorage (e.g. after a 401-triggered logout that
+  // cleared auth but not role, see store.ts logout), the fallback picked
+  // a hardcoded demo name and rendered it in the AppHeader avatar/name,
+  // Dashboard greeting, and "my cases" filters (MyInbox, Cases).
+  //
+  // CORRECTION (2026-10-03, after prod audit check): nothing persisted
+  // badly. The backend writes audit rows and checklist.manualEditedById
+  // from `req.user.id` (JWT), ignoring any frontend-supplied actor name
+  // string. ChecklistField's `manuallyEditedBy: userName` was local
+  // display state only; `useChecklistFields.actorName` was sent on
+  // /approve-all requests but silently ignored by the handler. Prod
+  // audit_logs query showed zero suspicious rows. Leak was display-only;
+  // the fix (and the three-file closure of the gap) is still right, but
+  // the audit trail was never corrupted. A hardcoded name is worse than
+  // null — callers already handle null with their own guards
+  // ("Unknown user" / "there" / empty state).
   const userName = authUserName;
 
   const value: RoleCtx = {
