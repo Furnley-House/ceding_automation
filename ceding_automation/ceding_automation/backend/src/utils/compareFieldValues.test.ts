@@ -33,6 +33,146 @@ describe("compareFieldValues", () => {
     it("different names", () => {
       expect(compareFieldValues("Aviva", "Prudential", "text")).toBe("different");
     });
+    // Possessive-apostrophe collapse — "St James's Place" was coming back
+    // as "different" from "St James Place" because the 85% prefix rule
+    // can't bridge the "'s" split. Added so provider-name mismatch flagging
+    // doesn't fire false positives on St James's Place policy documents.
+    it("ASCII possessive 's folds — St James's Place ≡ St James Place", () => {
+      expect(
+        compareFieldValues("St James's Place", "St James Place", "text"),
+      ).toBe("equivalent");
+    });
+    it("curly ’s possessive folds — St James’s Place ≡ St James Place", () => {
+      expect(
+        compareFieldValues("St James’s Place", "St James Place", "text"),
+      ).toBe("equivalent");
+    });
+    it("case-insensitive with possessive — ST JAMES'S PLACE ≡ st james place", () => {
+      expect(
+        compareFieldValues("ST JAMES'S PLACE", "st james place", "text"),
+      ).toBe("equivalent");
+    });
+    it("plural possessive (apostrophe-only) folds — Customers' Trust ≡ Customers Trust", () => {
+      expect(
+        compareFieldValues("Customers' Trust", "Customers Trust", "text"),
+      ).toBe("equivalent");
+    });
+    it("possessive stripping does NOT eat trailing letters without apostrophe — glass ≠ glas", () => {
+      expect(compareFieldValues("glass", "glas", "text")).toBe("different");
+    });
+  });
+
+  // Provider-name alias rules — stopgap for the alias registry (KI-19).
+  // All three rules are scoped to fieldKey === "provider_name" so other
+  // text fields keep the stricter comparator. Each test here has a mirror
+  // "same strings without the provider_name fieldKey" negative test, to
+  // confirm the rule doesn't leak into general text comparison.
+  describe("provider_name alias collapse (scoped to fieldKey)", () => {
+    it("substring collapse — Aegon ≡ Aegon Platform (parent/subsidiary)", () => {
+      expect(
+        compareFieldValues("Aegon", "Aegon Platform", "text", "provider_name"),
+      ).toBe("equivalent");
+      // NEGATIVE: without provider_name fieldKey, substring collapse must NOT
+      // fire — would over-collapse other text fields.
+      expect(
+        compareFieldValues("Aegon", "Aegon Platform", "text"),
+      ).toBe("different");
+    });
+    it("substring collapse — Scottish Widows ≡ Scottish Widows Limited", () => {
+      expect(
+        compareFieldValues("Scottish Widows", "Scottish Widows Limited", "text", "provider_name"),
+      ).toBe("equivalent");
+    });
+    it("substring collapse — Octopus Investments Ltd ≡ Octopus", () => {
+      expect(
+        compareFieldValues("Octopus Investments Ltd", "Octopus", "text", "provider_name"),
+      ).toBe("equivalent");
+    });
+    it("'and' ↔ '&' alias — Legal & General ≡ Legal and General", () => {
+      expect(
+        compareFieldValues("Legal & General", "Legal and General", "text", "provider_name"),
+      ).toBe("equivalent");
+      // NEGATIVE: without provider_name fieldKey, "&" is preserved verbatim
+      // by normalizeText and the comparator returns "different".
+      expect(
+        compareFieldValues("Legal & General", "Legal and General", "text"),
+      ).toBe("different");
+    });
+    it("'and' ↔ '&' + substring — Legal and General ≡ Legal & General Assurance Society Limited", () => {
+      expect(
+        compareFieldValues(
+          "Legal and General",
+          "Legal & General Assurance Society Limited",
+          "text",
+          "provider_name",
+        ),
+      ).toBe("equivalent");
+    });
+    it("mid-string period strip — St. James's Place ≡ St James's Place", () => {
+      expect(
+        compareFieldValues("St. James's Place", "St James's Place", "text", "provider_name"),
+      ).toBe("equivalent");
+      // NEGATIVE: without provider_name fieldKey, inner period survives.
+      expect(
+        compareFieldValues("St. James's Place", "St James's Place", "text"),
+      ).toBe("different");
+    });
+    it("period + possessive + substring — St James Place ≡ St. James's Place Wealth Management", () => {
+      expect(
+        compareFieldValues(
+          "St James Place",
+          "St. James's Place Wealth Management",
+          "text",
+          "provider_name",
+        ),
+      ).toBe("equivalent");
+    });
+    it("canonical-contains-both — Aegon Platform ≡ Aegon One Retirement with canonical=Aegon", () => {
+      expect(
+        compareFieldValues(
+          "Aegon Platform",
+          "Aegon One Retirement",
+          "text",
+          "provider_name",
+          { providerCanonical: "Aegon" },
+        ),
+      ).toBe("equivalent");
+    });
+    it("genuinely different providers still flag — Scottish Widows ≠ Halifax Financial Services", () => {
+      expect(
+        compareFieldValues(
+          "Scottish Widows",
+          "Halifax Financial Services",
+          "text",
+          "provider_name",
+        ),
+      ).toBe("different");
+    });
+    it("People's Pension typo variants still flag (intentional — Case has typo)", () => {
+      // "Peoples Pension" (Case typo) vs "The People's Pension" (correct) —
+      // user chose to keep these flagging because a CA correcting the Case
+      // header is useful signal. normalizeProviderName strips the "'s" so
+      // this becomes "peoples pension" vs "the people pension" — neither
+      // contains the other, substring fails, falls through to text diff.
+      expect(
+        compareFieldValues(
+          "Peoples Pension",
+          "The People's Pension",
+          "text",
+          "provider_name",
+        ),
+      ).toBe("different");
+    });
+    it("True Potential word rearrangement still flags (intentional — Case has data issue)", () => {
+      expect(
+        compareFieldValues(
+          "True Potential Investments",
+          "True Investment Potential trustee company limited",
+          "text",
+          "provider_name",
+        ),
+      ).toBe("different");
+    });
     it("none-phrase variants", () => {
       expect(compareFieldValues("None", "No regular contributions", "text")).toBe(
         "equivalent",
@@ -149,9 +289,14 @@ describe("compareFieldValues", () => {
         }),
       ).toBe("equivalent");
     });
-    it("canonical empty falls through to text", () => {
-      // Without canonical, "Aviva" vs "Aviva Life & Pensions UK Limited" is too
-      // different (long suffix) — neither full equality nor ≥85% prefix.
+    it("Aviva vs Aviva Life & Pensions UK Limited collapses via substring (no canonical needed)", () => {
+      // Updated 2026-10-01: used to require an explicit canonical because the
+      // 85% prefix rule couldn't bridge the long suffix. The provider_name
+      // substring-collapse rule now folds this pair directly — "aviva" is a
+      // substring of "aviva life and pensions uk limited" after
+      // normalizeProviderName. Canonical is now a fallback for the
+      // "both-contain-same-base" case (Aegon Platform / Aegon One Retirement),
+      // not the primary matcher. See KI-19.
       expect(
         compareFieldValues(
           "Aviva",
@@ -159,7 +304,7 @@ describe("compareFieldValues", () => {
           "text",
           "provider_name",
         ),
-      ).toBe("different");
+      ).toBe("equivalent");
     });
     it("canonical only applies to provider_name fieldKey", () => {
       expect(

@@ -43,19 +43,41 @@ export function compareFieldValues(
   const bTrim = String(b).trim();
   if (aTrim === bTrim) return "equivalent";
 
-  // ── (2) Provider-alias resolution ─────────────────────────────
-  // Runs before type dispatch so e.g. "Aviva" vs "Aviva Life & Pensions UK
-  // Limited" with canonical="Aviva" resolves to equivalent regardless of
-  // whether the template labels provider_name as text or dropdown.
-  if (fieldKey === "provider_name" && context?.providerCanonical) {
-    const canonical = context.providerCanonical.toLowerCase().trim();
-    if (canonical.length > 0) {
-      const aLower = aTrim.toLowerCase();
-      const bLower = bTrim.toLowerCase();
-      if (aLower.includes(canonical) && bLower.includes(canonical)) {
+  // ── (2) Provider-name alias handling ──────────────────────────
+  // Scoped to fieldKey === "provider_name" only. These rules collapse the
+  // alias patterns we see in prod: parent/subsidiary (Aegon / Aegon Platform),
+  // "and" vs "&" (Legal and General / Legal & General), mid-string periods
+  // (St. James's / St James). Stopgap — the proper fix is a provider alias
+  // registry on the Provider table; see KI-19 for the writeup and the 23
+  // alias-shaped prod cases as evidence seed. Rules are kept here, not in
+  // normalizeText, because they over-collapse for other text fields
+  // ("Charge Period Monthly" vs "Charge Period" would wrongly equivalence).
+  if (fieldKey === "provider_name") {
+    const na = normalizeProviderName(aTrim);
+    const nb = normalizeProviderName(bTrim);
+    if (na === nb) return "equivalent";
+    // Substring collapse — one normalised value contains the other. Kills
+    // the Aegon / Octopus / Natwest / Wesleyan / Scottish Widows Limited
+    // patterns.
+    if (na.length > 0 && nb.length > 0 && (na.includes(nb) || nb.includes(na))) {
+      return "equivalent";
+    }
+    // Canonical-contains-both — handles the case where BOTH values are
+    // longer alias variants of a shared base passed in by the caller
+    // (e.g. canonical="Aegon" with inputs "Aegon Platform" and "Aegon One
+    // Retirement" — neither is a substring of the other, both contain the
+    // canonical).
+    if (context?.providerCanonical) {
+      const canonical = normalizeProviderName(context.providerCanonical);
+      if (canonical.length > 0 && na.includes(canonical) && nb.includes(canonical)) {
         return "equivalent";
       }
     }
+    // Fall through to the type dispatch (compareText) for the generic
+    // prefix / none-phrase logic. "True Potential Investments" vs "True
+    // Investment Potential trustee company limited" lands as "different"
+    // there — intentional, Case has a word-rearrangement issue worth a
+    // CA eye. People's Pension typo pairs also land as "different" there.
   }
 
   // ── (3) Per-type comparators ──────────────────────────────────
@@ -104,8 +126,37 @@ function isNoneLike(v: string | null | undefined): boolean {
 }
 
 function normalizeText(s: string): string {
+  // Possessive 's (both ASCII ' and curly ’) collapses — "St James's
+  // Place" vs "St James Place" was coming back as "different" because the
+  // 85% prefix rule didn't match once the apostrophe-s split the longer
+  // string. Strip 's at word boundaries first, then any residual
+  // apostrophes (so "St James'" also folds), then the trailing-punctuation
+  // normalisation runs as before.
   return s
     .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[’']s\b/g, "")
+    .replace(/[’']/g, "")
+    .replace(/[.,;:!?]$/, "")
+    .trim();
+}
+
+// provider_name-specific normaliser. More aggressive than normalizeText
+// because provider names carry alias patterns (parent/subsidiary, "&" vs
+// "and", inner periods like "St.") that over-collapse if applied to other
+// text fields. The three new rules vs normalizeText:
+//   - mid-string period strip (not just trailing) — "St. James's" → "st james"
+//   - "&" ↔ "and" alias — "Legal & General" → "legal and general"
+//   - whitespace re-collapse after the replacements
+// Used only from the provider_name branch of compareFieldValues. See KI-19.
+function normalizeProviderName(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[’']s\b/g, "")
+    .replace(/[’']/g, "")
+    .replace(/\./g, "")
+    .replace(/\s*&\s*/g, " and ")
     .replace(/\s+/g, " ")
     .replace(/[.,;:!?]$/, "")
     .trim();
