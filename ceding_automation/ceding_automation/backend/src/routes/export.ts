@@ -75,9 +75,16 @@ function buildPlanFields(
     planType: string;
     policyRef: string | null;
     // Note: Case.planStartDate is NOT read here. Plan_Start_Date comes
-    // from the approved checklist row (fieldKey "start_date") per the
-    // three-layer rule in CLAUDE.md — Excel + Zoho export are built from
-    // the checklist, not from Case columns. See the setIf below.
+    // from the checklist row (fieldKey "start_date") per the three-layer
+    // rule in CLAUDE.md — Excel + Zoho export are built from the
+    // checklist, not from Case columns. See the setIf below.
+    //
+    // Important nuance (see KI-20): this reads the checklist field's
+    // current `.value` without checking `isApproved`. All five
+    // checklist-derived fields below do the same — none of them gate on
+    // approval. That means an unapproved AI reading reaches Zoho + the
+    // Excel on export. Pre-existing convention; design question for
+    // Aruna before any tightening.
     // Cached at sync time; consumed verbatim here.
     zohoOwnerId: string | null;
     zohoClientOwnerIds: string[];
@@ -122,8 +129,10 @@ function buildPlanFields(
   out["Non_Advised"] = true;
   out["Plan_Status"] = "In Force";
 
-  // ─ Checklist-derived ─ keys match field_keys used elsewhere in the app
-  setIf("Plan_Start_Date", parseDateISO(fieldsByKey.get("start_date")?.value));     // Date — approved checklist value, not Case.planStartDate (three-layer rule)
+  // ─ Checklist-derived ─ keys match field_keys used elsewhere in the app.
+  // All five read `.value` without checking `isApproved` — unapproved
+  // values reach Zoho + Excel. See KI-20 for the design question.
+  setIf("Plan_Start_Date", parseDateISO(fieldsByKey.get("start_date")?.value));     // Date — checklist value, not Case.planStartDate (three-layer rule)
   setIf("Crystallisation_Status", fieldsByKey.get("crystallisation_status")?.value); // Pick list
   setIf("Valuation", parseNumeric(fieldsByKey.get("current_value")?.value));  // Currency
   setIf("Valuation_Date", parseDateISO(fieldsByKey.get("valuation_date")?.value)); // Date

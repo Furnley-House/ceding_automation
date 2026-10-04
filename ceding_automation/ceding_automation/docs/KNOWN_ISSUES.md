@@ -5,6 +5,85 @@ they're closed or bundled into a sprint task. Newer at the top.
 
 ---
 
+## KI-20 — Stage 9 export sends unapproved checklist values to Zoho + Excel
+
+**Filed:** 2026-10-05
+**Owner:** Aruna (design decision), unassigned (implementation)
+**Severity:** Medium. Pre-existing behaviour, not a regression — but a real design
+question. Any AI reading that sits unapproved on the checklist at export time
+reaches the client's Zoho Plans record and the Excel in WorkDrive.
+
+### What's happening
+
+`backend/src/routes/export.ts:buildPlanFields` reads five checklist fields and
+writes them to the Zoho Plans record on Stage 9 export:
+
+```ts
+setIf("Plan_Start_Date",    parseDateISO(fieldsByKey.get("start_date")?.value));
+setIf("Crystallisation_Status", fieldsByKey.get("crystallisation_status")?.value);
+setIf("Valuation",          parseNumeric(fieldsByKey.get("current_value")?.value));
+setIf("Valuation_Date",     parseDateISO(fieldsByKey.get("valuation_date")?.value));
+setIf("Normal_Retirement_Age", parseNumeric(fieldsByKey.get("normal_retirement_age")?.value));
+```
+
+Each one reads `.value` directly. **None checks `isApproved`.** The Excel
+builder in `frontend/src/lib/exportTemplate.ts` is the same shape — it reads
+whatever's on the checklist row.
+
+So an AI reading that the paraplanner never approved — maybe never looked at —
+reaches both the client-facing Excel and the Zoho Plans record on export. The
+paraplanner's approval has no gating effect on what gets exported today.
+
+### How this surfaced
+
+Flagged while reviewing the `3fbe342` commit on 2026-10-05. That commit's
+message said "reads approved checklist value" when the code actually reads
+`.value` without approval checks. The description was wrong because it
+followed the pre-existing pattern — all 5 checklist-derived export fields have
+the same (unstated) convention. Noting the gap rather than silently inheriting
+the misleading framing.
+
+### The design question for Aruna
+
+Should the export only send checklist values the paraplanner has approved?
+
+Three defensible positions:
+
+1. **Status quo (unapproved values flow through).** Rationale: the paraplanner's
+   job at Stage 8 is to catch errors; an unreviewed field is probably still
+   the right value since AI accuracy is high. If something's wrong the CA /
+   paraplanner saw it on the checklist and would have flagged it before
+   clicking Complete Export.
+
+2. **Hard gate — approved-only, blank otherwise.** Rationale: if nobody has
+   explicitly signed off a value, we shouldn't be writing it to a
+   client-facing document or to the authoritative Zoho record. Downside: the
+   Excel + Zoho record become sparse until a paraplanner has reviewed every
+   field — potentially a big change to the "ship Stage 9 fast" workflow.
+
+3. **Hard gate at Stage 9 button.** Rationale: don't let "Mark complete and
+   continue" fire from Stage 8 → 9 until every (visible, templated) field is
+   approved. The export itself continues to read `.value` but by construction
+   there are no unapproved values at that point. This is what KI-09's
+   completion-guard (currently flag-off) was shaping toward.
+
+### Fix direction (if the answer is "yes, gate on approval")
+
+- Simplest: narrow each `setIf(..., fieldsByKey.get(k)?.value)` to
+  `fieldsByKey.get(k)?.isApproved ? ...value : undefined` for all five fields.
+  Four lines. The Excel export in `exportTemplate.ts` needs the parallel
+  change on the frontend.
+- Alternative: hoist the "approved?" check into a helper and gate on it in
+  one place.
+
+### Scope
+
+- Not fixing in this round — pure flag-up.
+- Will be the question for Aruna once the current retest round is clear.
+- No prod impact to document — the behaviour has been live from day one.
+
+---
+
 ## KI-19 — Provider name comparison is string-based; needs a provider alias registry
 
 **Filed:** 2026-10-01
