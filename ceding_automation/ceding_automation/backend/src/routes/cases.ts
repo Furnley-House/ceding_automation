@@ -1118,6 +1118,26 @@ router.patch(
       );
     }
 
+    // completedAt is write-once. Four code paths above can set it in `data`:
+    //   - currentStage=10 handler (line ~917)
+    //   - status=STAGE_10_COMPLETE handler (line ~933)
+    //   - status=complete legacy handler (line ~938)
+    //   - cedingCompleteDate explicit (line ~946)
+    // Pre-fix, a CA re-clicking "Mark ceding complete" on a case that was
+    // already complete overwrote the original completion date with today's,
+    // losing the actual completion day. (Item 10 in Revathy's 2026-10-05
+    // retest.) Load the current DB completedAt once, and if set, strip
+    // any further write.
+    if (data.completedAt !== undefined) {
+      const existing = await prisma.case.findUnique({
+        where: { id: req.params.id },
+        select: { completedAt: true },
+      });
+      if (existing?.completedAt) {
+        delete (data as Record<string, unknown>).completedAt;
+      }
+    }
+
     let updated;
     try {
       updated = await prisma.case.update({
