@@ -688,6 +688,15 @@ const CaseDetail = () => {
               </div>
             </div>
           )}
+          {/* Advisers follow their clients' cases and may approve for an
+              absent paraplanner (Stage 8); every other stage is CA work and
+              the backend refuses an adviser's changes there. */}
+          {role === "adviser" && currentStage !== 8 && (
+            <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              <strong className="text-foreground">View only.</strong> You can follow this case's progress here.
+              The CA team works these steps; you can approve at Step 8.
+            </p>
+          )}
 
           {planSupported && <StageComponent caseItem={caseItem as any} />}
 

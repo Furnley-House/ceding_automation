@@ -2,7 +2,7 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient, CaseStatus, LOAStatus, PlanType, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { requireCaseAccess, hasOpenCaseAccess } from "../middleware/requireCaseAccess";
+import { requireCaseAccess, caseScopeFor } from "../middleware/requireCaseAccess";
 import { z } from "zod";
 import * as zoho from "../services/zohoCrm";
 import { SYSTEM_USER_ID } from "../services/aiBffApply";
@@ -467,20 +467,14 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
   }
 
   // Admin, CA Team and Paraplanners see every case (any CA can progress
-  // any case; any paraplanner can approve any case). Advisers only see
-  // cases they are linked to — chiefly every case whose Zoho Client has
-  // them as the assigned Adviser on the Contact record, populated by the
-  // Refresh-from-Zoho sync (see Case.adviserId) — so they can step in
-  // for an absent paraplanner on their own clients. Keep in sync with
-  // requireCaseAccess (shared OPEN_CASE_ACCESS_ROLES).
-  if (!hasOpenCaseAccess(req.user!.role)) {
-    where.OR = [
-      { createdById: req.user!.id },
-      { assignedToId: req.user!.id },
-      { paralPlannerId: req.user!.id },
-      { adviserId: req.user!.id },
-    ];
-  }
+  // any case; any paraplanner can approve any case). Advisers see only
+  // their own clients' cases — Case.adviserId, populated from the Zoho
+  // Contact's Adviser by Refresh-from-Zoho — so they can step in for an
+  // absent paraplanner on their own clients. Shared with requireCaseAccess
+  // via caseScopeFor(). Merged as a plain key so it ANDs with the search
+  // OR above (the old OR-based scope overwrote search for advisers).
+  const scope = caseScopeFor(req.user!);
+  if (scope) Object.assign(where, scope);
 
   const [cases, total] = await Promise.all([
     prisma.case.findMany({
@@ -527,19 +521,11 @@ function parseIsoParam(v: unknown): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-/** Dashboard visibility: Admin, CA Team and Paraplanners count every case;
- *  Advisers only the cases they're linked to. Shared by /stats and /caseflow. */
+/** Dashboard visibility — the same rule as every other case read
+ *  (caseScopeFor): Admin, CA Team and Paraplanners count every case;
+ *  Advisers only their own clients' cases. Shared by /stats and /caseflow. */
 function dashboardScope(req: Request): Prisma.CaseWhereInput {
-  if (hasOpenCaseAccess(req.user!.role)) return {};
-  const me = req.user!.id;
-  return {
-    OR: [
-      { createdById: me },
-      { assignedToId: me },
-      { paralPlannerId: me },
-      { adviserId: me },
-    ],
-  };
+  return caseScopeFor(req.user!) ?? {};
 }
 
 // ── Dashboard Caseflow ──────────────────────────────────
@@ -587,7 +573,7 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
   const lastWeekStart = new Date(weekStart.getTime() - 7 * DAY_MS);
 
   // Same visibility as GET /cases: Admin, CA Team and Paraplanners count
-  // every case (team-wide KPIs); Advisers only the cases they're linked to.
+  // every case (team-wide KPIs); Advisers only their own clients' cases.
   const scope = dashboardScope(req);
   // "My" lens for the My active tile (item 14 of the 2026-10-05 retest):
   // open cases the viewer personally OWNS, not every case they touch, so a
@@ -1007,7 +993,7 @@ async function notifyCaseApproved(
 router.patch(
   "/:id",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     // Body keys arrive in camelCase (the frontend's camelKeys helper converts before send).
@@ -1485,6 +1471,13 @@ router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAP
   }
   if (!status) {
     return res.status(400).json({ error: `Invalid status: ${rawStatus}` });
+  }
+
+  // Advisers watch their clients' cases and may stand in for the
+  // paraplanner at sign-off — so APPROVED is the only status they can set.
+  // Every other transition (on hold, complete, back to a stage) is CA work.
+  if (req.user!.role === "ADVISER" && status !== CaseStatus.APPROVED) {
+    return res.status(403).json({ error: "Advisers can only mark a case approved" });
   }
 
   const current = await prisma.case.findUnique({

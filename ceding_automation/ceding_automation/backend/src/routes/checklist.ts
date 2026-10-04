@@ -72,6 +72,7 @@ router.get("/:caseId/checklist", requireAuth, requireCaseAccess, async (req: Req
 router.post(
   "/:caseId/checklist/seed",
   requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const { fieldKey, label, section, value } = req.body;
@@ -135,7 +136,7 @@ router.post(
 router.patch(
   "/:caseId/checklist/:fieldId",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const { value, resolvedConflict, source } = req.body;

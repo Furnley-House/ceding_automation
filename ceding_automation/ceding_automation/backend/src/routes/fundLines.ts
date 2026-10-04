@@ -77,7 +77,7 @@ router.get("/:caseId/fund-lines", requireAuth, requireCaseAccess, async (req: Re
 router.post(
   "/:caseId/fund-lines",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const parse = fundLineCreateSchema.safeParse(req.body);
@@ -199,7 +199,7 @@ router.post(
 router.patch(
   "/:caseId/fund-lines/:lineId",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const parse = fundLineUpdateSchema.safeParse(req.body);

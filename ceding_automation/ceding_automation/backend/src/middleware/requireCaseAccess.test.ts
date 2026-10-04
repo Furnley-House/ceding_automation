@@ -29,6 +29,7 @@ vi.mock("../services/caseAccessRetry", () => ({
 
 import {
   requireCaseAccess,
+  caseScopeFor,
   __resetAccessRetryStateForTests,
 } from "./requireCaseAccess";
 
@@ -104,35 +105,22 @@ describe("requireCaseAccess", () => {
     });
   }
 
-  // ── Access via each of the four relations ───────────────────────────
-  for (const relation of [
-    "createdById",
-    "assignedToId",
-    "paralPlannerId",
-    "adviserId",
-  ] as const) {
-    it(`grants access when user matches ${relation}`, async () => {
-      findFirstMock.mockResolvedValueOnce({ id: "case-1" });
-      const req = makeReq({ user: USER("ADVISER"), caseId: "case-1" });
-      const res = makeRes();
-      const next = vi.fn() as NextFunction;
-      await requireCaseAccess(req, res, next);
-      expect(next).toHaveBeenCalledOnce();
-      expect(res.status).not.toHaveBeenCalled();
-      // Confirm the OR clause is exactly the four we mirror from cases.ts:421-433.
-      const whereArg = findFirstMock.mock.calls[0][0].where;
-      expect(whereArg.id).toBe("case-1");
-      expect(whereArg.OR).toEqual([
-        { createdById: "user-1" },
-        { assignedToId: "user-1" },
-        { paralPlannerId: "user-1" },
-        { adviserId: "user-1" },
-      ]);
-      // Fast-path must not touch the retry helper or metadata fetch.
-      expect(syncRetryMock).not.toHaveBeenCalled();
-      expect(findUniqueMock).not.toHaveBeenCalled();
-    });
-  }
+  // ── Adviser access: own clients only ────────────────────────────────
+  it("grants an ADVISER access to a case where they are the client's adviser", async () => {
+    findFirstMock.mockResolvedValueOnce({ id: "case-1" });
+    const req = makeReq({ user: USER("ADVISER"), caseId: "case-1" });
+    const res = makeRes();
+    const next = vi.fn() as NextFunction;
+    await requireCaseAccess(req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect(res.status).not.toHaveBeenCalled();
+    // Lookup is by adviserId alone — creator / assigned CA / paraplanner
+    // links no longer grant an adviser access.
+    expect(findFirstMock.mock.calls[0][0].where).toEqual({ id: "case-1", adviserId: "user-1" });
+    // Fast-path must not touch the retry helper or metadata fetch.
+    expect(syncRetryMock).not.toHaveBeenCalled();
+    expect(findUniqueMock).not.toHaveBeenCalled();
+  });
 
   // ── Denial + retry path gates ───────────────────────────────────────
   it("returns 403 without a Zoho call when case has no zohoTaskId (skipped-no-link)", async () => {
@@ -396,21 +384,24 @@ describe("requireCaseAccess", () => {
     expect(retryLogs()).toHaveLength(0);
   });
 
-  it("ADVISER is still scoped: lookup runs with the relationship OR clause", async () => {
+  it("403s an ADVISER on a case that isn't their client's, even if they created it or are its CA", async () => {
+    // findFirst (scoped to adviserId) finds nothing; the case itself exists
+    // and lists the adviser as creator and assigned CA — that must not help.
     findFirstMock.mockResolvedValueOnce(null);
     findUniqueMock.mockResolvedValueOnce({
       id: "case-1",
       caseRef: null,
       zohoTaskId: null,
       zohoSyncedAt: null,
-      assignedToId: "someone-else",
+      assignedToId: "adv-9",
+      createdById: "adv-9",
     });
     const req = makeReq({ user: USER("ADVISER", "adv-9"), caseId: "case-1" });
     const res = makeRes();
     const next = vi.fn() as NextFunction;
     await requireCaseAccess(req, res, next);
     expect(findFirstMock).toHaveBeenCalledOnce();
-    expect(findFirstMock.mock.calls[0][0].where.OR).toContainEqual({ adviserId: "adv-9" });
+    expect(findFirstMock.mock.calls[0][0].where).toEqual({ id: "case-1", adviserId: "adv-9" });
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(403);
   });
@@ -483,5 +474,17 @@ describe("requireCaseAccess", () => {
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(500);
     expect(findFirstMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("caseScopeFor", () => {
+  for (const role of ["ADMIN", "CA_TEAM", "PARAPLANNER"] as const) {
+    it(`${role} is unscoped (sees every case)`, () => {
+      expect(caseScopeFor({ id: "u1", role })).toBeNull();
+    });
+  }
+
+  it("ADVISER is scoped to cases where they are the client's adviser only", () => {
+    expect(caseScopeFor({ id: "adv-1", role: "ADVISER" })).toEqual({ adviserId: "adv-1" });
   });
 });

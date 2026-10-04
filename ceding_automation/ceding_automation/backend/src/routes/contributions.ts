@@ -139,7 +139,7 @@ const manualEntrySchema = z.object({
 router.post(
   "/:caseId/contributions/:id/transactions",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const parsed = manualEntrySchema.safeParse(req.body ?? {});
@@ -191,7 +191,7 @@ const notApplicableSchema = z.object({
 router.post(
   "/:caseId/contributions/:id/not-applicable",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const parsed = notApplicableSchema.safeParse(req.body ?? {});
@@ -230,7 +230,7 @@ router.post(
 router.patch(
   "/:caseId/contributions/:id",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const parsed = contributionUpdateSchema.safeParse(req.body ?? {});
@@ -264,7 +264,7 @@ router.patch(
 router.post(
   "/:caseId/contributions/reset",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const caseExists = await prisma.case.findUnique({

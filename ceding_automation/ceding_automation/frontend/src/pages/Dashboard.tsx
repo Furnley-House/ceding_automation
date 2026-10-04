@@ -520,7 +520,11 @@ const Dashboard = () => {
             stats
               ? role === "admin"
                 ? `of ${stats.total} total`
-                : `Team active: ${stats.active}`
+                : role === "adviser"
+                  ? // Advisers' stats are scoped to their own clients, so
+                    // there's no team figure to show.
+                    `of ${stats.myTotal} client case${stats.myTotal === 1 ? "" : "s"}`
+                  : `Team active: ${stats.active}`
               : "loading"
           }
           delta={

@@ -106,7 +106,7 @@ export function ChecklistField({
   isSourceDeleted,
   conflict,
 }: Props) {
-  const { canEditChecklist, canApprove, userName } = useRole();
+  const { canEditChecklist, canApprove, isAdviser, userName } = useRole();
   const [localValue, setLocalValue] = useState(state.value ?? "");
   const [reviewOpen, setReviewOpen] = useState(false);
   const [commentOpen, setCommentOpen] = useState(false);
@@ -173,7 +173,9 @@ export function ChecklistField({
   };
 
   const renderInput = () => {
-    const disabled = !canEditChecklist && !canApprove;
+    // Advisers approve but don't edit values (that's CA work; the backend
+    // refuses an adviser's field PATCH), so their inputs are read-only.
+    const disabled = !canEditChecklist && (!canApprove || isAdviser);
     const common = { disabled, onBlur: commitValue, value: localValue, className: "h-9" };
 
     if (def.type === "select") {
