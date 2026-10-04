@@ -12,12 +12,13 @@ import {
 } from "lucide-react";
 import { getCases, createCase, importCrmTaskAsCase } from "@/services/api";
 import {
-  CASE_STATUSES,
+  CASE_STATUS_FILTERS,
+  LEGACY_STATUS_GROUPS,
   PLAN_TYPES,
   RAG_STYLES,
-  STATUS_LABELS,
   calculateRag,
   caseStatusBadge,
+  matchesStatusFilter,
   generateCaseRef,
   type CaseRow,
 } from "@/lib/caseHelpers";
@@ -222,7 +223,7 @@ const Cases = () => {
       // is still active — it awaits Stage 9 Export.
       if (statusFilter === "active") {
         if (c.status === "complete" || c.status === "cancelled") return false;
-      } else if (statusFilter !== "all" && c.status !== statusFilter) {
+      } else if (statusFilter !== "all" && !matchesStatusFilter(c as CaseRow, statusFilter)) {
         return false;
       }
       if (completedThisWeek) {
@@ -378,11 +379,18 @@ const Cases = () => {
         >
           <SelectItem value="all">All statuses</SelectItem>
           <SelectItem value="active">Active (in progress)</SelectItem>
-          {CASE_STATUSES.map((s) => (
-            <SelectItem key={s} value={s}>
-              {STATUS_LABELS[s]}
+          {/* One option per badge (see caseStatusBadge), so a filter lists
+              exactly the cases whose badge reads that. */}
+          {CASE_STATUS_FILTERS.map((f) => (
+            <SelectItem key={f.value} value={f.value}>
+              {f.label}
             </SelectItem>
           ))}
+          {/* Grouped filters from the dashboard's to-do links — shown only
+              while active so the select can display them. */}
+          {LEGACY_STATUS_GROUPS[statusFilter] && (
+            <SelectItem value={statusFilter}>{LEGACY_STATUS_GROUPS[statusFilter]}</SelectItem>
+          )}
         </FilterSelect>
         <FilterSelect value={planFilter} onChange={setPlanFilter} placeholder="Plan type">
           <SelectItem value="all">All plan types</SelectItem>

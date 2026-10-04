@@ -169,3 +169,36 @@ export function generateCaseRef(planType: string) {
   const num = Math.floor(Math.random() * 90000) + 10000;
   return `FH-${prefix}-${num}`;
 }
+
+/** Terminal / parked UI statuses whose badge is a status, not a step. */
+const NON_STEP_STATUSES = new Set(["cancelled", "on_hold", "complete", "in_review", "approved"]);
+
+/**
+ * Cases list status filter — one option per badge, so picking an option
+ * lists exactly the cases whose badge reads that. Steps 9–10 never appear
+ * as a step badge (Approved / Complete cover them).
+ */
+export const CASE_STATUS_FILTERS: { value: string; label: string }[] = [
+  ...CEDING_STAGES.slice(0, 8).map((s) => ({ value: `step-${s.num}`, label: `Step ${s.num} · ${s.label}` })),
+  { value: "in_review", label: "In Review · with paraplanner" },
+  { value: "approved", label: "Approved · Step 9" },
+  { value: "complete", label: "Complete" },
+  { value: "on_hold", label: "On Hold" },
+  { value: "cancelled", label: "NPW · Cancelled" },
+];
+
+/** Legacy grouped filters still linked from the dashboard's to-do list. */
+export const LEGACY_STATUS_GROUPS: Record<string, string> = {
+  pending_loa: "Steps 1–3 · Pending LOA",
+  awaiting_documents: "Steps 4–6 · Awaiting Documents",
+  extraction_complete: "Steps 7–8 · Extraction Complete",
+};
+
+/** Does a case match a Cases-list status filter value? ("all" / "active"
+ *  are handled by the caller.) */
+export function matchesStatusFilter(c: { status: string; current_stage?: number | null }, filter: string): boolean {
+  if (filter.startsWith("step-")) {
+    return !NON_STEP_STATUSES.has(c.status) && (c.current_stage ?? 1) === Number(filter.slice(5));
+  }
+  return c.status === filter;
+}
