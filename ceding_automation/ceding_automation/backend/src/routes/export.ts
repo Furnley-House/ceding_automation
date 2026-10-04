@@ -145,7 +145,7 @@ function buildPlanFields(
 router.post(
   "/:id/complete-export",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER", "ADVISER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   upload.single("file"),
   async (req: Request, res: Response) => {

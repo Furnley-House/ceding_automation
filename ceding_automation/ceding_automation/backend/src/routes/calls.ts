@@ -123,6 +123,7 @@ router.get(
 router.delete(
   "/:caseId/calls/ring-out/:sessionId",
   requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     try {
@@ -457,6 +458,7 @@ router.get(
 router.post(
   "/:caseId/calls/workdrive-transcribe",
   requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const { fileId, filename } = req.body as { fileId?: string; filename?: string };
@@ -477,6 +479,7 @@ router.post(
 router.post(
   "/:caseId/calls/upload-recording-to-workdrive",
   requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const { contentUri, fileName, folderId, rcToken: userToken } = req.body as {
@@ -607,6 +610,7 @@ router.get(
 router.post(
   "/:caseId/calls/rc-transcribe",
   requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const { contentUri } = req.body as { contentUri?: string };
@@ -631,6 +635,7 @@ router.post(
 router.post(
   "/:caseId/calls/rc-transcribe-recording",
   requireAuth,
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     const { contentUri, rcToken } = req.body as { contentUri?: string; rcToken?: string };

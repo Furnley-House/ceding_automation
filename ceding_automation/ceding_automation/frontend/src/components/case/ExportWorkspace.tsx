@@ -88,7 +88,7 @@ function formatZohoValue(v: unknown): string {
 }
 
 export function ExportWorkspace({ caseItem }: Props) {
-  const { userName } = useRole();
+  const { userName, isAdviser } = useRole();
   const template = getTemplate(caseItem.plan_type);
   const { rows: fields, loading: isLoading } = useChecklistFields({ caseId: caseItem.id, template });
   const [exporting, setExporting] = useState(false);
@@ -402,18 +402,23 @@ export function ExportWorkspace({ caseItem }: Props) {
           <li>WorkDrive upload to the configured ceding folder</li>
           <li>Zoho Plans PATCH (Provider, Policy_Ref, Valuation, Plan_Status, …)</li>
         </ul>
-        <Button
-          onClick={handleCompleteExport}
-          disabled={exporting || uploading}
-          className="w-full gap-2"
-        >
-          {(exporting || uploading) ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Download className="h-4 w-4" />
-          )}
-          {exporting || uploading ? "Exporting…" : "Complete export"}
-        </Button>
+        {isAdviser ? (
+          // Export is CA work — advisers see the receipt below, not the action.
+          <p className="text-xs text-muted-foreground italic">The CA team runs the export.</p>
+        ) : (
+          <Button
+            onClick={handleCompleteExport}
+            disabled={exporting || uploading}
+            className="w-full gap-2"
+          >
+            {(exporting || uploading) ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
+            {exporting || uploading ? "Exporting…" : "Complete export"}
+          </Button>
+        )}
         {lastExportAt && (
           <p className="text-[10px] text-muted-foreground mt-2 text-center">
             Last export: {formatTs(lastExportAt)}

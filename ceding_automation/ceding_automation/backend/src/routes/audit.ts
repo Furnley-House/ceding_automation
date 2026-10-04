@@ -13,7 +13,7 @@
 
 import { Router, Request, Response } from "express";
 import { Prisma, PrismaClient } from "@prisma/client";
-import { requireCaseAccess } from "../middleware/requireCaseAccess";
+import { requireCaseAccess, caseScopeFor } from "../middleware/requireCaseAccess";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 
@@ -104,6 +104,11 @@ router.get(
     } = req.query;
 
     const where: Prisma.AuditLogWhereInput = {};
+    // Advisers read only their own clients' case histories — the same
+    // rule as the case list. Without this the global trail exposed every
+    // case's client names and values to any adviser.
+    const scope = caseScopeFor(req.user!);
+    if (scope) where.case = scope;
     if (typeof action === "string" && action) where.action = action as never;
     if (typeof source === "string" && source) where.source = source;
     if (typeof caseId === "string" && caseId) where.caseId = caseId;
