@@ -36,6 +36,8 @@ const MyInbox = () => {
       // non-admin roles, so a name match is enough to narrow to "mine".
       return all
         .filter((c) => (c.paraplanner_name ?? "").trim() === (userName ?? "").trim())
+        // Cancelled (NPW) cases stay viewable from Cases but leave the inbox.
+        .filter((c) => String(c.status ?? "").toUpperCase() !== "CANCELLED")
         .sort((a, b) =>
           new Date(b.last_activity_at ?? b.created_at ?? 0).getTime() -
           new Date(a.last_activity_at ?? a.created_at ?? 0).getTime()

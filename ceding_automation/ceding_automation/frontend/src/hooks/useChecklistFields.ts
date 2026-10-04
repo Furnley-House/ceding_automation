@@ -197,12 +197,21 @@ export function fundDetailsStatus(rows: FundLineLike[] | null | undefined): Fund
   return anyBelowHigh ? "review" : "filled";
 }
 
+/** Window event fired after a checklist write so every useChecklistFields
+ *  instance for that case reloads. Also dispatch it from code that writes
+ *  checklist rows without going through this hook. */
+export const CHECKLIST_CHANGED_EVENT = "ceding:checklist-changed";
+
+export function notifyChecklistChanged(caseId: string): void {
+  window.dispatchEvent(new CustomEvent(CHECKLIST_CHANGED_EVENT, { detail: { caseId, source: null } }));
+}
+
 export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
   const { role, userName } = useRole();
   const [rows, setRows] = useState<ChecklistRow[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const refresh = useCallback(async () => {
+  const reload = useCallback(async () => {
     setLoading(true);
     try {
       const res = await api.get(`/cases/${caseId}/checklist`);
@@ -214,6 +223,25 @@ export function useChecklistFields({ caseId, template }: UseChecklistArgs) {
       setLoading(false);
     }
   }, [caseId]);
+
+  // Each hook instance keeps its own copy of the rows, and a stage often
+  // mounts several (the workspace list + useCaseCompletionStats for the
+  // tiles). refresh() reloads this copy and tells every other instance for
+  // the same case to reload too, so tiles and gates update after a bulk
+  // approve / Mark-missing-as-N/A without a page reload.
+  const refresh = useCallback(async () => {
+    await reload();
+    window.dispatchEvent(new CustomEvent(CHECKLIST_CHANGED_EVENT, { detail: { caseId, source: reload } }));
+  }, [reload, caseId]);
+
+  useEffect(() => {
+    const onChanged = (e: Event) => {
+      const d = (e as CustomEvent<{ caseId: string; source: unknown }>).detail;
+      if (d?.caseId === caseId && d.source !== reload) void reload();
+    };
+    window.addEventListener(CHECKLIST_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(CHECKLIST_CHANGED_EVENT, onChanged);
+  }, [caseId, reload]);
 
   // Initial load — fetch only. Fields are created by AI extraction or manual CA entry,
   // never pre-seeded as empty rows (AI layer is managed separately on Azure).

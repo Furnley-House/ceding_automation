@@ -16,9 +16,10 @@ import {
   PLAN_TYPES,
   RAG_STYLES,
   STATUS_LABELS,
-  STATUS_STYLES,
   calculateRag,
+  caseStatusBadge,
   generateCaseRef,
+  type CaseRow,
 } from "@/lib/caseHelpers";
 import { useRole } from "@/hooks/useRole";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -217,12 +218,10 @@ const Cases = () => {
         const owner = role === "ca_team" ? c.owner_name : c.paraplanner_name;
         if (String(owner ?? "").trim() !== me) return false;
       }
-      // "complete" (UI) covers STAGE_10_COMPLETE and CANCELLED. APPROVED is
-      // still active — it awaits Stage 9 Export.
+      // Active excludes Ceding Complete and cancelled (NPW) cases. APPROVED
+      // is still active — it awaits Stage 9 Export.
       if (statusFilter === "active") {
-        if (c.status === "complete") return false;
-      } else if (statusFilter === "complete") {
-        if (c.status !== "complete" || c.backend_status === "CANCELLED") return false;
+        if (c.status === "complete" || c.status === "cancelled") return false;
       } else if (statusFilter !== "all" && c.status !== statusFilter) {
         return false;
       }
@@ -467,7 +466,8 @@ const Cases = () => {
               filtered.map((c) => {
                 const rag = calculateRag(c);
                 const ragStyle = RAG_STYLES[rag];
-                const statusStyle = STATUS_STYLES[c.status] ?? "bg-muted text-muted-foreground";
+                // Same badge as the case header (step-level, not the coarse status group).
+                const badge = caseStatusBadge(c as CaseRow);
                 const lastUpdated = new Date(c.updated_at);
                 return (
                   <tr
@@ -490,12 +490,14 @@ const Cases = () => {
                     <td className="px-4 py-3 text-muted-foreground">{c.plan_type}</td>
                     <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{c.plan_number}</td>
                     <td className="px-4 py-3">
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${statusStyle}`}>
-                        {STATUS_LABELS[c.status] ?? c.status}
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${badge.className}`}>
+                        {badge.label}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-xs text-muted-foreground">
-                      Step {(c as any).current_stage ?? 1} / 10
+                      {/* List rows don't carry the step an NPW case was
+                          cancelled at — show a dash rather than "Step 1". */}
+                      {c.status === "cancelled" ? "—" : `Step ${(c as any).current_stage ?? 1} / 10`}
                     </td>
                     <td className="px-4 py-3 text-xs text-muted-foreground">
                       {lastUpdated.toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}

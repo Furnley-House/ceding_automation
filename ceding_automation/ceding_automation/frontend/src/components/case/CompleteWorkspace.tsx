@@ -4,7 +4,7 @@ import { CheckCircle2, ArrowRight, LayoutGrid, Sparkles, FileText, Clock } from 
 import { Button } from "@/components/ui/button";
 import { getCases } from "@/services/api";
 import type { CaseRow } from "@/lib/caseHelpers";
-import { RAG_STYLES, STATUS_LABELS, calculateRag } from "@/lib/caseHelpers";
+import { RAG_STYLES, calculateRag, caseStatusBadge } from "@/lib/caseHelpers";
 import { CaseKpiPanel } from "./CaseKpiPanel";
 
 interface Props {
@@ -21,6 +21,7 @@ export function CompleteWorkspace({ caseItem }: Props) {
       (c) =>
         c.id !== caseItem.id &&
         c.status !== "complete" &&
+        c.status !== "cancelled" &&
         c.status !== "approved" &&
         (c.current_stage ?? 1) < 11,
     )
@@ -130,7 +131,7 @@ export function CompleteWorkspace({ caseItem }: Props) {
                         Step {c.current_stage ?? 1}/10
                       </span>
                       <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-muted text-muted-foreground font-semibold">
-                        {STATUS_LABELS[c.status] ?? c.status}
+                        {caseStatusBadge(c).label}
                       </span>
                       <ArrowRight className="h-4 w-4 text-muted-foreground" />
                     </div>

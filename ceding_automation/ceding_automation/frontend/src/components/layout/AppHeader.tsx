@@ -2,7 +2,8 @@ import { Search, ChevronDown, LogOut, Settings, BarChart3, Contrast } from "luci
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getCases, getCaseStats } from "@/services/api";
+import { getCases } from "@/services/api";
+import { useCaseStats } from "@/hooks/useCaseStats";
 import { useRole, ROLE_LABELS } from "@/hooks/useRole";
 import { useHighContrast } from "@/hooks/useHighContrast";
 import { useAuth } from "@/hooks/useAuth";
@@ -45,7 +46,7 @@ export function AppHeader() {
   // Weekly throughput: cases completed this calendar week
   // Same source as the dashboard "Done · week" tile: completedAt this week,
   // counted server-side across the whole caseload.
-  const { data: caseStats } = useQuery({ queryKey: ["cases", "stats"], queryFn: getCaseStats });
+  const { data: caseStats } = useCaseStats();
   const weeklyThroughput = caseStats?.doneWeek ?? "—";
 
   const filtered =

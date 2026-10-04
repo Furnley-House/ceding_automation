@@ -43,6 +43,7 @@ export const CASE_STATUSES = [
   "approved",
   "complete",
   "on_hold",
+  "cancelled",
 ] as const;
 
 export type CaseStatus = (typeof CASE_STATUSES)[number] | string;
@@ -55,6 +56,7 @@ export const STATUS_LABELS: Record<string, string> = {
   approved: "Approved",
   complete: "Complete",
   on_hold: "On Hold",
+  cancelled: "NPW · Cancelled",
   // legacy
   loa_sent: "LOA Sent",
   loa_processed: "LOA Processed",
@@ -71,6 +73,7 @@ export const STATUS_STYLES: Record<string, string> = {
   approved: "bg-success/15 text-success",
   complete: "bg-success/15 text-success",
   on_hold: "bg-overdue/15 text-overdue",
+  cancelled: "bg-muted text-muted-foreground",
   loa_sent: "bg-info/15 text-info",
   waiting_pdf: "bg-warning/15 text-warning",
   pdf_received: "bg-primary/15 text-primary",
@@ -100,8 +103,13 @@ export const RAG_STYLES: Record<Rag, { dot: string; bg: string; text: string; la
   green: { dot: "bg-success", bg: "bg-success/10", text: "text-success", label: "Green" },
 };
 
+/** Closed = ceding complete or cancelled (NPW). Neither counts as active. */
+export function isClosedStatus(status: string | undefined | null): boolean {
+  return status === "complete" || status === "cancelled";
+}
+
 export function calculateRag(c: CaseRow): Rag {
-  if (c.status === "complete" || c.status === "approved") return "green";
+  if (c.status === "complete" || c.status === "approved" || c.status === "cancelled") return "green";
   if (c.status === "on_hold") return "red";
   const last = new Date(c.last_activity_at ?? c.updated_at ?? c.created_at);
   const days = Math.floor((Date.now() - last.getTime()) / (1000 * 60 * 60 * 24));
@@ -126,6 +134,35 @@ export const CEDING_STAGES = [
   { num: 9, key: "export", label: "Export & WorkDrive" },
   { num: 10, key: "complete", label: "Ceding Complete" },
 ] as const;
+
+/**
+ * Case header badge. The coarse UI status groups several stages together
+ * (e.g. "Awaiting Documents" covers steps 4–6), so a case on Call Assist
+ * read "Awaiting Documents". While a case is moving through the steps the
+ * badge names the step it is actually on; terminal / parked states keep
+ * their status label.
+ */
+export function caseStatusBadge(c: { status: string; current_stage?: number | null }): {
+  label: string;
+  className: string;
+} {
+  const stage = Math.min(10, Math.max(1, c.current_stage ?? 1));
+  const className = STATUS_STYLES[c.status] ?? "bg-muted text-muted-foreground";
+  switch (c.status) {
+    case "cancelled":
+    case "on_hold":
+    case "complete":
+      return { label: STATUS_LABELS[c.status], className };
+    case "in_review":
+      // No step number: a CA opens an In Review case on Step 6 (returned
+      // fields) while the paraplanner works on Step 8.
+      return { label: "In Review · with paraplanner", className };
+    case "approved":
+      return { label: "Approved · Step 9", className };
+    default:
+      return { label: `Step ${stage} · ${CEDING_STAGES[stage - 1].label}`, className };
+  }
+}
 
 export function generateCaseRef(planType: string) {
   const prefix = planType.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 3);

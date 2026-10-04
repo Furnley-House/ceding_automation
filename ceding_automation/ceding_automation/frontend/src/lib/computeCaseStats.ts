@@ -62,6 +62,11 @@ export interface CaseStats {
   pending: number;
   /** Scalars with status === "review_requested". */
   review: number;
+  /** Subset of `review` with no value — a missing field the paraplanner sent
+   *  back. Counted as review (not missing) above so the buckets stay
+   *  mutually exclusive; views that count by value (Stage 6 Filled /
+   *  Missing) add it back to missing. */
+  reviewEmpty: number;
   /** Scalar missing + unfilled grid slots. */
   missing: number;
   /** Scalars where confidence === "CONFLICT". Subset of review bucket, for display. */
@@ -121,6 +126,7 @@ export function computeCaseStats(input: ComputeCaseStatsInput): CaseStats {
   let approved = 0;
   let pending = 0;
   let review = 0;
+  let reviewEmpty = 0;
   let scalarMissing = 0;
   let conflict = 0;
   let manualOverrides = 0;
@@ -147,6 +153,7 @@ export function computeCaseStats(input: ComputeCaseStatsInput): CaseStats {
       approved += 1;
     } else if (r?.status === "review_requested") {
       review += 1;
+      if (isMissingValue(r)) reviewEmpty += 1;
     } else if (isMissingValue(r)) {
       scalarMissing += 1;
     } else {
@@ -185,6 +192,7 @@ export function computeCaseStats(input: ComputeCaseStatsInput): CaseStats {
     approved,
     pending,
     review,
+    reviewEmpty,
     missing,
     conflict,
     completion,
