@@ -363,8 +363,20 @@ const CaseDetail = () => {
               <div className="flex items-center gap-3 mb-2 flex-wrap">
                 <span className={`inline-block h-3 w-3 rounded-full ${RAG_STYLES[rag].dot}`} />
                 <h1 className="text-xl font-bold theme-heading text-foreground truncate">{caseItem.client_name}</h1>
+                {/* Status badge now prefixes with the backend's actual stage
+                    number (from GET /cases/:id derived via STATUS_TO_STAGE
+                    in services/api.ts), so stepper position and badge agree
+                    on which stage the case is at. Pre-fix the badge was a
+                    semantic-only label ("Extraction Complete") which
+                    collapsed stages 7 + 8 to one string and read as
+                    disagreement when stepper highlighted stage 8 but badge
+                    didn't name the stage. See item 3 in Revathy's
+                    2026-10-05 retest.
+                    Uses rawStage (backend truth), not viewStage (local
+                    view). A CA who view-navigated to a different stage via
+                    the stepper doesn't change what the badge means. */}
                 <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLES[caseItem.status] ?? ""}`}>
-                  {STATUS_LABELS[caseItem.status] ?? caseItem.status}
+                  {`Stage ${rawStage} · ${STATUS_LABELS[caseItem.status] ?? caseItem.status}`}
                 </span>
                 <span className="font-mono text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground">
                   {caseItem.case_ref}
