@@ -541,6 +541,22 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
       ],
     };
   }
+  // Additional viewer-scoped lens for the "my active" tile — the OR'd
+  // self-involvement filter regardless of role. For Advisers this equals
+  // `scope` above (since open-case access is off for them). For CAs /
+  // Paraplanners / Admins this is a strict subset of scope. See item 14
+  // in Revathy's 2026-10-05 retest: she asked for the Dashboard Active
+  // tile to show the viewer's own count with the team total labelled
+  // separately. The existing team-wide `active` number stays as `active`;
+  // the viewer-scoped number is returned alongside as `myActive`.
+  const myScope: Prisma.CaseWhereInput = {
+    OR: [
+      { createdById: me },
+      { assignedToId: me },
+      { paralPlannerId: me },
+      { adviserId: me },
+    ],
+  };
   const scoped = (w: Prisma.CaseWhereInput): Prisma.CaseWhereInput => ({ AND: [scope, w] });
   const completedBetween = (from: Date, to?: Date) =>
     prisma.case.count({
@@ -555,9 +571,12 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
     (_, i) => new Date(weekStart.getTime() - (CASEFLOW_WEEKS - 1 - i) * 7 * DAY_MS),
   );
 
-  const [byStatus, doneWeek, doneLastWeek, doneMonth, adviserCreated, cycleRows, flow] =
+  const [byStatus, myByStatus, doneWeek, doneLastWeek, doneMonth, adviserCreated, cycleRows, flow] =
     await Promise.all([
       prisma.case.groupBy({ by: ["status"], where: scope, _count: { _all: true } }),
+      // Viewer-scoped status counts for the "my active" tile. One extra
+      // groupBy; results summarised the same way as byStatus below.
+      prisma.case.groupBy({ by: ["status"], where: myScope, _count: { _all: true } }),
       completedBetween(weekStart),
       completedBetween(lastWeekStart, weekStart),
       completedBetween(monthStart),
@@ -629,8 +648,18 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
     })
     .sort((a, b) => b.active - a.active);
 
+  // Viewer-scoped summary — exposed as `my*` fields so the Dashboard tile
+  // can render "my active" (and future per-viewer lenses) without a new
+  // endpoint. The team-wide `active` / `total` fields remain unchanged
+  // so existing consumers (and reports) keep working.
+  const myCounts = summariseStatusCounts(
+    myByStatus.map((r) => ({ status: r.status, count: r._count._all })),
+  );
   res.json({
     ...summariseStatusCounts(byStatus.map((r) => ({ status: r.status, count: r._count._all }))),
+    myActive: myCounts.active,
+    myTotal: myCounts.total,
+    myCompleted: myCounts.completed,
     doneWeek,
     doneLastWeek,
     doneMonth,

@@ -425,10 +425,15 @@ const Dashboard = () => {
                   ) : (
                     <>
                       {/* Admin sees the whole team's caseload, not cases
-                          assigned to them — word it accordingly. */}
-                      {role === "admin" ? "The team has" : "You have"}{" "}
-                      <strong className="text-white/85 font-semibold">{stats?.active ?? "…"}</strong> active
-                      {stats?.active === 1 ? " case" : " cases"}. Top priority is{" "}
+                          assigned to them — word it accordingly.
+                          Non-admins see their own myActive, not the full
+                          team's `active` number (which read as "178" for
+                          anyone and was never scoped to the viewer). */}
+                      {role === "admin"
+                        ? <>The team has{" "}<strong className="text-white/85 font-semibold">{stats?.active ?? "…"}</strong></>
+                        : <>You have{" "}<strong className="text-white/85 font-semibold">{stats?.myActive ?? "…"}</strong></>
+                      } active
+                      {(role === "admin" ? stats?.active : stats?.myActive) === 1 ? " case" : " cases"}. Top priority is{" "}
                       <strong className="text-white/85 font-semibold">{topCase.name}</strong> at{" "}
                       {topCase.progressPct}% complete.
                     </>
@@ -499,10 +504,27 @@ const Dashboard = () => {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiTile
           tone="teal"
-          label="Active"
-          value={stats?.active ?? "—"}
-          sub={stats ? `of ${stats.total} total` : "loading"}
-          delta={stats ? (stats.active > 0 ? `${donePct}% done` : "all clear") : undefined}
+          label={role === "admin" ? "Active" : "My active"}
+          value={role === "admin" ? (stats?.active ?? "—") : (stats?.myActive ?? "—")}
+          // Admins see team-wide / total. Non-admins see their own count +
+          // team-wide total as context in the sub-text. Item 14 in Revathy's
+          // 2026-10-05 retest: she asked for the viewer's own count as the
+          // primary number with the team total labelled separately so a CA
+          // isn't told "you have 178 cases" when 178 is the whole team's.
+          sub={
+            stats
+              ? role === "admin"
+                ? `of ${stats.total} total`
+                : `${stats.active} across team`
+              : "loading"
+          }
+          delta={
+            stats
+              ? (role === "admin" ? stats.active : stats.myActive) > 0
+                ? `${donePct}% done`
+                : "all clear"
+              : undefined
+          }
           icon={<Briefcase className="h-4 w-4" />}
           onClick={() => navigate("/cases?status=active")}
           index={0}

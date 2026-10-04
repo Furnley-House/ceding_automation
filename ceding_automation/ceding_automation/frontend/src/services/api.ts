@@ -196,6 +196,15 @@ export interface CaseStats {
   cancelled: number;
   inReview: number;
   onHold: number;
+  // Viewer-scoped counts added 2026-10-05 for item 14 in Revathy's
+  // retest — the Dashboard "Active" tile now shows myActive with the
+  // team total as sub-text so a CA sees their own number, not the
+  // whole team's. For Advisers (who only see linked cases anyway)
+  // myActive == active. Backend computes with the same OR'd self-
+  // involvement filter used by the viewer-scoped fallback scope.
+  myActive: number;
+  myTotal: number;
+  myCompleted: number;
   doneWeek: number;
   doneLastWeek: number;
   doneMonth: number;
