@@ -234,20 +234,33 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
   }
 
   if (exportMeta) {
-    const workdrive = exportMeta.workdrive ?? exportMeta.workdriveOk;
-    const zoho = exportMeta.zoho ?? exportMeta.zohoOk;
+    // `workdrive` is the WorkDrive upload result object (truthy when the
+    // upload succeeded, null / absent on failure). Older audit rows carry
+    // the boolean `workdriveOk` instead. Same shape for zoho/zohoOk —
+    // zohoUpdate is an object; zohoOk is a boolean. Normalise both to
+    // booleans so the headline label computes honestly.
+    const workdriveOk = Boolean(exportMeta.workdrive ?? exportMeta.workdriveOk);
+    const zohoOk = Boolean(exportMeta.zoho ?? exportMeta.zohoOk);
     const fieldsUpdated = exportMeta.fieldsUpdated ?? exportMeta.fields_updated;
     const recordId = exportMeta.recordId ?? exportMeta.planRecordId ?? exportMeta.zohoCaseId;
     const sub = [
-      workdrive !== undefined ? `WorkDrive ${workdrive ? "✓" : "✗"}` : null,
-      zoho !== undefined ? `Zoho ${zoho ? "✓" : "✗"}` : null,
+      `WorkDrive ${workdriveOk ? "✓" : "✗"}`,
+      `Zoho ${zohoOk ? "✓" : "✗"}`,
       fieldsUpdated !== undefined ? `${fieldsUpdated} fields` : null,
       recordId ? `Plan ${recordId}` : null,
     ]
       .filter(Boolean)
       .join(" · ");
+    // Pre-fix the headline was hardcoded to "Exported" regardless of
+    // outcome, so a workdrive=ok / zoho=fail export looked successful at a
+    // glance. Three-way label: both OK → Exported, one OK → Partial,
+    // neither → Failed. Item 6 in Revathy's 2026-10-05 retest. (62 prod
+    // cases are in the one-side-failed state right now per the
+    // zoho-export-stale-cases handover doc.)
+    const headline =
+      workdriveOk && zohoOk ? "Exported" : workdriveOk || zohoOk ? "Partial" : "Failed";
     cards.push(
-      <StatCard key="export" label="Stage 9 export" value="Exported" sub={sub || undefined} />,
+      <StatCard key="export" label="Stage 9 export" value={headline} sub={sub || undefined} />,
     );
   }
 
