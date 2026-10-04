@@ -675,9 +675,14 @@ const CaseDetail = () => {
             <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/60 p-4">
               <Ban className="h-5 w-5 text-muted-foreground shrink-0 mt-0.5" />
               <div className="text-sm">
-                <p className="font-semibold text-foreground">Not Proceeding With — case cancelled</p>
+                <p className="font-semibold text-foreground">
+                  Not Proceeding With — case cancelled
+                  {(caseItem as any).cancelled_at
+                    ? ` on ${new Date(String((caseItem as any).cancelled_at)).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}`
+                    : ""}
+                </p>
                 <p className="text-muted-foreground">
-                  {String((caseItem as any).on_hold_reason ?? "") || "No reason recorded."} This case is
+                  {String((caseItem as any).cancelled_reason ?? "") || "No reason recorded."} This case is
                   read-only and excluded from active counts. The audit trail is kept.
                 </p>
               </div>

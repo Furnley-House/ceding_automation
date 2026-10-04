@@ -67,10 +67,31 @@ export function canMarkNpw(status: CaseStatus): boolean {
   );
 }
 
-/** Text stored on the case (Case.onHoldReason — the "why is this case
- *  parked" column, shared with On Hold) and shown on the NPW banner. */
+/** Text stored in Case.cancelledReason and shown on the NPW banner. */
 export function npwReasonText(code: NpwReasonCode, note: string | undefined): string {
   const label = NPW_REASONS[code];
   const n = (note ?? "").trim();
   return n ? `NPW — ${label}: ${n}` : `NPW — ${label}`;
+}
+
+/**
+ * Status-change guard for NPW. Returns an error message when a requested
+ * change must be refused, else null:
+ *  - a CANCELLED (NPW) case can't move to any other status by any route —
+ *    otherwise a cancelled case could be revived (e.g. pushed back to
+ *    Stage 4 or approved);
+ *  - CANCELLED can only be set through POST /cases/:id/npw, which records
+ *    the reason — not as a plain status write.
+ * `target` is the requested status in either form ("CANCELLED" /
+ * "cancelled"); omit it for routes that imply a status (stage moves,
+ * assign-paraplanner).
+ */
+export function npwStatusChangeError(current: CaseStatus | null | undefined, target?: unknown): string | null {
+  if (current === CaseStatus.CANCELLED) {
+    return "This case is marked NPW (cancelled) and its status can't be changed";
+  }
+  if (typeof target === "string" && target.toUpperCase() === CaseStatus.CANCELLED) {
+    return "Use Mark NPW to cancel a case so the reason is recorded";
+  }
+  return null;
 }

@@ -42,6 +42,7 @@ import {
   countUnresolvedConflicts,
   isNpwReasonCode,
   npwReasonText,
+  npwStatusChangeError,
 } from "../utils/caseGuards";
 
 const router = Router();
@@ -1013,6 +1014,21 @@ router.patch(
     const body = req.body as Record<string, unknown>;
     const data: Record<string, unknown> = {};
 
+    // NPW guard: stage moves, status writes and completion dates can't
+    // revive a cancelled case, and CANCELLED itself only comes via /npw.
+    if (
+      body.currentStage !== undefined ||
+      body.status !== undefined ||
+      body.cedingCompleteDate !== undefined
+    ) {
+      const cur = await prisma.case.findUnique({
+        where: { id: req.params.id },
+        select: { status: true },
+      });
+      const npwError = npwStatusChangeError(cur?.status, body.status);
+      if (npwError) return res.status(409).json({ error: npwError, code: "CASE_CANCELLED" });
+    }
+
     // current_stage  →  status
     // Don't auto-downgrade a case that's already with the paraplanner or
     // approved: the CA might be jumping back to Stage 4/5 to fix or re-call
@@ -1393,9 +1409,10 @@ async function unresolvedConflictCount(caseId: string, planType: PlanType): Prom
 // Stage 3: once the provider documents are in, the CA may find the plan
 // isn't a Pension / ISA / GIA, is already closed, etc. Marking it NPW sets
 // status CANCELLED — which drops it out of every active count and list —
-// while the case stays viewable and its audit trail intact. The reason is
-// kept on Case.onHoldReason (the "why is this case parked" column) and in
-// the audit row's metadata. Reason codes are mirrored in the frontend's
+// while the case stays viewable and its audit trail intact. The reason and
+// time go in Case.cancelledReason / cancelledAt (own columns, so a later
+// status change can't wipe them) and in the audit row's metadata. Once
+// cancelled, no route can change the status (npwStatusChangeError). Reason codes are mirrored in the frontend's
 // lib/npw.ts.
 const NpwSchema = z.object({
   reason: z.string().refine(isNpwReasonCode, "Unknown NPW reason"),
@@ -1434,7 +1451,7 @@ router.post(
     const reasonText = npwReasonText(reason, note);
     const updated = await prisma.case.update({
       where: { id: req.params.id },
-      data: { status: CaseStatus.CANCELLED, onHoldReason: reasonText },
+      data: { status: CaseStatus.CANCELLED, cancelledReason: reasonText, cancelledAt: new Date() },
     });
     await prisma.auditLog.create({
       data: {
@@ -1469,6 +1486,13 @@ router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAP
   if (!status) {
     return res.status(400).json({ error: `Invalid status: ${rawStatus}` });
   }
+
+  const current = await prisma.case.findUnique({
+    where: { id: req.params.id },
+    select: { status: true },
+  });
+  const npwError = npwStatusChangeError(current?.status, status);
+  if (npwError) return res.status(409).json({ error: npwError, code: "CASE_CANCELLED" });
 
   const data: Prisma.CaseUpdateInput = {
     status,
@@ -1572,6 +1596,13 @@ router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), require
 // ── Assign to Paraplanner ────────────────────────────────
 router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { paralPlannerId, note } = req.body;
+
+  const current = await prisma.case.findUnique({
+    where: { id: req.params.id },
+    select: { status: true },
+  });
+  const npwError = npwStatusChangeError(current?.status);
+  if (npwError) return res.status(409).json({ error: npwError, code: "CASE_CANCELLED" });
 
   const updated = await prisma.case.update({
     where: { id: req.params.id },

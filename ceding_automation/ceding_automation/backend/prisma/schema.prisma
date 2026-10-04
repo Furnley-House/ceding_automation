@@ -387,6 +387,12 @@ model Case {
   approvedAt            DateTime?
   completedAt           DateTime?
   onHoldReason          String?
+  // NPW (Not Proceeding With): why and when the case was cancelled.
+  // Set by POST /cases/:id/npw alongside status CANCELLED; follows the
+  // onHoldReason pattern but in its own column so a later status change
+  // (which clears onHoldReason) can't wipe it.
+  cancelledReason       String?
+  cancelledAt           DateTime?
   // H23 (Nishant's design): stamped by the first extraction-submit on
   // this case. Used by Ship #1's guard predicate at
   // caseHasExtractionRun (backend/src/routes/cases.ts) to arm the
