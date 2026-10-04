@@ -185,6 +185,11 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       toast.success(`Approved ${n} field${n === 1 ? "" : "s"}`);
       setSelected(new Set());
       refresh();
+      // Same invalidation pattern as bulkRequestReview below — see item
+      // 11 in Revathy's 2026-10-05 retest for why.
+      qc.invalidateQueries({ queryKey: ["case", caseItem.id] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: ["cases", "stats"] });
     },
     onError: (e: Error) => toast.error("Approve failed", { description: e.message }),
   });
@@ -225,6 +230,11 @@ export function ApprovalWorkspace({ caseItem }: Props) {
     onSuccess: (_, vars) => {
       toast.success(vars.action === "approve" ? "Field approved" : "Review requested");
       refresh();
+      // Same invalidation pattern as bulkRequestReview below — see item
+      // 11 in Revathy's 2026-10-05 retest for why.
+      qc.invalidateQueries({ queryKey: ["case", caseItem.id] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: ["cases", "stats"] });
     },
     onError: (e: Error) => toast.error("Action failed", { description: e.message }),
   });
@@ -255,6 +265,16 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       setBulkReviewOpen(false);
       setBulkReviewText("");
       refresh();
+      // Invalidate the global cases list + stats so the Dashboard tiles,
+      // AppHeader "Done · week", and Cases list reflect the status flips
+      // from this bulk action. Pre-fix only local refresh() was called, so
+      // sibling screens stayed stale until the next natural refetch. The
+      // sibling markCaseApproved mutation below has had these invalidations
+      // all along — this is just closing the parity gap.
+      // Item 11 in Revathy's 2026-10-05 retest.
+      qc.invalidateQueries({ queryKey: ["case", caseItem.id] });
+      qc.invalidateQueries({ queryKey: ["cases"] });
+      qc.invalidateQueries({ queryKey: ["cases", "stats"] });
     },
     onError: (e: Error) => toast.error("Failed", { description: e.message }),
   });
