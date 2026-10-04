@@ -403,6 +403,11 @@ const CaseDetail = () => {
               <div className="flex items-center gap-3 mb-2 flex-wrap">
                 <span className={`inline-block h-3 w-3 rounded-full ${RAG_STYLES[rag].dot}`} />
                 <h1 className="text-xl font-bold theme-heading text-foreground truncate">{caseItem.client_name}</h1>
+                {/* Badge names the step the case is on (caseStatusBadge in
+                    lib/caseHelpers.ts — same badge as the Cases list), from
+                    the backend stage, not viewStage. Item 3 in Revathy's
+                    2026-10-05 retest: the coarse status label covered
+                    several stages and read as disagreeing with the stepper. */}
                 <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${badge.className}`}>
                   {badge.label}
                 </span>

@@ -203,8 +203,13 @@ export interface CaseStats {
   cancelled: number;
   inReview: number;
   onHold: number;
-  /** Open cases the viewer personally owns (see GET /cases/stats). */
+  /** Viewer-owned counts (item 14, 2026-10-05 retest): open / all /
+   *  completed cases the viewer owns — assignee (or creator when
+   *  unassigned) for CA / Admin, paraplanner, or adviser. See myScope in
+   *  GET /cases/stats. The team-wide fields above are unchanged. */
   myActive: number;
+  myTotal: number;
+  myCompleted: number;
   doneWeek: number;
   doneLastWeek: number;
   doneMonth: number;

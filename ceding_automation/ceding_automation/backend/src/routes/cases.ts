@@ -588,6 +588,20 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
   // Same visibility as GET /cases: Admin, CA Team and Paraplanners count
   // every case (team-wide KPIs); Advisers only the cases they're linked to.
   const scope = dashboardScope(req);
+  // "My" lens for the My active tile (item 14 of the 2026-10-05 retest):
+  // open cases the viewer personally OWNS, not every case they touch, so a
+  // CA isn't credited with cases they created and handed on. Owner per role:
+  // Advisers → their clients (adviserId); Paraplanners → paralPlannerId;
+  // CA Team / Admin → assignee, falling back to creator when unassigned
+  // (same owner rule as Team load / Team performance).
+  const me = req.user!.id;
+  const role = req.user!.role;
+  const myScope: Prisma.CaseWhereInput =
+    role === "ADVISER"
+      ? { adviserId: me }
+      : role === "PARAPLANNER"
+        ? { paralPlannerId: me }
+        : { OR: [{ assignedToId: me }, { assignedToId: null, createdById: me }] };
   const scoped = (w: Prisma.CaseWhereInput): Prisma.CaseWhereInput => ({ AND: [scope, w] });
   const completedBetween = (from: Date, to?: Date) =>
     prisma.case.count({
@@ -602,9 +616,12 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
     (_, i) => new Date(weekStart.getTime() - (CASEFLOW_WEEKS - 1 - i) * 7 * DAY_MS),
   );
 
-  const [byStatus, doneWeek, doneLastWeek, doneMonth, adviserCreated, cycleRows, flow] =
+  const [byStatus, myByStatus, doneWeek, doneLastWeek, doneMonth, adviserCreated, cycleRows, flow] =
     await Promise.all([
       prisma.case.groupBy({ by: ["status"], where: scope, _count: { _all: true } }),
+      // Viewer-scoped status counts for the "my active" tile. One extra
+      // groupBy; results summarised the same way as byStatus below.
+      prisma.case.groupBy({ by: ["status"], where: myScope, _count: { _all: true } }),
       completedBetween(weekStart),
       completedBetween(lastWeekStart, weekStart),
       completedBetween(monthStart),
@@ -630,24 +647,6 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
 
   // Elapsed time includes provider waits — cycle time, not hands-on effort.
   const cycle = medianCycleDays(cycleRows);
-
-  // My active — open cases this viewer personally owns, so the dashboard
-  // doesn't present the whole firm's caseload as "yours". Owner per role:
-  // Advisers → their clients (adviserId); Paraplanners → paralPlannerId;
-  // CA Team / Admin → assignee, falling back to creator when unassigned
-  // (same owner rule as Team load).
-  const me = req.user!.id;
-  const role = req.user!.role;
-  const mine: Prisma.CaseWhereInput =
-    role === "ADVISER"
-      ? { adviserId: me }
-      : role === "PARAPLANNER"
-        ? { paralPlannerId: me }
-        : { OR: [{ assignedToId: me }, { assignedToId: null, createdById: me }] };
-  const myActive = await prisma.case.count({
-    where: { AND: [mine, { status: { notIn: [...CLOSED_STATUSES, CaseStatus.CANCELLED] } }] },
-  });
-
 
   // Team load — open cases per owner across the WHOLE team (not scoped to
   // the viewer): it's a workload view, counts only, no case detail. Owner =
@@ -727,9 +726,16 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
     perfUsers.map((u) => ({ userId: u.id, name: u.name, role: u.role, ...perf.get(u.id)! })),
   );
 
+  // Viewer-scoped summary — exposed as `my*` fields (see myScope above).
+  // The team-wide `active` / `total` fields remain unchanged.
+  const myCounts = summariseStatusCounts(
+    myByStatus.map((r) => ({ status: r.status, count: r._count._all })),
+  );
   res.json({
     ...summariseStatusCounts(byStatus.map((r) => ({ status: r.status, count: r._count._all }))),
-    myActive,
+    myActive: myCounts.active,
+    myTotal: myCounts.total,
+    myCompleted: myCounts.completed,
     doneWeek,
     doneLastWeek,
     doneMonth,
@@ -1250,6 +1256,26 @@ router.patch(
         req.params.id,
         data as Prisma.CaseUpdateInput,
       );
+    }
+
+    // completedAt is write-once. Four code paths above can set it in `data`:
+    //   - currentStage=10 handler (line ~917)
+    //   - status=STAGE_10_COMPLETE handler (line ~933)
+    //   - status=complete legacy handler (line ~938)
+    //   - cedingCompleteDate explicit (line ~946)
+    // Pre-fix, a CA re-clicking "Mark ceding complete" on a case that was
+    // already complete overwrote the original completion date with today's,
+    // losing the actual completion day. (Item 10 in Revathy's 2026-10-05
+    // retest.) Load the current DB completedAt once, and if set, strip
+    // any further write.
+    if (data.completedAt !== undefined) {
+      const existing = await prisma.case.findUnique({
+        where: { id: req.params.id },
+        select: { completedAt: true },
+      });
+      if (existing?.completedAt) {
+        delete (data as Record<string, unknown>).completedAt;
+      }
     }
 
     let updated;

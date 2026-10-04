@@ -8,6 +8,7 @@ import { auditApi } from "@/lib/api";
 import { useChecklistFields } from "@/hooks/useChecklistFields";
 import { useCaseCompletionStats } from "@/hooks/useCaseCompletionStats";
 import { useDocuments } from "@/hooks/useDocuments";
+import { useFundLines } from "@/hooks/useFundLines";
 import { getTemplate } from "@/lib/checklistTemplates";
 import type { CaseRow } from "@/lib/caseHelpers";
 
@@ -110,6 +111,12 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
     caseId,
     planType: caseItem.plan_type,
   });
+  // Also pull raw fund-line count so the Grids-reviewed card can be
+  // honest about "0 populated" when there ARE rows but none carry
+  // values. Pre-fix the sub-text read "0 populated with data" when a
+  // user could see 4 fund rows on screen — looked like a count bug.
+  // See item 7b in Revathy's 2026-10-05 retest.
+  const { rows: fundLines } = useFundLines(caseId);
   const bands = _caseStats.confidenceBands;
   const manualOverrides = _caseStats.manualOverrides;
   const bandOrder = ["HIGH", "MEDIUM", "LOW", "CONFLICT", "MISSING", "MANUALLY_OVERRIDDEN"];
@@ -117,7 +124,16 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
     .filter((k) => bands[k])
     .map((k) => `${k.charAt(0) + k.slice(1).toLowerCase().replace("_", " ")}: ${bands[k]}`)
     .join(" · ");
-  const totalFields = Object.values(bands).reduce((s, n) => s + n, 0);
+  // scalarsOnlyCount = sum of confidenceBands (one band per scalar) =
+  // stats.breakdown.scalarsCounted. Used for the AI-only band summary
+  // "visible?" check. The DISPLAYED total matches Stage 4/6/8 — stats.total
+  // (= scalars + fund slot + contrib slots) — so a CA comparing numbers
+  // across stages sees one headline figure. Pre-2026-10-05 this card
+  // displayed scalarsOnly (62 on a case where Stage 4/6 showed 65), which
+  // Session fix A (32e683b) hadn't closed. The "Grids reviewed X/Y" card
+  // below carries the grid breakdown separately.
+  const scalarsOnlyCount = Object.values(bands).reduce((s, n) => s + n, 0);
+  const totalFields = _caseStats.total;
 
   // 6. Approval timing — ready → approved → completed.
   const reviewMs = spanMs(readyForReviewAt, approvedAt);
@@ -142,7 +158,10 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
     );
   }
 
-  if (totalFields > 0) {
+  // Card is shown if there's any scalar activity to summarise (bandSummary
+  // is derived from scalars). The displayed count is stats.total so Stage
+  // 10 matches Stage 4/6/8 — single headline number across all four stages.
+  if (scalarsOnlyCount > 0) {
     cards.push(
       <StatCard
         key="ai"
@@ -160,12 +179,24 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
   // have data at all. Only shows when gridSlots.total > 0 (always true
   // for Pension/ISA/GIA — there's always at least the Fund slot).
   if (_caseStats.gridSlots.total > 0) {
+    // Sub-text wording: default to "N populated with data". But when
+    // the fund grid has rows that all lack values (AI extracted fund
+    // names but no numeric data — see FH-2026-000135 on staging), the
+    // generic "0 populated" reads as broken when a CA can see rows on
+    // screen. In that case, call it out explicitly: "0 of 4 fund rows
+    // have values". The upstream fix (why the AI returns names
+    // without values) is tracked against the AI pipeline — see
+    // docs/handover/ai-fund-extraction-empty-values.md.
+    const sub =
+      _caseStats.gridSlots.filled === 0 && fundLines.length > 0
+        ? `0 of ${fundLines.length} fund row${fundLines.length === 1 ? "" : "s"} have values`
+        : `${_caseStats.gridSlots.filled} populated with data`;
     cards.push(
       <StatCard
         key="grids"
         label="Grids reviewed"
         value={`${_caseStats.gridSlots.reviewed}/${_caseStats.gridSlots.total}`}
-        sub={`${_caseStats.gridSlots.filled} populated with data`}
+        sub={sub}
       />,
     );
   }
@@ -203,20 +234,33 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
   }
 
   if (exportMeta) {
-    const workdrive = exportMeta.workdrive ?? exportMeta.workdriveOk;
-    const zoho = exportMeta.zoho ?? exportMeta.zohoOk;
+    // `workdrive` is the WorkDrive upload result object (truthy when the
+    // upload succeeded, null / absent on failure). Older audit rows carry
+    // the boolean `workdriveOk` instead. Same shape for zoho/zohoOk —
+    // zohoUpdate is an object; zohoOk is a boolean. Normalise both to
+    // booleans so the headline label computes honestly.
+    const workdriveOk = Boolean(exportMeta.workdrive ?? exportMeta.workdriveOk);
+    const zohoOk = Boolean(exportMeta.zoho ?? exportMeta.zohoOk);
     const fieldsUpdated = exportMeta.fieldsUpdated ?? exportMeta.fields_updated;
     const recordId = exportMeta.recordId ?? exportMeta.planRecordId ?? exportMeta.zohoCaseId;
     const sub = [
-      workdrive !== undefined ? `WorkDrive ${workdrive ? "✓" : "✗"}` : null,
-      zoho !== undefined ? `Zoho ${zoho ? "✓" : "✗"}` : null,
+      `WorkDrive ${workdriveOk ? "✓" : "✗"}`,
+      `Zoho ${zohoOk ? "✓" : "✗"}`,
       fieldsUpdated !== undefined ? `${fieldsUpdated} fields` : null,
       recordId ? `Plan ${recordId}` : null,
     ]
       .filter(Boolean)
       .join(" · ");
+    // Pre-fix the headline was hardcoded to "Exported" regardless of
+    // outcome, so a workdrive=ok / zoho=fail export looked successful at a
+    // glance. Three-way label: both OK → Exported, one OK → Partial,
+    // neither → Failed. Item 6 in Revathy's 2026-10-05 retest. (62 prod
+    // cases are in the one-side-failed state right now per the
+    // zoho-export-stale-cases handover doc.)
+    const headline =
+      workdriveOk && zohoOk ? "Exported" : workdriveOk || zohoOk ? "Partial" : "Failed";
     cards.push(
-      <StatCard key="export" label="Stage 9 export" value="Exported" sub={sub || undefined} />,
+      <StatCard key="export" label="Stage 9 export" value={headline} sub={sub || undefined} />,
     );
   }
 

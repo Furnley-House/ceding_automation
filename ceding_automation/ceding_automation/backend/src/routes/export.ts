@@ -135,7 +135,12 @@ function buildPlanFields(
   setIf("Plan_Start_Date", parseDateISO(fieldsByKey.get("start_date")?.value));     // Date — checklist value, not Case.planStartDate (three-layer rule)
   setIf("Crystallisation_Status", fieldsByKey.get("crystallisation_status")?.value); // Pick list
   setIf("Valuation", parseNumeric(fieldsByKey.get("current_value")?.value));  // Currency
-  setIf("Valuation_Date", parseDateISO(fieldsByKey.get("valuation_date")?.value)); // Date
+  // Pre-2026-10-05 this read fieldsByKey.get("valuation_date") — a fieldKey
+  // that doesn't exist in any PENSION / ISA / GIA template. Zoho's
+  // Valuation_Date silently got undefined and setIf skipped. The real
+  // fieldKey in the canonical spec is current_value_as_of (same key the
+  // frontend Excel builder has used all along at exportTemplate.ts:415).
+  setIf("Valuation_Date", parseDateISO(fieldsByKey.get("current_value_as_of")?.value)); // Date
   setIf("Normal_Retirement_Age", parseNumeric(fieldsByKey.get("normal_retirement_age")?.value)); // Number
 
   return out;

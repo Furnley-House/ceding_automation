@@ -35,9 +35,19 @@ export function CompleteWorkspace({ caseItem }: Props) {
     })
     .slice(0, 3);
 
-  const completedDate = caseItem.ceding_complete_date
-    ? new Date(caseItem.ceding_complete_date).toLocaleDateString("en-GB")
-    : new Date().toLocaleDateString("en-GB");
+  // Pre-fix read `caseItem.ceding_complete_date`, a field the GET
+  // /cases/:id response does NOT include — only the frontend's PATCH
+  // body uses that snake_case name. So the ternary ALWAYS fell to the
+  // `new Date()` branch, showing today's date on every open of Stage 10
+  // regardless of when (or whether) the case was actually completed.
+  // The real timestamp on the response is `completed_at` (snake-cased
+  // from backend Case.completedAt). Item 10 in Revathy's 2026-10-05
+  // retest. Null-safe: no completedAt → render "(not set)" so the
+  // display doesn't claim a date that doesn't exist.
+  const completedAtRaw = (caseItem as unknown as { completed_at?: string | null }).completed_at;
+  const completedDate = completedAtRaw
+    ? new Date(completedAtRaw).toLocaleDateString("en-GB")
+    : "(not set)";
 
   return (
     <div className="space-y-6">
