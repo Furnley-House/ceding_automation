@@ -8,6 +8,7 @@ import { auditApi } from "@/lib/api";
 import { useChecklistFields } from "@/hooks/useChecklistFields";
 import { useCaseCompletionStats } from "@/hooks/useCaseCompletionStats";
 import { useDocuments } from "@/hooks/useDocuments";
+import { useFundLines } from "@/hooks/useFundLines";
 import { getTemplate } from "@/lib/checklistTemplates";
 import type { CaseRow } from "@/lib/caseHelpers";
 
@@ -110,6 +111,12 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
     caseId,
     planType: caseItem.plan_type,
   });
+  // Also pull raw fund-line count so the Grids-reviewed card can be
+  // honest about "0 populated" when there ARE rows but none carry
+  // values. Pre-fix the sub-text read "0 populated with data" when a
+  // user could see 4 fund rows on screen — looked like a count bug.
+  // See item 7b in Revathy's 2026-10-05 retest.
+  const { rows: fundLines } = useFundLines(caseId);
   const bands = _caseStats.confidenceBands;
   const manualOverrides = _caseStats.manualOverrides;
   const bandOrder = ["HIGH", "MEDIUM", "LOW", "CONFLICT", "MISSING", "MANUALLY_OVERRIDDEN"];
@@ -172,12 +179,24 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
   // have data at all. Only shows when gridSlots.total > 0 (always true
   // for Pension/ISA/GIA — there's always at least the Fund slot).
   if (_caseStats.gridSlots.total > 0) {
+    // Sub-text wording: default to "N populated with data". But when
+    // the fund grid has rows that all lack values (AI extracted fund
+    // names but no numeric data — see FH-2026-000135 on staging), the
+    // generic "0 populated" reads as broken when a CA can see rows on
+    // screen. In that case, call it out explicitly: "0 of 4 fund rows
+    // have values". The upstream fix (why the AI returns names
+    // without values) is tracked against the AI pipeline — see
+    // docs/handover/ai-fund-extraction-empty-values.md.
+    const sub =
+      _caseStats.gridSlots.filled === 0 && fundLines.length > 0
+        ? `0 of ${fundLines.length} fund row${fundLines.length === 1 ? "" : "s"} have values`
+        : `${_caseStats.gridSlots.filled} populated with data`;
     cards.push(
       <StatCard
         key="grids"
         label="Grids reviewed"
         value={`${_caseStats.gridSlots.reviewed}/${_caseStats.gridSlots.total}`}
-        sub={`${_caseStats.gridSlots.filled} populated with data`}
+        sub={sub}
       />,
     );
   }
