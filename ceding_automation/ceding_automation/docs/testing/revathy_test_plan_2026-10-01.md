@@ -546,6 +546,315 @@ case has any orphan rows.
 
 ---
 
+# PART 3 — Second round (deployed 2026-10-05)
+
+Seven fixes shipped off the back of your 2026-10-03 retest. All on staging on
+`ceding-backend:9f9276b` + the matching frontend bundle. Backend revision
+`ca-cedingai-backend-staging--0000083`.
+
+## E — Export: Plan_Start_Date now reads from the checklist
+
+**Status:** fixed, on staging (commit `3fbe342`).
+
+**What it closes:** after the mirror closure (commit `102bc50`), `Case.planStartDate`
+is null for most new cases because the AI can no longer write it and Zoho sync
+never wrote it. The export was reading from `Case.planStartDate` and so
+silently sent nothing to Zoho's `Plan_Start_Date` field. The fix: the export
+now reads the "Start date" value from the checklist, same as it already does
+for Valuation_Date and the other checklist-derived fields.
+
+**Caveat (KI-20):** this change — like the other four checklist-derived export
+fields (`Crystallisation_Status`, `Valuation`, `Valuation_Date`,
+`Normal_Retirement_Age`) — reads the current `.value` **without** checking
+whether the paraplanner has approved it. An unapproved AI reading can still
+reach Zoho + the Excel on export. This is the pre-existing convention, not a
+new behaviour. KI-20 is the design question for Aruna about whether to tighten
+all five to approved-only. Not changing it in this round.
+
+### Steps
+
+1. Pick any PENSION case where the Stage 4 "Start date" row has a value.
+2. Walk the case to Stage 9 (Export).
+3. Click "Complete export".
+4. In Zoho CRM, open the Plans record for the case.
+
+### Expected
+
+- Plan_Start_Date in Zoho matches the "Start date" value on the Stage 4
+  checklist.
+- `metadata.workdrive` and `metadata.zohoUpdate` both show `ok` in the
+  CHECKLIST_EXPORTED audit entry on the case.
+
+### Regression indicator
+
+- Plan_Start_Date in Zoho is blank even though the checklist row has a value.
+- `metadata.zohoError` on the CHECKLIST_EXPORTED audit mentions
+  `Plan_Start_Date` or anything date-shaped. Previous export failures were
+  about the Plans record id, not the date field — any new error naming the
+  date is a sign something's wrong with the fix.
+
+---
+
+## F — AI re-extraction preserves fields marked for review
+
+**Status:** fixed, on staging (commit `52a37bc`).
+
+**What it closes:** `aiBffApply.ts` had a preservation guard that protected
+`isApproved` and `isManuallyOverridden` fields from being overwritten by a
+re-extraction. It did not check `reviewRequestedAt`. So if a paraplanner
+clicked "Request review" on a field (adding a note like "please double-check
+this against the policy schedule") and the AI was then re-run on the same
+case, the review request got silently reset back to AI_EXTRACTED status.
+Paraplanner's note vanished, chip went green, case looked fine. Now the
+guard also preserves `reviewRequestedAt`.
+
+### Steps
+
+1. Pick any PENSION case at Stage 4 with recent AI extractions.
+2. Click the review-request icon (rotate arrow) next to a field. In the
+   dialog, type a note and click "Send back to CA Team". The field chip
+   turns to the review-requested state.
+3. Trigger a re-extraction of the case (admin or background job — ask
+   Nishant for the staging mechanism if you don't have a UI button).
+4. Confirm the field still shows the review-requested chip, with the note
+   intact.
+
+### Expected
+
+- Review-requested chip stays.
+- Note text stays.
+- Field value does NOT revert to the AI's new reading (if that reading
+  differs).
+
+### Regression indicator
+
+- Chip flips back to HIGH / MEDIUM / LOW / MISSING.
+- Note disappears.
+- Field value overwritten by the fresh AI extraction.
+
+---
+
+## G — Stepper click can no longer regress a case
+
+**Status:** fixed, on staging (commit `ea3d601`).
+
+**What it closes:** clicking an earlier stage in the horizontal stepper is
+view-only (it just scrolls to that stage's content). But the primary button
+at the bottom of the page, "Mark complete & continue", used to fire for
+whatever stage you were VIEWING — so a CA on Stage 7 who clicked Stage 4 in
+the stepper and then clicked "Mark complete & continue" to continue reading
+would write `current_stage=5` to the backend. The case regressed from 7 → 5.
+
+Belt-and-braces fix: (a) the "Mark complete & continue" button is now
+swapped to a view-only "Next step" button whenever you're viewing a stage
+earlier than the backend's current stage, and (b) even if `completeAndNext`
+is called from somewhere else, it guards on `viewStage < rawStage` and
+refuses with a toast.
+
+### Steps
+
+1. Open a case where the backend `current_stage` is 7 or higher. (If you
+   don't have one, walk a case up to Stage 7 and leave it there.)
+2. Click the "4" circle in the horizontal stepper at the top. Stage 4's
+   content loads.
+3. Look at the primary button at the bottom-right of the stage area.
+4. Click it.
+
+### Expected
+
+- Button at step 3 reads **"Next step"** (view-only), not "Mark complete &
+  continue".
+- Clicking it moves the view to Stage 5 only. Backend `current_stage` is
+  unchanged (still 7). The stepper's circle for Stage 7 is still highlighted
+  as current.
+
+### Regression indicator
+
+- Button reads "Mark complete & continue" when you're on a prior stage.
+- Clicking it (either button) regresses the case (`current_stage` goes
+  backward in the backend, dashboard shows the case at an earlier stage).
+
+---
+
+## H — "Megan Doherty" display leak closed
+
+**Status:** fixed, on staging (commit `5a11c9d`, correction commit `5a3345f`).
+
+**What it closes:** the Role picker had a fallback (`ROLE_USERS[role]`) that
+substituted hardcoded demo names when the signed-in user's name couldn't be
+resolved — most often after a 401-triggered logout where the auth cleared
+but `fh_role` in localStorage didn't. Paraplanners saw "Megan Doherty" in
+AppHeader, Dashboard "Welcome back …", and MyInbox's "Cases assigned to …"
+stat bar. Admins saw "Nicki Foster". CAs saw "Revathy S". And so on.
+
+**Audit trail was never corrupted** — I verified against prod audit_logs.
+Zero rows contain a frontend-supplied actor name. The backend always wrote
+`req.user.id` from the JWT. This was a display-only leak.
+
+The fix removed both fallbacks (`ROLE_USERS` and MyInbox's `PARAPLANNERS[0]`)
+and made `logout()` clear `fh_role` atomically with the auth state, so the
+mismatch window can't open.
+
+### Steps
+
+1. Sign in normally. Note your actual signed-in name in the AppHeader
+   avatar + dropdown.
+2. Open the MyInbox page. Stat bar should say "Cases assigned to <your
+   name>" or "Sign-in context not resolved — sign out and back in to see
+   your inbox." if your name doesn't match a paraplanner in the roster.
+3. Sign out via the AppHeader dropdown. Sign back in.
+4. Repeat the check in step 1.
+
+### Expected
+
+- AppHeader shows your name throughout. The avatar initials are from your
+  name.
+- MyInbox shows your name or the "sign-in context not resolved" empty state
+  — never a hardcoded demo name you aren't.
+- Dashboard "Welcome back, X" says your first name (or "there" as a last
+  resort).
+
+### Regression indicator
+
+- Any screen shows "Megan Doherty", "Revathy S", "James Whitfield", or
+  "Nicki Foster" when the signed-in user is a different person.
+- MyInbox stat bar says "Cases assigned to Megan Doherty" when you're a
+  different paraplanner.
+- Avatar initial is "M" / "R" / "J" / "N" by accident when your name
+  doesn't start with that letter.
+
+---
+
+## I — 429 no longer renders as "Case not found"
+
+**Status:** fixed, on staging (commit `3cef8c8`).
+
+**What it closes:** on a case detail page, any error from the case GET
+rendered the same "Case not found." empty state. A 429 (per-user rate
+limit) looked identical to a real 404. Now the error branches by status:
+
+- 404 → "Case not found." (unchanged)
+- 403 → "You don't have access to this case."
+- 429 → "Too many requests — please wait a minute and try again."
+- 5xx / network → "Couldn't load this case."
+
+Also: the useQuery no longer retries 404 / 403 / 429 (which pointlessly
+hammered the backend).
+
+### Steps (passive)
+
+- Day-to-day use. If you ever see a "Case not found" message on a case
+  you know exists, check the browser dev tools → Network tab for the
+  status of the `/cases/:id` request.
+
+### Expected
+
+- Normal case opens: no change.
+- A rate-limited user sees the "Too many requests" message with the sub-line
+  "You've hit the per-user rate limit. The case still exists."
+- A user without access sees "You don't have access to this case."
+
+### Regression indicator
+
+- The "Case not found" message appears on a 429 (check Network tab for the
+  status code).
+- Any of the four error branches shows the wrong copy.
+- The page retries a 429 (visible in Network tab as multiple failed
+  requests back-to-back) — the retry gate should block that.
+
+---
+
+## J — Stage 4 "Request review" and "Add comment" dialogs now open
+
+**Status:** fixed, on staging (commit `1393592`).
+
+**What it closes:** clicking the review-request icon (rotate arrow) or
+comment icon (speech bubble) on any Stage 4 checklist field did nothing.
+The Radix `DialogTrigger asChild` was wrapping a `Tooltip` component, which
+doesn't forward refs, so the dialog's open event never reached the button.
+Fixed by chaining the `asChild` composition correctly — Tooltip > TooltipTrigger
+`asChild` > DialogTrigger `asChild` > Button.
+
+### Steps
+
+1. Open any PENSION case at Stage 4.
+2. For any field: click the small rotate-arrow icon (Request review).
+3. The dialog should open with a "What needs another look?" textarea.
+4. Type a note, click "Send back to CA Team".
+5. For any field: click the small speech-bubble icon (Add comment).
+6. The dialog should open with an "Add context for the team…" textarea.
+7. Type something, click "Save comment".
+
+### Expected
+
+- Both dialogs open on click.
+- Submit buttons fire; toasts appear ("Review requested" and the saved
+  comment persists on the field).
+
+### Regression indicator
+
+- Either icon does nothing when clicked (silent failure — the original bug).
+- Dialog opens but the submit button does nothing.
+- Tooltip on hover of either icon no longer appears (the tooltip is now
+  nested inside the chained composition — it should still show on hover).
+
+---
+
+## K — Completion / LOA-sent / due dates now use UK calendar
+
+**Status:** fixed, on staging (commit `62ee46c`).
+
+**What it closes:** three date writes used `new Date().toISOString().slice(0, 10)`
+which gives the UTC calendar date. During BST (summer time), a case marked
+complete at 00:30 BST (= 23:30 UTC the previous day) persisted as the
+previous day. Not visible during GMT (winter). Three sites were affected:
+
+- `ceding_complete_date` (Stage 9 → 10 completion stamp)
+- `loa_sent_date` (Stage 2 "Mark LOA sent" button)
+- Default due date on the Assign Paraplanner dialog (today + 3 days)
+
+All three now use a shared `todayUkDate()` / `ukDatePlusDays(3)` helper that
+asks Intl.DateTimeFormat for the Europe/London date. 11 unit tests cover
+GMT, BST, DST transitions in both directions, and month / year rollover.
+
+### Steps (passive)
+
+- Normal use during business hours — no visible change. The bug only
+  surfaces during the 00:00-01:00 BST window.
+- If someone completes a case overnight during summer, the completion date
+  should be the UK date of their click, not the UTC date.
+
+### Expected
+
+- Completion / LOA-sent dates match the UK calendar day of the action.
+- Default due date in Assign Paraplanner is "today + 3" in UK terms.
+
+### Regression indicator
+
+- A case completed at 00:30 BST shows the previous day as `ceding_complete_date`.
+- The default due date on Assign Paraplanner is 1 day off in the midnight
+  BST window.
+
+---
+
+## L — Backend observability (not user-visible, but worth noting)
+
+**Status:** fixed, on staging (commit `029d020`).
+
+**What it adds:** a structured JSON log line emits on any 5xx from
+`PATCH /cases/:id`. Previously, if the completion write failed (as happened
+on FH-2026-000124 — "Mark ceding complete" never saved), there was no server
+trace at all. Now the Log Analytics will have a `case-patch-failed` event
+with case id, user id, attempted status, Prisma error. If a CA reports "my
+click did nothing" we can correlate against the log.
+
+### Steps
+
+- Nothing to click. If anyone reports a case action that didn't save, note
+  the time + case ref and Nishant can grep the Log Analytics.
+
+---
+
 # Not regressions — three things that look like they changed
 
 Please don't flag these as bugs; they are intentional consequences of this
