@@ -234,7 +234,19 @@ export function ApprovalWorkspace({ caseItem }: Props) {
       const targets = rows.filter((r) => selected.has(r.id) && r.status !== "review_requested");
       if (targets.length === 0) throw new Error("No fields selected.");
       if (!notes.trim()) throw new Error("Please add a comment for the CA team.");
-      await Promise.all(targets.map((r) => checklistApi.requestReview(caseItem.id, r.id, notes.trim())));
+      // Missing fields (placeholder rows carrying `__placeholder__<key>`
+      // ids) have no DB row yet; the request-review API would 404 on
+      // their id. Materialise each one first via the seed endpoint so
+      // the subsequent request-review targets a real row. Single-action
+      // path (singleAction above) already does this; the bulk path
+      // didn't until item 5 of Revathy's 2026-10-05 retest opened the
+      // checkbox for missing fields.
+      await Promise.all(
+        targets.map(async (r) => {
+          const fieldId = await materialiseIfPlaceholder(r);
+          await checklistApi.requestReview(caseItem.id, fieldId, notes.trim());
+        }),
+      );
       return targets.length;
     },
     onSuccess: (n) => {
@@ -724,10 +736,17 @@ function FieldRow({
   return (
     <li className="px-3 py-2.5 hover:bg-muted/30 transition-colors">
       <div className="flex items-start gap-3">
+        {/* Checkbox is enabled for ALL rows including missing (no-value)
+            ones — the main bulk action is "Send back to CA Team for
+            review", and missing fields are exactly what a paraplanner
+            wants to flag back. The per-row Approve button below stays
+            disabled on missing rows since approving nothing doesn't
+            make sense. See item 5 in Revathy's 2026-10-05 retest and
+            the bulkRequestReview mutation above for the materialise
+            path that handles placeholder rows. */}
         <Checkbox
           checked={selected}
           onCheckedChange={onToggleSelect}
-          disabled={!row.value}
           className="mt-1 shrink-0"
         />
         <div className="flex-1 min-w-0">
