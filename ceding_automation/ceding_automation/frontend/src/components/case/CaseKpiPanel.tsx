@@ -117,7 +117,16 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
     .filter((k) => bands[k])
     .map((k) => `${k.charAt(0) + k.slice(1).toLowerCase().replace("_", " ")}: ${bands[k]}`)
     .join(" · ");
-  const totalFields = Object.values(bands).reduce((s, n) => s + n, 0);
+  // scalarsOnlyCount = sum of confidenceBands (one band per scalar) =
+  // stats.breakdown.scalarsCounted. Used for the AI-only band summary
+  // "visible?" check. The DISPLAYED total matches Stage 4/6/8 — stats.total
+  // (= scalars + fund slot + contrib slots) — so a CA comparing numbers
+  // across stages sees one headline figure. Pre-2026-10-05 this card
+  // displayed scalarsOnly (62 on a case where Stage 4/6 showed 65), which
+  // Session fix A (32e683b) hadn't closed. The "Grids reviewed X/Y" card
+  // below carries the grid breakdown separately.
+  const scalarsOnlyCount = Object.values(bands).reduce((s, n) => s + n, 0);
+  const totalFields = _caseStats.total;
 
   // 6. Approval timing — ready → approved → completed.
   const reviewMs = spanMs(readyForReviewAt, approvedAt);
@@ -142,7 +151,10 @@ export function CaseKpiPanel({ caseItem }: { caseItem: CaseRow }) {
     );
   }
 
-  if (totalFields > 0) {
+  // Card is shown if there's any scalar activity to summarise (bandSummary
+  // is derived from scalars). The displayed count is stats.total so Stage
+  // 10 matches Stage 4/6/8 — single headline number across all four stages.
+  if (scalarsOnlyCount > 0) {
     cards.push(
       <StatCard
         key="ai"
