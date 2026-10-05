@@ -4,6 +4,12 @@ Follow-up to your 2026-09-30 E2E test findings (23 issues, 7 high-severity).
 Everything below is deployed to staging and ready to click through. Work in any
 order; the items are independent unless noted.
 
+**Rounds in this doc (latest first):**
+- PART 4 — merge `62dc9d5` (2026-10-05): NPW + dashboard caseflow + adviser scope.
+- PART 3 — second round (2026-10-05 earlier): fixes E–L.
+- PART 2 — session fixes A–D.
+- PART 1 — your original seven items.
+
 ---
 
 ## Setup
@@ -855,10 +861,298 @@ click did nothing" we can correlate against the log.
 
 ---
 
-# Not regressions — three things that look like they changed
+# PART 4 — Third round (deployed 2026-10-05, merge `62dc9d5`)
+
+Revathy's `feat/dashboard-caseflow-workload` branch merged on 2026-10-05
+and deployed to staging. Backend revision `--0000085`, image
+`ceding-backend:62dc9d5`, frontend bundle `index-CxKAk80D.js`.
+
+Items M–S cover the NPW feature, the dashboard caseflow/team tiles, the
+Stage 4 conflict gate, the status filter rework, and the adviser access
+narrowing. The My active scope change is called out in "Not regressions"
+below so a smaller CA number doesn't get reported as a bug.
+
+---
+
+## M — Mark NPW at Stage 3
+
+**Status:** shipped (migration `20261005120000_add_case_cancelled_reason`,
+commit `0d72486`).
+
+**What it does:** a case stuck at Stage 3 (CRM Setup) can be marked
+"Not Proceeding With" by the CA (or admin). The case moves to CANCELLED,
+the chosen reason + optional note are stored on `cancelledReason` /
+`cancelledAt`, and the case drops out of active counts and lists but
+stays viewable.
+
+### Steps
+
+1. Pick a PENSION case on staging that's at Stage 3. If none, create one
+   and progress it to Stage 3.
+2. On the case page, confirm the "Mark NPW" button is visible (CA + admin
+   only).
+3. Click it. A dialog opens with five reasons: Plan type out of scope,
+   Plan already closed/transferred, Client not proceeding, Duplicate
+   case, Other. "Other" requires a note.
+4. Pick a reason + add a note. Submit.
+5. Case should land in CANCELLED; a red/muted "NPW" banner appears at
+   the top of the case showing the reason and the cancellation date.
+
+### Expected
+
+- Dashboard "Active" tile count drops by 1.
+- Dashboard "Done this week" is unchanged (NPW ≠ completed).
+- Cases list: with the status filter on "Active", the case is gone.
+  With filter on "NPW · Cancelled", the case appears.
+- Case badge reads "Cancelled" (not "Complete").
+- Stepper stays on Stage 3 (the stage at NPW time), not collapsed to
+  Stage 1.
+- Attempting ANY status change on the case (stage click, Mark complete,
+  Request paraplanner approval, Mark on hold) returns HTTP 409 with
+  "This case is marked NPW (cancelled) and its status can't be changed."
+
+### Not available (deliberate)
+
+- The "Mark NPW" button is **Stage 3 only**. If you're past Stage 3 and
+  realise a case should have been NPW, flag it to Nishant — see
+  `docs/handover/npw-scoping-2026-10-05.md` open items.
+- **No reinstate yet.** If a CA marks NPW by mistake today, the only
+  recovery is a DB fix. Reinstate is scoped in
+  `docs/handover/npw-reinstate-scoping-2026-10-05.md` and will land in
+  the next round. For this test round, pick cases you're ready to leave
+  cancelled or flag Nishant to unwind.
+
+### Regression indicator
+
+- NPW case still counted in "Active" KPI → the backend `scope` filter
+  didn't exclude CANCELLED. Backend regression.
+- NPW case shows "Complete" badge instead of "Cancelled" → `STATUS_MAP`
+  in `services/api.ts` regressed to `CANCELLED: "complete"`.
+- Clicking a different stage on the stepper of a CANCELLED case succeeds
+  → the `npwStatusChangeError` guard was removed from PATCH /:id.
+
+---
+
+## N — Cancelled badge now reads "Cancelled" everywhere
+
+**Status:** shipped (part of commit `0d72486`).
+
+**What it does:** every surface that renders a case's status badge
+(CaseDetail header, Cases list rows, MyInbox, AuditTrail, ZohoCrmTaskPanel)
+now shows "Cancelled" for a CANCELLED case. Previously it rendered
+"Complete" in green — same badge as a legitimately completed case.
+
+### Steps
+
+1. On the Cases list, filter by "NPW · Cancelled".
+2. Click into any of the resulting cases.
+
+### Expected
+
+- Badge reads "Cancelled" everywhere.
+- Badge colour is muted / warning, not green.
+
+### Regression indicator
+
+- A cancelled case shows up with a green "Complete" badge anywhere →
+  `services/api.ts STATUS_MAP` regression.
+
+---
+
+## O — Status filter: one option per badge
+
+**Status:** shipped (commit `29fb25c`).
+
+**What it does:** the Cases list status filter used to group multiple
+backend statuses under one option (e.g. "Awaiting Documents" covered
+Stages 4-6). It now shows one option per badge: Step 1-8 individually,
+In Review · with paraplanner, Approved, Complete, On Hold, NPW ·
+Cancelled. The coarse groups still linked from the dashboard to-do list
+keep working.
+
+### Steps
+
+1. Open the Cases list and click the status filter dropdown.
+2. Scroll through the options.
+3. Click into "Step 5 · Call Assist" (for example). Only cases on
+   Stage 5 should appear.
+4. Click into "NPW · Cancelled". Only cancelled cases (from item M)
+   should appear.
+5. From the Dashboard, click a to-do list link (e.g. "Awaiting
+   Documents") and confirm it still filters correctly in the Cases
+   list.
+
+### Regression indicator
+
+- A status option returns cases on a different stage → filter mapping
+  regression in `caseHelpers.ts`.
+
+---
+
+## P — Stage 4 → 5 blocked while conflicts unresolved
+
+**Status:** shipped (part of commit `4534606`).
+
+**What it does:** moving a case from Stage 4 (Provider Request / Extract &
+Fill Gaps) to Stage 5 (Call Assist) is now blocked — UI and backend 409 —
+while any extraction conflict is still unresolved. A conflict means
+confidence = CONFLICT and not manually overridden; the Stage 4 banner
+already flags these.
+
+### Steps
+
+1. Pick a PENSION case on Stage 4 that has at least one CONFLICT row.
+2. In the stepper or stage controls, try to move it to Stage 5.
+3. The UI should refuse with a message naming the conflict count.
+4. Resolve the conflict (pick either side or type a value). Try again.
+5. The move to Stage 5 should now succeed.
+
+### Expected
+
+- Backend returns 409 with a human-readable error naming the count.
+- Resolved conflicts no longer block the move.
+
+### Regression indicator
+
+- Case moves to Stage 5 while conflicts remain → the `caseGuards`
+  conflict counter regressed, or the Stage 4 handler stopped calling
+  it. Flag the case ref.
+
+---
+
+## Q — Dashboard: caseflow period switch + team performance
+
+**Status:** shipped (part of commit `4534606`).
+
+**What it does:** the dashboard's Caseflow chart now has a period
+switcher — Last 5 weeks / Last week / This month / This year. Hover
+tooltip shows opened + completed per bucket. A new Team Performance
+panel lists total / active / completed per user with completion
+percentages, ranked by completion rate.
+
+### Steps
+
+1. Open the dashboard as Admin.
+2. Toggle each of the four Caseflow periods. Chart should rebuild with
+   bucket labels matching your local calendar (weeks for the first two,
+   days for "This month", months for "This year").
+3. Hover a bar. Tooltip should show "opened N" and "completed N" for
+   that bucket.
+4. Scroll to Team Performance. Check that the sum of per-user "Total"
+   equals the overall Total shown elsewhere on the dashboard.
+5. Sign out, sign in as CA. Team Performance should still appear
+   (team-wide KPIs are visible to CA + Paraplanner + Admin).
+
+### Regression indicator
+
+- Period toggle shows no bars → `GET /cases/caseflow` either returned
+  no data or the frontend bucketing is wrong.
+- Team Performance sums don't match the dashboard total → scope filter
+  mismatch between the two queries.
+
+---
+
+## R — Stage 8: missing fields can be bulk-selected for review
+
+**Status:** shipped (part of commit `4534606`).
+
+**What it does:** on Stage 8 (Verify Checklist), rows marked "missing"
+previously couldn't be included in a bulk "Send back for review" because
+the checkbox was disabled. Now they can — the materialise-if-placeholder
+path (same one used by the per-row Review button) runs for each selected
+missing row, so the backend sees a real field id.
+
+### Steps
+
+1. Pick any PENSION case on Stage 8 with at least two "missing" rows.
+2. Tick the checkboxes next to the missing rows.
+3. Fill the bulk comment box and click "Send back".
+4. The dialog should accept the selection and the rows should flip to
+   "Review requested" with your comment attached.
+
+### Regression indicator
+
+- The missing rows' checkboxes are disabled again → the Checkbox
+  `disabled={!row.value}` prop regressed.
+- Bulk send-back succeeds for approvable rows but silently drops the
+  missing ones → the `materialiseIfPlaceholder` call was removed from
+  the bulkRequestReview targets map.
+
+---
+
+## S — Adviser scope narrowed to own clients only; CA-team writes refused for advisers
+
+**Status:** shipped (commit `79f1bce`, via merge `9d02e4c`).
+
+**What it does:** previously an adviser could see any case where they
+were the creator, assignee, paraplanner OR adviser (OR of four fields).
+On staging this gave advisers 51 of 58 visible cases because they'd
+been the import creator or CA earlier. Now advisers see only cases
+where they are the client's **adviser** (Case.adviserId, populated from
+the Zoho Contact's Adviser field by Refresh-from-Zoho).
+
+Advisers can approve, request review and comment on cases they can see,
+but every CA write (checklist edits, contributions, fund lines, CRM task
+operations, export) is refused. The case page shows a "View only"
+banner on every stage except Stage 8.
+
+### Steps (adviser account)
+
+1. Sign in as an adviser account.
+2. Dashboard "My active" tile should show only the cases where that
+   adviser is the client's adviser on the Zoho Contact.
+3. Open a case the adviser owns. Confirm:
+   - "View only" banner on stages 1-7, 9, 10.
+   - No banner on Stage 8 (approve is allowed).
+   - Checklist inputs are read-only.
+   - Export button is replaced with "The CA team runs the export."
+   - At Stage 8, Approve / Request review buttons work.
+4. Try to open a case by URL that the adviser is NOT the adviser on
+   (e.g. a case you know is owned by a different adviser). Should 404
+   or redirect, not render.
+
+### Steps (CA / paraplanner regression check)
+
+1. Sign in as CA. Confirm:
+   - Case list count is unchanged (team-wide, not scoped).
+   - Checklist inputs are editable.
+   - Export button works.
+2. Sign in as Paraplanner. Confirm:
+   - Case list count unchanged.
+   - Can approve / request review on Stage 8 cases.
+   - Can edit checklist fields.
+
+### Regression indicator
+
+- Adviser sees cases where they are not the Zoho Contact's adviser →
+  `caseScopeFor` regressed to the old OR-of-four-fields clause.
+- CA or paraplanner get "View only" banners → the role check at the
+  banner render regressed from `role === "adviser"` to something
+  broader.
+- CA checklist edits are refused → `requireRole()` on
+  `/checklist/:caseId/:fieldId` lost CA_TEAM or PARAPLANNER.
+
+---
+
+# Not regressions — four things that look like they changed
 
 Please don't flag these as bugs; they are intentional consequences of this
 round's work.
+
+## "My active" tile shows a smaller number than yesterday for CAs
+
+The "My active" KPI used to count any case where you were linked by
+*any* of createdById / assignedToId / paralPlannerId / adviserId (an OR
+of four fields). From 2026-10-05 it counts only cases you *own*: for a
+CA that's cases where you're the assignee, or the creator of an
+unassigned case. For a paraplanner it's cases where you're the
+paralPlanner. For an adviser it's cases where you're the adviser.
+
+Why: the old count credited a CA for every case they'd ever created,
+including ones they'd handed on and no longer worked. The new number
+reflects what you're actually responsible for right now. If your "My
+active" dropped overnight, that's expected — the "Team active" sub-text
+on the tile is unchanged and shows the full team count.
 
 ## Checklist edits to provider name / plan number / start date no longer update the case header
 
@@ -913,3 +1207,7 @@ For your reference while testing:
 - **KI-17** — grid fields unapprovable through the UI (open — part of why
   Item 1 is off)
 - **KI-18** — template drift placeholder (filed this session)
+- **NPW open items** — `docs/handover/npw-scoping-2026-10-05.md`: NPW not
+  sent to Zoho; Stage 3 only; 15 prod cases need back-fill review.
+- **NPW reinstate** — `docs/handover/npw-reinstate-scoping-2026-10-05.md`:
+  scoped, not built. Admin-only unwind for an accidental NPW.
