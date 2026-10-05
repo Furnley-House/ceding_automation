@@ -13,7 +13,7 @@ import { getCases } from "@/services/api";
 import { AuditTimeline } from "@/components/case/AuditTimeline";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { STATUS_LABELS, STATUS_STYLES, type CaseRow } from "@/lib/caseHelpers";
+import { caseStatusBadge, type CaseRow } from "@/lib/caseHelpers";
 
 /**
  * Audit Trail (case-scoped).
@@ -107,12 +107,9 @@ const AuditTrail = () => {
                   {selectedCase.case_ref}
                 </span>
                 <span
-                  className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
-                    STATUS_STYLES[selectedCase.status] ??
-                    "bg-muted text-foreground"
-                  }`}
+                  className={`text-[10px] font-semibold px-2 py-0.5 rounded ${caseStatusBadge(selectedCase).className}`}
                 >
-                  {STATUS_LABELS[selectedCase.status] ?? selectedCase.status}
+                  {caseStatusBadge(selectedCase).label}
                 </span>
               </div>
               <p className="text-xs text-muted-foreground mt-0.5 truncate">
@@ -193,12 +190,9 @@ const AuditTrail = () => {
                           {c.case_ref}
                         </span>
                         <span
-                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
-                            STATUS_STYLES[c.status] ??
-                            "bg-muted text-foreground"
-                          }`}
+                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${caseStatusBadge(c).className}`}
                         >
-                          {STATUS_LABELS[c.status] ?? c.status}
+                          {caseStatusBadge(c).label}
                         </span>
                       </div>
                       <p className="text-[11px] text-muted-foreground truncate mt-0.5">

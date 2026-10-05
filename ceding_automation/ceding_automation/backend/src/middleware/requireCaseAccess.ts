@@ -8,9 +8,17 @@
 // Roles in OPEN_CASE_ACCESS_ROLES (ADMIN, CA_TEAM, PARAPLANNER) work on
 // every case irrespective of ownership: any CA can pick up and progress
 // any case, and any paraplanner can review/approve any case. They
-// short-circuit without a DB hit, matching the list. Only ADVISER is
-// still scoped to cases they are linked to (normally via adviserId, so
-// they can approve for an absent paraplanner on their own clients).
+// short-circuit without a DB hit, matching the list. Every other role
+// (today: ADVISER) sees only their own clients' cases — Case.adviserId,
+// populated from the Zoho Contact's Adviser by Refresh-from-Zoho — so
+// they can approve for an absent paraplanner on their own clients.
+//
+// 2026-10-01: narrowed from "linked by createdById / assignedToId /
+// paralPlannerId / adviserId" to adviserId only. Advisers who had once
+// imported a case, or been set as its CA/paraplanner, could see clients
+// that weren't theirs (staging: 51 of 58 visible cases). caseScopeFor()
+// is the single source of the rule for the list, stats, audit and this
+// guard.
 //
 // Closes a pre-existing exposure where any authenticated user could
 // fetch any case by id — GET /cases/:id used findUnique with no user
@@ -48,6 +56,7 @@
 
 import { Request, Response, NextFunction } from "express";
 import { PrismaClient, UserRole } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { syncAssignmentForAccessRetry, type AccessRetryOutcome } from "../services/caseAccessRetry";
 
 const prisma = new PrismaClient();
@@ -62,6 +71,13 @@ export const OPEN_CASE_ACCESS_ROLES: readonly UserRole[] = [
 
 export function hasOpenCaseAccess(role: UserRole): boolean {
   return OPEN_CASE_ACCESS_ROLES.includes(role);
+}
+
+/** Case filter for a user: null = every case (open-access roles), otherwise
+ *  only the cases where they are the client's adviser. */
+export function caseScopeFor(user: { id: string; role: UserRole }): Prisma.CaseWhereInput | null {
+  if (hasOpenCaseAccess(user.role)) return null;
+  return { adviserId: user.id };
 }
 
 // Tunable knobs. Deliberately not env vars — this middleware runs on
@@ -129,20 +145,13 @@ function recordAttempt(userId: string, now: number): boolean {
   return true;
 }
 
-/** Query the OR clause. Kept as a named function so the retry path
- *  can call it twice (initial check + post-sync recheck) without
- *  duplicating the where-shape. */
+/** Scoped lookup for a non-open-access caller (open roles return before
+ *  this runs). Kept as a named function so the retry path can call it
+ *  twice (initial check + post-sync recheck). Same filter as
+ *  caseScopeFor() — the caller must be the case's adviser. */
 async function checkAccess(caseId: string, userId: string): Promise<boolean> {
   const row = await prisma.case.findFirst({
-    where: {
-      id: caseId,
-      OR: [
-        { createdById: userId },
-        { assignedToId: userId },
-        { paralPlannerId: userId },
-        { adviserId: userId },
-      ],
-    },
+    where: { id: caseId, adviserId: userId },
     select: { id: true },
   });
   return !!row;

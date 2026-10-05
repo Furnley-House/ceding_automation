@@ -170,6 +170,12 @@ export function ApprovalWorkspace({ caseItem }: Props) {
     }
   };
 
+  // Selected rows that "Approve selected" will act on — missing rows can be
+  // selected (for bulk send-back) but are never approved.
+  const approvableSelected = filtered.filter(
+    (r) => selected.has(r.id) && !isMissing(r) && r.status !== "approved",
+  ).length;
+
   const bulkApprove = useMutation({
     mutationFn: async () => {
       const targets = rows.filter(
@@ -241,16 +247,12 @@ export function ApprovalWorkspace({ caseItem }: Props) {
 
   const bulkRequestReview = useMutation({
     mutationFn: async (notes: string) => {
-      const targets = rows.filter((r) => selected.has(r.id) && r.status !== "review_requested");
+      // Missing fields can be sent back too (bulk "please obtain from the
+      // provider"). They may be placeholder rows with no DB row yet, so
+      // materialise those first — the same path the per-row Review uses.
+      const targets = filtered.filter((r) => selected.has(r.id) && r.status !== "review_requested");
       if (targets.length === 0) throw new Error("No fields selected.");
       if (!notes.trim()) throw new Error("Please add a comment for the CA team.");
-      // Missing fields (placeholder rows carrying `__placeholder__<key>`
-      // ids) have no DB row yet; the request-review API would 404 on
-      // their id. Materialise each one first via the seed endpoint so
-      // the subsequent request-review targets a real row. Single-action
-      // path (singleAction above) already does this; the bulk path
-      // didn't until item 5 of Revathy's 2026-10-05 retest opened the
-      // checkbox for missing fields.
       await Promise.all(
         targets.map(async (r) => {
           const fieldId = await materialiseIfPlaceholder(r);
@@ -424,7 +426,8 @@ export function ApprovalWorkspace({ caseItem }: Props) {
             <Button
               size="sm"
               onClick={() => bulkApprove.mutate()}
-              disabled={bulkApprove.isPending}
+              disabled={bulkApprove.isPending || approvableSelected === 0}
+              title={approvableSelected === 0 ? "Missing fields can only be sent back for review" : undefined}
               className="gap-1"
             >
               {bulkApprove.isPending ? (
@@ -767,6 +770,9 @@ function FieldRow({
         <Checkbox
           checked={selected}
           onCheckedChange={onToggleSelect}
+          // Missing rows are selectable so they can be sent back in bulk;
+          // "Approve selected" skips them (a blank field can't be approved).
+          aria-label={`Select ${row.label}`}
           className="mt-1 shrink-0"
         />
         <div className="flex-1 min-w-0">

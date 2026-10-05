@@ -19,7 +19,9 @@ import {
   Wand2,
   Info,
 } from "lucide-react";
-import { getCases, getCaseStats, type CaseStats } from "@/services/api";
+import { getCases, getCaseflow, type CaseStats } from "@/services/api";
+import { useCaseStats } from "@/hooks/useCaseStats";
+import { CASEFLOW_PERIODS, caseflowRange, type CaseflowPeriod } from "@/lib/caseflowPeriods";
 import { auditApi } from "@/lib/api";
 import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
@@ -39,11 +41,13 @@ function initials(name?: string | null): string {
     .join("");
 }
 
-// A case is closed once ceding is complete or it's been cancelled — both map
-// to UI status "complete" in flattenCase. APPROVED is NOT closed: the
-// checklist is signed off but Stage 9 (Export & WorkDrive) still has to run.
+// A case is closed once ceding is complete or it's been cancelled (NPW) —
+// UI statuses "complete" / "cancelled" from flattenCase. APPROVED is NOT
+// closed: the checklist is signed off but Stage 9 (Export & WorkDrive)
+// still has to run.
 function isClosed(c: { status?: string }): boolean {
-  return (c.status ?? "").toLowerCase() === "complete";
+  const s = (c.status ?? "").toLowerCase();
+  return s === "complete" || s === "cancelled";
 }
 
 function timeAgo(iso: string | Date | null | undefined): string {
@@ -162,22 +166,25 @@ const Dashboard = () => {
   // KPIs + caseflow — aggregated server-side (GET /cases/stats) so they
   // cover the whole caseload, not just the 200 rows fetched above.
   // ────────────────────────────────────────────────────────
-  const { data: stats } = useQuery<CaseStats>({
-    queryKey: ["cases", "stats"],
-    queryFn: getCaseStats,
-  });
+  const { data: stats } = useCaseStats();
 
+  // Caseflow period switch — bucket boundaries come from the browser's
+  // local calendar (lib/caseflowPeriods.ts); counts from GET /cases/caseflow.
+  const [flowPeriod, setFlowPeriod] = useState<CaseflowPeriod>("weeks");
+  const flowRange = useMemo(() => caseflowRange(flowPeriod), [flowPeriod]);
+  const { data: flowBuckets } = useQuery({
+    queryKey: ["cases", "caseflow", flowPeriod, flowRange.end.toISOString()],
+    queryFn: () => getCaseflow(flowRange.starts, flowRange.end),
+  });
   const caseflow = useMemo(
     () =>
-      (stats?.caseflow ?? []).map((b) => ({
-        label: new Date(b.weekStart).toLocaleDateString("en-GB", {
-          day: "numeric",
-          month: "short",
-        }),
+      (flowBuckets ?? []).map((b, i) => ({
+        label: flowRange.labels[i] ?? "",
+        range: flowRange.ranges[i] ?? "",
         opened: b.opened,
         delivered: b.completed,
       })),
-    [stats],
+    [flowBuckets, flowRange],
   );
 
   const weekDelta = stats ? stats.doneWeek - stats.doneLastWeek : 0;
@@ -331,11 +338,9 @@ const Dashboard = () => {
   // just the cases they can open. Bars are relative to the busiest person;
   // there's no capacity figure to measure "overloaded" against.
   // ────────────────────────────────────────────────────────
-  const teamLoad = useMemo(() => {
-    const arr = (stats?.teamLoad ?? []).slice(0, 6);
-    const max = Math.max(1, ...arr.map((a) => a.active));
-    return arr.map((a) => ({ ...a, pct: Math.round((a.active / max) * 100) }));
-  }, [stats]);
+  // Team performance — per person: total, active and completed (with
+  // shares of their total), ranked by completion rate server-side.
+  const teamPerformance = stats?.teamPerformance ?? [];
 
   // ────────────────────────────────────────────────────────
   // Today — real to-do list from the viewer's caseload. Each bucket matches
@@ -515,7 +520,11 @@ const Dashboard = () => {
             stats
               ? role === "admin"
                 ? `of ${stats.total} total`
-                : `${stats.active} across team`
+                : role === "adviser"
+                  ? // Advisers' stats are scoped to their own clients, so
+                    // there's no team figure to show.
+                    `of ${stats.myTotal} client case${stats.myTotal === 1 ? "" : "s"}`
+                  : `Team active: ${stats.active}`
               : "loading"
           }
           delta={
@@ -526,7 +535,9 @@ const Dashboard = () => {
               : undefined
           }
           icon={<Briefcase className="h-4 w-4" />}
-          onClick={() => navigate("/cases?status=active")}
+          onClick={() =>
+            navigate(role === "ca_team" || role === "paraplanner" ? "/cases?status=active&scope=mine" : "/cases?status=active")
+          }
           index={0}
           info={TILE_INFO.active}
         />
@@ -587,7 +598,7 @@ const Dashboard = () => {
         <ChartCard
           eyebrow="Caseflow"
           title="Cases moving through phases"
-          subtitle="· last 5 weeks"
+          subtitle={`· ${CASEFLOW_PERIODS.find((p) => p.key === flowPeriod)?.subtitle ?? ""}`}
           info={TILE_INFO.caseflow}
           legend={
             <>
@@ -596,6 +607,24 @@ const Dashboard = () => {
             </>
           }
         >
+          <div role="tablist" aria-label="Caseflow period" className="flex flex-wrap gap-1 mb-1">
+            {CASEFLOW_PERIODS.map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                role="tab"
+                aria-selected={flowPeriod === p.key}
+                onClick={() => setFlowPeriod(p.key)}
+                className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors ${
+                  flowPeriod === p.key
+                    ? "bg-foreground text-background border-foreground"
+                    : "border-border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
           <CaseflowChart buckets={caseflow} />
         </ChartCard>
 
@@ -924,9 +953,9 @@ const Dashboard = () => {
             iconTone="blue"
             icon={<Users className="h-4 w-4" />}
             eyebrow="Workload"
-            title="Team load"
+            title="Team performance"
             info={TILE_INFO.teamLoad}
-            titleMeta={`· ${teamLoad.length} ${teamLoad.length === 1 ? "person" : "people"}`}
+            titleMeta={`· ${teamPerformance.length} ${teamPerformance.length === 1 ? "person" : "people"} · ranked by completion`}
             rightPill={
               stats && stats.unassigned > 0 ? (
                 <span className="text-[11px] font-semibold px-2 py-1 rounded-full bg-overdue/15 text-overdue">
@@ -937,14 +966,20 @@ const Dashboard = () => {
             defaultOpen={accordion.team}
             onToggle={() => setAccordion((v) => ({ ...v, team: !v.team }))}
           >
-            <div className="px-5 pb-4 pt-1 space-y-3">
-              {teamLoad.length === 0 ? (
-                <p className="text-xs text-muted-foreground italic">No open cases assigned yet.</p>
+            <div className="px-5 pb-4 pt-1 space-y-3 max-h-96 overflow-y-auto">
+              {teamPerformance.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic">No cases assigned yet.</p>
               ) : (
-                teamLoad.map((t) => {
+                teamPerformance.map((t) => {
                   const me = (userName ?? "").trim() === t.name;
                   return (
-                    <div key={t.userId} className="grid grid-cols-[32px_1fr_60px] gap-3 items-center">
+                    <div key={t.userId} className="grid grid-cols-[22px_32px_1fr_92px] gap-3 items-center">
+                      <div
+                        className={`text-xs font-bold text-center ${t.rank <= 3 ? "text-foreground" : "text-muted-foreground"}`}
+                        aria-label={`Rank ${t.rank}`}
+                      >
+                        #{t.rank}
+                      </div>
                       <div
                         className="h-8 w-8 rounded-full text-white text-[11px] font-bold flex items-center justify-center"
                         style={{
@@ -963,18 +998,21 @@ const Dashboard = () => {
                           ) : null}
                         </div>
                         <div className="text-xs text-muted-foreground mt-0.5">
-                          {ROLE_LABEL[t.role] ?? t.role.replace(/_/g, " ").toLowerCase()} · {t.active} active
+                          {ROLE_LABEL[t.role] ?? t.role.replace(/_/g, " ").toLowerCase()} · {t.total} total
+                        </div>
+                        <div className="text-[11px] text-muted-foreground mt-0.5">
+                          <span className="text-foreground font-medium">{t.active}</span> active ({t.activePct}%) ·{" "}
+                          <span className="text-foreground font-medium">{t.completed}</span> completed ({t.completedPct}%)
                         </div>
                       </div>
                       <div>
-                        <div className="h-1 bg-muted rounded-full overflow-hidden mb-1">
-                          <div
-                            className="h-full rounded-full transition-all duration-700"
-                            style={{
-                              width: `${Math.min(100, t.pct)}%`,
-                              background: "#5a6878",
-                            }}
-                          />
+                        <div className="text-right text-sm font-bold">{t.completedPct}%</div>
+                        <div
+                          className="h-1.5 bg-muted rounded-full overflow-hidden mt-1 flex"
+                          title={`${t.completedPct}% completed, ${t.activePct}% active`}
+                        >
+                          <div className="h-full" style={{ width: `${t.completedPct}%`, background: "#56C271" }} />
+                          <div className="h-full" style={{ width: `${t.activePct}%`, background: "#5a6878" }} />
                         </div>
                       </div>
                     </div>
@@ -1057,14 +1095,14 @@ const KPI_TONES: Record<string, { bg: string; text: string; iconBg: string }> = 
 // backend/src/utils/caseStats.ts.
 const TILE_INFO = {
   active:
-    "Cases still in progress: everything except Ceding Complete (Stage 10) and Cancelled. Approved cases count as active until they're exported. \"% done\" = completed ÷ (total − cancelled).",
+    "My active: open cases you own: assigned to you (CA Team: or created by you while unassigned; Paraplanner: you're the paraplanner; Adviser: your clients). Team active: every open case, everything except Ceding Complete (Stage 10) and Cancelled / NPW. Approved cases stay active until they're exported. \"Team % done\" = completed ÷ (total − cancelled).",
   doneWeek:
     "Cases that reached Ceding Complete (Stage 10) since Monday 00:00, compared with the whole of last week (Mon–Sun).",
   inReview: "Cases waiting for paraplanner sign-off — status In Review or Paraplanner Review. An adviser signs off only when the paraplanner is unavailable.",
   cycleTime:
     "Median number of days from a case being created to Ceding Complete, for cases completed in the last 90 days. Includes time waiting on providers, so it's elapsed time rather than hands-on effort.",
   caseflow:
-    "For each of the last 5 weeks (Mon–Sun): teal = cases created that week; purple = cases that reached Ceding Complete that week.",
+    "Cases opened (teal) and cases that reached Ceding Complete (purple) per period. Switch between the last 5 weeks (Mon–Sun), last week by day, this month by day and this year by month. Hover a point for its numbers.",
   providerMix:
     "Share of cases by provider, across open and completed cases. The top 3 providers are shown; the rest are grouped as Other.",
   caseload:
@@ -1076,7 +1114,7 @@ const TILE_INFO = {
   weekly:
     "Cases closed this month: cases that reached Ceding Complete since the 1st of this month. Cases opened by advisers: all-time count of cases created by a user with the Adviser role.",
   teamLoad:
-    "Open cases per person across the whole team (not only yours). Owner = the assigned task owner, or the creator if no one is assigned. \"Unassigned\" = open cases with no owner.",
+    "Cases per person across the whole team, all time. Owner = the assigned task owner, or the creator if no one is assigned. Total = active + completed (cancelled excluded); the percentages are each person's share of their own total. Ranked by completion rate, then by number completed. \"Unassigned\" = open cases with no owner.",
 } as const;
 
 // ⓘ icon that fades in when its tile is hovered/focused and explains the
@@ -1235,60 +1273,95 @@ function EmptyChart({ label }: { label: string }) {
 function CaseflowChart({
   buckets,
 }: {
-  buckets: { label: string; opened: number; delivered: number }[];
+  buckets: { label: string; range: string; opened: number; delivered: number }[];
 }) {
+  const [hover, setHover] = useState<number | null>(null);
   const W = 540,
     H = 180,
     PAD = 30,
-    BOTTOM = 30;
+    BOTTOM = 30,
+    LEFT = 30;
   const max = Math.max(8, ...buckets.flatMap((b) => [b.opened, b.delivered]));
   const step = (W - 60) / Math.max(1, buckets.length - 1);
+  const xOf = (i: number) => (buckets.length === 1 ? W / 2 : LEFT + i * step);
   const yOf = (n: number) =>
     H - BOTTOM - ((n / max) * (H - BOTTOM - PAD)) || H - BOTTOM;
+  // Up to ~8 axis labels; every point keeps its hover tooltip.
+  const labelEvery = Math.max(1, Math.ceil(buckets.length / 8));
 
-  const pointsOpened = buckets.map((b, i) => `${30 + i * step},${yOf(b.opened)}`);
-  const pointsDelivered = buckets.map(
-    (b, i) => `${30 + i * step},${yOf(b.delivered)}`,
-  );
-  const area = `M${pointsOpened.join(" L")} L${30 + (buckets.length - 1) * step},${H - BOTTOM} L30,${H - BOTTOM} Z`;
+  if (buckets.length === 0) return <EmptyChart label="Loading caseflow…" />;
+
+  const pointsOpened = buckets.map((b, i) => `${xOf(i)},${yOf(b.opened)}`);
+  const pointsDelivered = buckets.map((b, i) => `${xOf(i)},${yOf(b.delivered)}`);
+  const area = `M${pointsOpened.join(" L")} L${xOf(buckets.length - 1)},${H - BOTTOM} L${xOf(0)},${H - BOTTOM} Z`;
   const line = `M${pointsOpened.join(" L")}`;
   const violetLine = `M${pointsDelivered.join(" L")}`;
+  const hb = hover !== null ? buckets[hover] : null;
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-44 mt-1" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="tealGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#63B1BC" stopOpacity="0.35" />
-          <stop offset="100%" stopColor="#63B1BC" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <g stroke="#eef0f4" strokeWidth="1">
-        {[0, 1, 2, 3].map((i) => (
-          <line key={i} x1="0" y1={PAD + i * 40} x2={W} y2={PAD + i * 40} />
-        ))}
-      </g>
-      <path d={area} fill="url(#tealGrad)" opacity={0.6} />
-      <path d={line} stroke="#63B1BC" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      <path d={violetLine} stroke="#8C4799" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      {buckets.map((b, i) => (
-        <g key={i}>
-          <circle cx={30 + i * step} cy={yOf(b.opened)} r="3.5" fill="#63B1BC" />
-          {b.delivered > 0 ? (
-            <circle cx={30 + i * step} cy={yOf(b.delivered)} r="3" fill="#8C4799" />
-          ) : null}
-          <text
-            x={30 + i * step}
-            y={H - 6}
-            textAnchor="middle"
-            fill="#888B8D"
-            fontSize="9"
-            fontFamily="Quicksand"
-          >
-            {b.label}
-          </text>
+    <div className="relative" onMouseLeave={() => setHover(null)}>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-44 mt-1" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="tealGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#63B1BC" stopOpacity="0.35" />
+            <stop offset="100%" stopColor="#63B1BC" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <g stroke="#eef0f4" strokeWidth="1">
+          {[0, 1, 2, 3].map((i) => (
+            <line key={i} x1="0" y1={PAD + i * 40} x2={W} y2={PAD + i * 40} />
+          ))}
         </g>
-      ))}
-    </svg>
+        <path d={area} fill="url(#tealGrad)" opacity={0.6} />
+        <path d={line} stroke="#63B1BC" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        <path d={violetLine} stroke="#8C4799" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        {hover !== null ? (
+          <line x1={xOf(hover)} x2={xOf(hover)} y1={PAD - 10} y2={H - BOTTOM} stroke="#c9ced6" strokeDasharray="3 3" />
+        ) : null}
+        {buckets.map((b, i) => (
+          <g key={i}>
+            <circle cx={xOf(i)} cy={yOf(b.opened)} r={hover === i ? 5 : 3.5} fill="#63B1BC" />
+            {b.delivered > 0 || hover === i ? (
+              <circle cx={xOf(i)} cy={yOf(b.delivered)} r={hover === i ? 4.5 : 3} fill="#8C4799" />
+            ) : null}
+            {i % labelEvery === 0 || i === buckets.length - 1 ? (
+              <text x={xOf(i)} y={H - 6} textAnchor="middle" fill="#888B8D" fontSize="9" fontFamily="Quicksand">
+                {b.label}
+              </text>
+            ) : null}
+            {/* Full-height hover band so the whole column is a target. */}
+            <rect
+              x={xOf(i) - Math.max(step, 24) / 2}
+              y={0}
+              width={Math.max(step, 24)}
+              height={H}
+              fill="transparent"
+              onMouseEnter={() => setHover(i)}
+              onFocus={() => setHover(i)}
+              tabIndex={0}
+              aria-label={`${b.range}: ${b.opened} opened, ${b.delivered} completed`}
+            />
+          </g>
+        ))}
+      </svg>
+      {hb && hover !== null ? (
+        <div
+          role="tooltip"
+          className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 rounded-lg border border-border bg-popover px-2.5 py-1.5 text-[11px] shadow-md whitespace-nowrap"
+          style={{ left: `${Math.min(88, Math.max(12, (xOf(hover) / W) * 100))}%` }}
+        >
+          <div className="font-semibold text-foreground mb-0.5">{hb.range}</div>
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <span className="h-2 w-2 rounded-full" style={{ background: "#63B1BC" }} />
+            Opened <span className="font-semibold text-foreground ml-auto pl-2">{hb.opened}</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <span className="h-2 w-2 rounded-full" style={{ background: "#8C4799" }} />
+            Completed <span className="font-semibold text-foreground ml-auto pl-2">{hb.delivered}</span>
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

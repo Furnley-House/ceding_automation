@@ -2,14 +2,15 @@ import { useParams, useNavigate, Link, useLocation, useOutletContext } from "rea
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
-import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, AlertTriangle, ExternalLink, RefreshCw, Search, Plus } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Loader2, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, AlertTriangle, ExternalLink, RefreshCw, Search, Plus, Ban } from "lucide-react";
 import type { AppLayoutContext } from "@/components/layout/AppLayout";
 import { getCaseById, updateCase, importCrmTaskAsCase, syncCaseFromZoho, type SyncDebug } from "@/services/api";
 import { todayUkDate } from "@/lib/dates";
 import { optionalSectionsApi } from "@/lib/api";
-import { CEDING_STAGES, STATUS_LABELS, STATUS_STYLES, RAG_STYLES, calculateRag } from "@/lib/caseHelpers";
+import { CEDING_STAGES, RAG_STYLES, calculateRag, caseStatusBadge } from "@/lib/caseHelpers";
 import { isSupportedPlanType, SUPPORTED_PLAN_TYPES } from "@/lib/checklistTemplates";
 import { useRole } from "@/hooks/useRole";
+import { useCaseCompletionStats } from "@/hooks/useCaseCompletionStats";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import {
@@ -25,6 +26,13 @@ import {
   StageComplete,
 } from "@/components/case/stages";
 import { LinkExistingPlanDialog, CreatePlanDialog } from "@/components/case/UnlinkedPlanBanner";
+import { NpwDialog } from "@/components/case/NpwDialog";
+
+/** Backend error text from an axios error (e.g. a 409 guard), else the generic message. */
+function apiErrorMessage(e: unknown): string {
+  if (axios.isAxiosError(e) && typeof e.response?.data?.error === "string") return e.response.data.error;
+  return e instanceof Error ? e.message : "Something went wrong";
+}
 
 const CaseDetail = () => {
   const { id } = useParams();
@@ -73,7 +81,7 @@ const CaseDetail = () => {
       qc.invalidateQueries({ queryKey: ["case", id] });
       qc.invalidateQueries({ queryKey: ["cases"] });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(apiErrorMessage(e)),
   });
 
   // Pull latest basic details from Zoho whenever the case page is opened.
@@ -172,6 +180,14 @@ const CaseDetail = () => {
   // record once the provider document reveals the real policy number.
   const [linkPlanOpen, setLinkPlanOpen] = useState(false);
   const [createPlanOpen, setCreatePlanOpen] = useState(false);
+  const [npwOpen, setNpwOpen] = useState(false);
+  // Unresolved conflicts — gates "Mark complete" on Stage 4 (the backend
+  // enforces the same rule with a 409). Same count the Stage 4 chips show.
+  const { stats: completionStats } = useCaseCompletionStats({
+    caseId: id ?? "",
+    planType: caseItem?.plan_type as string | undefined,
+  });
+  const openConflicts = completionStats.conflict;
   const sidebarPriorStateRef = useRef<boolean | null>(null);
   useEffect(() => {
     if (viewStage === 4) {
@@ -239,11 +255,15 @@ const CaseDetail = () => {
     (n: number) => n >= 1 && n <= 10,
   );
   const rag = calculateRag(caseItem as any);
+  const badge = caseStatusBadge(caseItem as any);
   const planSupported = isSupportedPlanType(caseItem.plan_type);
   // A Plans record is linked once zoho_case_id is cached on the case. Used to
   // (a) highlight the Stage-3 header Link/Create buttons as a required action
   // and (b) block advancing Stage 3 → Stage 4 until a plan is linked.
   const planLinked = !!(caseItem as any).zoho_case_id;
+  // NPW / cancelled cases are read-only: no stage completion, no NPW again.
+  const isCancelled = caseItem.status === "cancelled";
+  const canMarkNpw = (isCA || role === "admin") && !isCancelled && currentStage === 3 && rawStage <= 3;
 
   const goToStage = (n: number) => {
     if (n < 1 || n > 10) return;
@@ -294,12 +314,16 @@ const CaseDetail = () => {
         /* backend refuses for other roles / offline — carry on */
       }
     }
+    // Stage 4 can't be completed with conflicts outstanding — each one is
+    // two competing values with no decision on which is right.
+    if (currentStage === 4 && openConflicts > 0) {
+      toast.error(`Resolve ${openConflicts} conflict${openConflicts === 1 ? "" : "s"} first`, {
+        description: "Pick the correct value for each conflicted field before completing Extract & Fill Gaps.",
+      });
+      return;
+    }
     const newCompleted = Array.from(new Set([...stagesCompleted, currentStage])).sort((a, b) => a - b);
     const next = Math.min(currentStage + 1, 10);
-    // Advance the view stage locally first — the backend may legitimately
-    // refuse the implicit status change (e.g. case is already IN_REVIEW or
-    // COMPLETE) and we don't want the UI to freeze on the current stage.
-    setViewStage(next);
     const updates: any = {
       current_stage: next,
       stages_completed: newCompleted,
@@ -317,6 +341,22 @@ const CaseDetail = () => {
       (updates as any).zoho_ceding_status = "ceding_complete";
       (updates as any).zoho_synced_at = new Date().toISOString();
     }
+    // Stage 4 → 5 waits for the server: it refuses (409) while conflicts
+    // remain, and the step mustn't look complete if it did.
+    if (currentStage === 4) {
+      try {
+        await updateMutation.mutateAsync({ updates });
+      } catch {
+        return; // updateMutation.onError has shown the reason
+      }
+      setViewStage(next);
+      toast.success(`Stage ${currentStage} complete`, { description: `Moved to step ${next}.` });
+      return;
+    }
+    // Other stages advance the view locally first — the backend may
+    // legitimately skip the implicit status change (e.g. case is already
+    // IN_REVIEW or COMPLETE) and we don't want the UI to freeze.
+    setViewStage(next);
     updateMutation.mutate({ updates });
     toast.success(`Stage ${currentStage} complete`, {
       description: next === 10 ? "Ceding complete!" : `Moved to step ${next}.`,
@@ -363,20 +403,13 @@ const CaseDetail = () => {
               <div className="flex items-center gap-3 mb-2 flex-wrap">
                 <span className={`inline-block h-3 w-3 rounded-full ${RAG_STYLES[rag].dot}`} />
                 <h1 className="text-xl font-bold theme-heading text-foreground truncate">{caseItem.client_name}</h1>
-                {/* Status badge now prefixes with the backend's actual stage
-                    number (from GET /cases/:id derived via STATUS_TO_STAGE
-                    in services/api.ts), so stepper position and badge agree
-                    on which stage the case is at. Pre-fix the badge was a
-                    semantic-only label ("Extraction Complete") which
-                    collapsed stages 7 + 8 to one string and read as
-                    disagreement when stepper highlighted stage 8 but badge
-                    didn't name the stage. See item 3 in Revathy's
-                    2026-10-05 retest.
-                    Uses rawStage (backend truth), not viewStage (local
-                    view). A CA who view-navigated to a different stage via
-                    the stepper doesn't change what the badge means. */}
-                <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLES[caseItem.status] ?? ""}`}>
-                  {`Stage ${rawStage} · ${STATUS_LABELS[caseItem.status] ?? caseItem.status}`}
+                {/* Badge names the step the case is on (caseStatusBadge in
+                    lib/caseHelpers.ts — same badge as the Cases list), from
+                    the backend stage, not viewStage. Item 3 in Revathy's
+                    2026-10-05 retest: the coarse status label covered
+                    several stages and read as disagreeing with the stepper. */}
+                <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${badge.className}`}>
+                  {badge.label}
                 </span>
                 <span className="font-mono text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground">
                   {caseItem.case_ref}
@@ -386,8 +419,19 @@ const CaseDetail = () => {
                       Shown whether or not a plan is already linked so the CA
                       can re-link once the provider doc confirms the real
                       policy number. Overwrites case.zohoCaseId server-side. */}
-                  {currentStage === 3 && (
+                  {currentStage === 3 && !isCancelled && (
                     <div className="flex items-center gap-1.5">
+                      {canMarkNpw && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 gap-1 text-xs text-destructive border-destructive/40 hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => setNpwOpen(true)}
+                          title="Not Proceeding With: cancel this case with a reason (e.g. the documents show it isn't a Pension / ISA / GIA)"
+                        >
+                          <Ban className="h-3 w-3" /> Mark NPW
+                        </Button>
+                      )}
                       {/* When no plan is linked yet, render filled amber so the
                           CA reads this as a required action (matches the ⚠ Not
                           linked status line). Relaxes to outline once linked. */}
@@ -627,6 +671,33 @@ const CaseDetail = () => {
               </Button>
             )}
 
+          {isCancelled && (
+            <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/60 p-4">
+              <Ban className="h-5 w-5 text-muted-foreground shrink-0 mt-0.5" />
+              <div className="text-sm">
+                <p className="font-semibold text-foreground">
+                  Not Proceeding With — case cancelled
+                  {(caseItem as any).cancelled_at
+                    ? ` on ${new Date(String((caseItem as any).cancelled_at)).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}`
+                    : ""}
+                </p>
+                <p className="text-muted-foreground">
+                  {String((caseItem as any).cancelled_reason ?? "") || "No reason recorded."} This case is
+                  read-only and excluded from active counts. The audit trail is kept.
+                </p>
+              </div>
+            </div>
+          )}
+          {/* Advisers follow their clients' cases and may approve for an
+              absent paraplanner (Stage 8); every other stage is CA work and
+              the backend refuses an adviser's changes there. */}
+          {role === "adviser" && currentStage !== 8 && (
+            <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              <strong className="text-foreground">View only.</strong> You can follow this case's progress here.
+              The CA team works these steps; you can approve at Step 8.
+            </p>
+          )}
+
           {planSupported && <StageComponent caseItem={caseItem as any} />}
 
           {/* Stage 3 gate — a Plans record must be linked before advancing to
@@ -660,15 +731,22 @@ const CaseDetail = () => {
                     guard) — swap to a view-only Next step so the CA can
                     walk forward through completed stages without the
                     regression trap. */}
-            {isCA && currentStage < 10 && currentStage >= rawStage ? (
+            {isCA && !isCancelled && currentStage < 10 && currentStage >= rawStage ? (
               <Button
                 onClick={completeAndNext}
                 className="gap-2"
-                disabled={!planSupported || (currentStage === 3 && !planLinked)}
+                disabled={
+                  !planSupported ||
+                  updateMutation.isPending ||
+                  (currentStage === 3 && !planLinked) ||
+                  (currentStage === 4 && openConflicts > 0)
+                }
                 title={
                   currentStage === 3 && !planLinked
                     ? "Link a Plans record before continuing — use Link existing or + Create new in the case header above."
-                    : undefined
+                    : currentStage === 4 && openConflicts > 0
+                      ? `Resolve ${openConflicts} conflict${openConflicts === 1 ? "" : "s"} before completing this step.`
+                      : undefined
                 }
               >
                 {currentStage === 9 ? "Mark ceding complete" : "Mark complete & continue"}
@@ -697,6 +775,12 @@ const CaseDetail = () => {
           onClose={() => setLinkPlanOpen(false)}
         />
       )}
+      <NpwDialog
+        caseId={id!}
+        caseRef={String(caseItem.case_ref ?? "")}
+        open={npwOpen}
+        onOpenChange={setNpwOpen}
+      />
       {createPlanOpen && (
         <CreatePlanDialog
           caseId={id!}

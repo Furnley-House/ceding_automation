@@ -349,8 +349,10 @@ export function StageReviewChecklist({ caseItem }: StageProps) {
   const totals = useMemo(
     () => ({
       total: _canonicalStats.total,
-      filled: _canonicalStats.total - _canonicalStats.missing,
-      missing: _canonicalStats.missing,
+      // By value: an empty field the paraplanner sent back is still
+      // missing here (the list below shows it as "Missing").
+      filled: _canonicalStats.total - _canonicalStats.missing - _canonicalStats.reviewEmpty,
+      missing: _canonicalStats.missing + _canonicalStats.reviewEmpty,
       returned: _canonicalStats.review,
       complete:
         _canonicalStats.total > 0 &&

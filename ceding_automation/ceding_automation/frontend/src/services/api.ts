@@ -52,7 +52,7 @@ const STATUS_MAP: Record<string, string> = {
   ON_HOLD: "on_hold",
   IN_REVIEW: "in_review",
   APPROVED: "approved",
-  CANCELLED: "complete",
+  CANCELLED: "cancelled",
 };
 
 // ── Backend status → 1..10 stage number ──────────────────────────────────
@@ -89,7 +89,14 @@ function flattenCase(c: Record<string, unknown>): Record<string, unknown> {
 
   // Derive `current_stage` (1..10) from the status enum so the legacy stepper UI
   // works against the new schema. Anything before that stage is "completed".
-  const currentStage = STATUS_TO_STAGE[upperStatus] ?? 1;
+  // A cancelled (NPW) case stays on the step it was cancelled at — GET
+  // /cases/:id sends the status it came from (list rows don't; they fall
+  // back to stage 1, which only the stepper uses).
+  const cancelledFrom = String(c.cancelled_from_status ?? "").toUpperCase();
+  const currentStage =
+    (upperStatus === "CANCELLED" ? STATUS_TO_STAGE[cancelledFrom] : undefined) ??
+    STATUS_TO_STAGE[upperStatus] ??
+    1;
   const stagesCompleted: number[] = Array.from(
     { length: Math.max(0, currentStage - 1) },
     (_, i) => i + 1,
@@ -196,12 +203,10 @@ export interface CaseStats {
   cancelled: number;
   inReview: number;
   onHold: number;
-  // Viewer-scoped counts added 2026-10-05 for item 14 in Revathy's
-  // retest — the Dashboard "Active" tile now shows myActive with the
-  // team total as sub-text so a CA sees their own number, not the
-  // whole team's. For Advisers (who only see linked cases anyway)
-  // myActive == active. Backend computes with the same OR'd self-
-  // involvement filter used by the viewer-scoped fallback scope.
+  /** Viewer-owned counts (item 14, 2026-10-05 retest): open / all /
+   *  completed cases the viewer owns — assignee (or creator when
+   *  unassigned) for CA / Admin, paraplanner, or adviser. See myScope in
+   *  GET /cases/stats. The team-wide fields above are unchanged. */
   myActive: number;
   myTotal: number;
   myCompleted: number;
@@ -215,20 +220,55 @@ export interface CaseStats {
   statusCounts: Record<string, number>;
   // Open cases per owner across the whole team.
   teamLoad: { userId: string; name: string; role: string; active: number }[];
+  // Per owner, all-time, ranked by completion rate (cancelled excluded).
+  teamPerformance: {
+    userId: string;
+    name: string;
+    role: string;
+    rank: number;
+    total: number;
+    active: number;
+    completed: number;
+    activePct: number;
+    completedPct: number;
+  }[];
   unassigned: number;
+}
+
+export interface CaseflowBucket {
+  start: string;
+  end: string;
+  opened: number;
+  completed: number;
+}
+
+// Caseflow chart counts for browser-computed bucket boundaries (local
+// calendar) — see lib/caseflowPeriods.ts.
+export async function getCaseflow(starts: Date[], end: Date): Promise<CaseflowBucket[]> {
+  const res = await api.get("/cases/caseflow", {
+    params: { starts: starts.map((d) => d.toISOString()).join(","), end: end.toISOString() },
+  });
+  return (res.data as { buckets: CaseflowBucket[] }).buckets;
 }
 
 // Dashboard KPIs, aggregated server-side across the whole caseload. Week and
 // month boundaries are sent in the browser's local time.
-export async function getCaseStats(): Promise<CaseStats> {
-  const now = new Date();
+/** Local-calendar boundaries for GET /cases/stats: Monday 00:00 of this
+ *  week and the 1st of this month. Part of the react-query key (see
+ *  useCaseStats) so a tab left open over the week/month rollover refetches
+ *  instead of showing last week's "Done · week". */
+export function caseStatsWindow(now: Date = new Date()): { weekStart: string; monthStart: string } {
   const weekStart = new Date(now);
   weekStart.setDate(now.getDate() - ((now.getDay() + 6) % 7));
   weekStart.setHours(0, 0, 0, 0);
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const res = await api.get("/cases/stats", {
-    params: { weekStart: weekStart.toISOString(), monthStart: monthStart.toISOString() },
-  });
+  return { weekStart: weekStart.toISOString(), monthStart: monthStart.toISOString() };
+}
+
+export async function getCaseStats(
+  win: { weekStart: string; monthStart: string } = caseStatsWindow(),
+): Promise<CaseStats> {
+  const res = await api.get("/cases/stats", { params: win });
   return res.data as CaseStats;
 }
 
@@ -252,6 +292,13 @@ export async function createCase(caseData: Record<string, unknown>) {
 
 export async function updateCase(id: string, updates: Record<string, unknown>) {
   const res = await api.patch(`/cases/${id}`, camelKeys(updates));
+  return snakeKeys(res.data);
+}
+
+/** Stage 3 NPW (Not Proceeding With): cancel the case with a reason code
+ *  from lib/npw.ts. Backend: POST /cases/:id/npw. */
+export async function markCaseNpw(id: string, reason: string, note?: string) {
+  const res = await api.post(`/cases/${id}/npw`, { reason, note });
   return snakeKeys(res.data);
 }
 

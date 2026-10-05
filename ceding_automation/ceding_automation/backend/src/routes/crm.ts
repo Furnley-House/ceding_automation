@@ -1,7 +1,8 @@
 // backend/src/routes/crm.ts
 import { Router, Request, Response } from 'express';
 import { PrismaClient, CaseStatus, PlanType, Prisma } from '@prisma/client';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, requireRole } from '../middleware/auth';
+import { OPEN_CASE_ACCESS_ROLES } from '../middleware/requireCaseAccess';
 import * as zoho from '../services/zohoCrm';
 import { mapZohoTaskToCase, lookupParaplannerFromContact } from '../services/zohoCrm';
 import { generateNextCaseRef } from '../services/caseRef';
@@ -40,7 +41,13 @@ router.get('/oauth/callback', async (req: Request, res: Response) => {
 });
 
 // ── Tasks ────────────────────────────────────────────────────
-router.get('/tasks', requireAuth, async (req: Request, res: Response) => {
+// Zoho task read/write and import are case-team operations (Admin, CA Team,
+// Paraplanner). Advisers are scoped to their own clients' cases, and these
+// routes take any Zoho task id — import-as-case even returned an existing
+// case's full record — so they are closed to advisers.
+const requireCaseTeam = requireRole([...OPEN_CASE_ACCESS_ROLES]);
+
+router.get('/tasks', requireAuth, requireCaseTeam, async (req: Request, res: Response) => {
   try {
     const page = Number(req.query.page) || 1;
     const perPage = Math.min(Number(req.query.per_page) || 200, 200);
@@ -51,7 +58,7 @@ router.get('/tasks', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-router.get('/tasks/:id', requireAuth, async (req: Request, res: Response) => {
+router.get('/tasks/:id', requireAuth, requireCaseTeam, async (req: Request, res: Response) => {
   try {
     const data = await zoho.getTask(req.params.id);
     res.json(data);
@@ -60,7 +67,7 @@ router.get('/tasks/:id', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-router.put('/tasks/:id', requireAuth, async (req: Request, res: Response) => {
+router.put('/tasks/:id', requireAuth, requireCaseTeam, async (req: Request, res: Response) => {
   try {
     const data = await zoho.updateTask(req.params.id, req.body);
     res.json(data);
@@ -69,7 +76,7 @@ router.put('/tasks/:id', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-router.post('/tasks', requireAuth, async (req: Request, res: Response) => {
+router.post('/tasks', requireAuth, requireCaseTeam, async (req: Request, res: Response) => {
   try {
     const data = await zoho.createTask(req.body);
     res.status(201).json(data);
@@ -81,7 +88,7 @@ router.post('/tasks', requireAuth, async (req: Request, res: Response) => {
 // ── Import a Zoho task as a Case ────────────────────────────
 // Pass ?dryRun=true to preview the mapping without writing to the DB.
 // If a case with the same zohoTaskId already exists, return it instead of duplicating.
-router.post('/tasks/:id/import-as-case', requireAuth, async (req: Request, res: Response) => {
+router.post('/tasks/:id/import-as-case', requireAuth, requireCaseTeam, async (req: Request, res: Response) => {
   const taskId = req.params.id;
   const dryRun = String(req.query.dryRun ?? '') === 'true';
 

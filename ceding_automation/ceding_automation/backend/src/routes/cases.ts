@@ -2,7 +2,7 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient, CaseStatus, LOAStatus, PlanType, Prisma } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { requireCaseAccess, hasOpenCaseAccess } from "../middleware/requireCaseAccess";
+import { requireCaseAccess, caseScopeFor } from "../middleware/requireCaseAccess";
 import { z } from "zod";
 import * as zoho from "../services/zohoCrm";
 import { SYSTEM_USER_ID } from "../services/aiBffApply";
@@ -31,9 +31,19 @@ import {
   setOptionalSection,
 } from "../services/optionalSections";
 import { CLOSED_STATUSES, medianCycleDays, summariseStatusCounts } from "../utils/caseStats";
+import { bucketCaseflow, parseCaseflowRange, rankTeamPerformance } from "../utils/dashboardStats";
 import { SAFE_USER_SELECT } from "../utils/userSelects";
 import { isRecentSync } from "../utils/syncFreshness";
 import { enforceCompletionInvariant } from "../utils/completionInvariant";
+import {
+  PRE_STAGE_5_STATUSES,
+  NPW_REASONS,
+  canMarkNpw,
+  countUnresolvedConflicts,
+  isNpwReasonCode,
+  npwReasonText,
+  npwStatusChangeError,
+} from "../utils/caseGuards";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -457,20 +467,14 @@ router.get("/", requireAuth, async (req: Request, res: Response) => {
   }
 
   // Admin, CA Team and Paraplanners see every case (any CA can progress
-  // any case; any paraplanner can approve any case). Advisers only see
-  // cases they are linked to — chiefly every case whose Zoho Client has
-  // them as the assigned Adviser on the Contact record, populated by the
-  // Refresh-from-Zoho sync (see Case.adviserId) — so they can step in
-  // for an absent paraplanner on their own clients. Keep in sync with
-  // requireCaseAccess (shared OPEN_CASE_ACCESS_ROLES).
-  if (!hasOpenCaseAccess(req.user!.role)) {
-    where.OR = [
-      { createdById: req.user!.id },
-      { assignedToId: req.user!.id },
-      { paralPlannerId: req.user!.id },
-      { adviserId: req.user!.id },
-    ];
-  }
+  // any case; any paraplanner can approve any case). Advisers see only
+  // their own clients' cases — Case.adviserId, populated from the Zoho
+  // Contact's Adviser by Refresh-from-Zoho — so they can step in for an
+  // absent paraplanner on their own clients. Shared with requireCaseAccess
+  // via caseScopeFor(). Merged as a plain key so it ANDs with the search
+  // OR above (the old OR-based scope overwrote search for advisers).
+  const scope = caseScopeFor(req.user!);
+  if (scope) Object.assign(where, scope);
 
   const [cases, total] = await Promise.all([
     prisma.case.findMany({
@@ -517,6 +521,47 @@ function parseIsoParam(v: unknown): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/** Dashboard visibility — the same rule as every other case read
+ *  (caseScopeFor): Admin, CA Team and Paraplanners count every case;
+ *  Advisers only their own clients' cases. Shared by /stats and /caseflow. */
+function dashboardScope(req: Request): Prisma.CaseWhereInput {
+  return caseScopeFor(req.user!) ?? {};
+}
+
+// ── Dashboard Caseflow ──────────────────────────────────
+// Opened / completed counts per period bucket for the Caseflow chart's
+// period switch (last 5 weeks, last week, this month, this year). The
+// browser sends the bucket boundaries (?starts=iso,iso,…&end=iso) so weeks,
+// days and months follow the user's local calendar, and the counting is one
+// query plus in-memory bucketing rather than two counts per point.
+router.get("/caseflow", requireAuth, async (req: Request, res: Response) => {
+  const range = parseCaseflowRange(req.query.starts, req.query.end);
+  if (!range) {
+    return res.status(400).json({ error: "starts (ascending ISO list, max 40) and a later end are required" });
+  }
+  const from = range.starts[0];
+  const to = range.end;
+  const rows = await prisma.case.findMany({
+    where: {
+      AND: [
+        dashboardScope(req),
+        { OR: [{ createdAt: { gte: from, lt: to } }, { completedAt: { gte: from, lt: to } }] },
+      ],
+    },
+    select: { createdAt: true, completedAt: true, status: true },
+  });
+  const buckets = bucketCaseflow(
+    range.starts,
+    range.end,
+    rows.map((r) => ({
+      createdAt: r.createdAt,
+      completedAt: r.completedAt,
+      closed: (CLOSED_STATUSES as CaseStatus[]).includes(r.status),
+    })),
+  );
+  res.json({ buckets });
+});
+
 router.get("/stats", requireAuth, async (req: Request, res: Response) => {
   const now = new Date();
   const utcMonday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -528,35 +573,22 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
   const lastWeekStart = new Date(weekStart.getTime() - 7 * DAY_MS);
 
   // Same visibility as GET /cases: Admin, CA Team and Paraplanners count
-  // every case (team-wide KPIs); Advisers only the cases they're linked to.
+  // every case (team-wide KPIs); Advisers only their own clients' cases.
+  const scope = dashboardScope(req);
+  // "My" lens for the My active tile (item 14 of the 2026-10-05 retest):
+  // open cases the viewer personally OWNS, not every case they touch, so a
+  // CA isn't credited with cases they created and handed on. Owner per role:
+  // Advisers → their clients (adviserId); Paraplanners → paralPlannerId;
+  // CA Team / Admin → assignee, falling back to creator when unassigned
+  // (same owner rule as Team load / Team performance).
   const me = req.user!.id;
-  let scope: Prisma.CaseWhereInput = {};
-  if (!hasOpenCaseAccess(req.user!.role)) {
-    scope = {
-      OR: [
-        { createdById: me },
-        { assignedToId: me },
-        { paralPlannerId: me },
-        { adviserId: me },
-      ],
-    };
-  }
-  // Additional viewer-scoped lens for the "my active" tile — the OR'd
-  // self-involvement filter regardless of role. For Advisers this equals
-  // `scope` above (since open-case access is off for them). For CAs /
-  // Paraplanners / Admins this is a strict subset of scope. See item 14
-  // in Revathy's 2026-10-05 retest: she asked for the Dashboard Active
-  // tile to show the viewer's own count with the team total labelled
-  // separately. The existing team-wide `active` number stays as `active`;
-  // the viewer-scoped number is returned alongside as `myActive`.
-  const myScope: Prisma.CaseWhereInput = {
-    OR: [
-      { createdById: me },
-      { assignedToId: me },
-      { paralPlannerId: me },
-      { adviserId: me },
-    ],
-  };
+  const role = req.user!.role;
+  const myScope: Prisma.CaseWhereInput =
+    role === "ADVISER"
+      ? { adviserId: me }
+      : role === "PARAPLANNER"
+        ? { paralPlannerId: me }
+        : { OR: [{ assignedToId: me }, { assignedToId: null, createdById: me }] };
   const scoped = (w: Prisma.CaseWhereInput): Prisma.CaseWhereInput => ({ AND: [scope, w] });
   const completedBetween = (from: Date, to?: Date) =>
     prisma.case.count({
@@ -648,10 +680,41 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
     })
     .sort((a, b) => b.active - a.active);
 
-  // Viewer-scoped summary — exposed as `my*` fields so the Dashboard tile
-  // can render "my active" (and future per-viewer lenses) without a new
-  // endpoint. The team-wide `active` / `total` fields remain unchanged
-  // so existing consumers (and reports) keep working.
+  // Team performance — per owner (same owner rule as Team load), all-time:
+  // total = active + completed (cancelled cases excluded), plus each as a
+  // percentage, ranked by completion rate. Whole team, counts only.
+  const [perfByAssignee, perfByCreator] = await Promise.all([
+    prisma.case.groupBy({
+      by: ["assignedToId", "status"],
+      where: { status: { not: CaseStatus.CANCELLED }, assignedToId: { not: null } },
+      _count: { _all: true },
+    }),
+    prisma.case.groupBy({
+      by: ["createdById", "status"],
+      where: { status: { not: CaseStatus.CANCELLED }, assignedToId: null },
+      _count: { _all: true },
+    }),
+  ]);
+  const perf = new Map<string, { active: number; completed: number }>();
+  const addPerf = (userId: string, status: CaseStatus, n: number) => {
+    if (userId === SYSTEM_USER_ID) return;
+    const p = perf.get(userId) ?? { active: 0, completed: 0 };
+    if ((CLOSED_STATUSES as CaseStatus[]).includes(status)) p.completed += n;
+    else p.active += n;
+    perf.set(userId, p);
+  };
+  for (const r of perfByAssignee) addPerf(r.assignedToId!, r.status, r._count._all);
+  for (const r of perfByCreator) addPerf(r.createdById, r.status, r._count._all);
+  const perfUsers = await prisma.user.findMany({
+    where: { id: { in: [...perf.keys()] } },
+    select: { id: true, name: true, role: true },
+  });
+  const teamPerformance = rankTeamPerformance(
+    perfUsers.map((u) => ({ userId: u.id, name: u.name, role: u.role, ...perf.get(u.id)! })),
+  );
+
+  // Viewer-scoped summary — exposed as `my*` fields (see myScope above).
+  // The team-wide `active` / `total` fields remain unchanged.
   const myCounts = summariseStatusCounts(
     myByStatus.map((r) => ({ status: r.status, count: r._count._all })),
   );
@@ -670,6 +733,7 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
     // "Today" to-do list.
     statusCounts: Object.fromEntries(byStatus.map((r) => [r.status, r._count._all])),
     teamLoad,
+    teamPerformance,
     unassigned,
   });
 });
@@ -775,7 +839,20 @@ router.get("/:id", requireAuth, requireCaseAccess, async (req: Request, res: Res
     (f) => f.template.planType !== caseRecord.planType,
   ).length;
 
-  res.json({ ...caseRecord, lockedFieldAttempts, templateMismatchRowCount });
+  // Cancelled (NPW) cases keep showing the step they were cancelled at:
+  // the status the latest move to CANCELLED came from (POST /:id/npw
+  // records it as oldValue). Null when there's no such audit row.
+  let cancelledFromStatus: string | null = null;
+  if (caseRecord.status === CaseStatus.CANCELLED) {
+    const row = await prisma.auditLog.findFirst({
+      where: { caseId: req.params.id, action: "CASE_STATUS_CHANGED", newValue: CaseStatus.CANCELLED },
+      orderBy: { createdAt: "desc" },
+      select: { oldValue: true },
+    });
+    cancelledFromStatus = row?.oldValue ?? null;
+  }
+
+  res.json({ ...caseRecord, lockedFieldAttempts, templateMismatchRowCount, cancelledFromStatus });
 });
 
 // ── General Case Update (frontend "Mark complete & continue", etc.) ────
@@ -916,12 +993,27 @@ async function notifyCaseApproved(
 router.patch(
   "/:id",
   requireAuth,
-  requireRole(["CA_TEAM", "ADMIN", "ADVISER", "PARAPLANNER"]),
+  requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER"]),
   requireCaseAccess,
   async (req: Request, res: Response) => {
     // Body keys arrive in camelCase (the frontend's camelKeys helper converts before send).
     const body = req.body as Record<string, unknown>;
     const data: Record<string, unknown> = {};
+
+    // NPW guard: stage moves, status writes and completion dates can't
+    // revive a cancelled case, and CANCELLED itself only comes via /npw.
+    if (
+      body.currentStage !== undefined ||
+      body.status !== undefined ||
+      body.cedingCompleteDate !== undefined
+    ) {
+      const cur = await prisma.case.findUnique({
+        where: { id: req.params.id },
+        select: { status: true },
+      });
+      const npwError = npwStatusChangeError(cur?.status, body.status);
+      if (npwError) return res.status(409).json({ error: npwError, code: "CASE_CANCELLED" });
+    }
 
     // current_stage  →  status
     // Don't auto-downgrade a case that's already with the paraplanner or
@@ -933,13 +1025,34 @@ router.patch(
       if (targetStatus) {
         const currentCase = await prisma.case.findUnique({
           where: { id: req.params.id },
-          select: { status: true },
+          select: { status: true, planType: true },
         });
+        // CANCELLED (NPW) is terminal too: stepping through the stages must
+        // not quietly revive a case that was marked Not Proceeding With.
         const locked =
           currentCase?.status === CaseStatus.IN_REVIEW ||
           currentCase?.status === CaseStatus.STAGE_9_PARAPLANNER_REVIEW ||
           currentCase?.status === CaseStatus.APPROVED ||
-          currentCase?.status === CaseStatus.STAGE_10_COMPLETE;
+          currentCase?.status === CaseStatus.STAGE_10_COMPLETE ||
+          currentCase?.status === CaseStatus.CANCELLED;
+        // Leaving Stage 4 (Extract & Fill Gaps) with unresolved conflicts
+        // pushed two competing values downstream with no decision on which
+        // is right. Block the move until each conflict is resolved.
+        if (
+          !locked &&
+          currentCase &&
+          stage >= 5 &&
+          PRE_STAGE_5_STATUSES.includes(currentCase.status)
+        ) {
+          const conflicts = await unresolvedConflictCount(req.params.id, currentCase.planType);
+          if (conflicts > 0) {
+            return res.status(409).json({
+              error: `Resolve ${conflicts} conflict${conflicts === 1 ? "" : "s"} before completing Extract & Fill Gaps`,
+              code: "UNRESOLVED_CONFLICTS",
+              conflictCount: conflicts,
+            });
+          }
+        }
         if (!locked) {
           data.status = targetStatus;
           if (stage === 9) data.readyForReviewAt = new Date();
@@ -1252,6 +1365,95 @@ router.patch(
   },
 );
 
+/** Unresolved conflicts on a case — see utils/caseGuards.ts for the rule. */
+async function unresolvedConflictCount(caseId: string, planType: PlanType): Promise<number> {
+  const [rows, sections] = await Promise.all([
+    prisma.checklistField.findMany({
+      where: { caseId, confidence: "CONFLICT", isManuallyOverridden: false },
+      select: {
+        confidence: true,
+        isManuallyOverridden: true,
+        template: { select: { planType: true, sectionName: true } },
+      },
+    }),
+    getOptionalSectionStates(caseId),
+  ]);
+  const offSections = new Set((sections ?? []).filter((s) => !s.enabled).map((s) => s.section as string));
+  return countUnresolvedConflicts(
+    rows.map((r) => ({
+      confidence: r.confidence,
+      isManuallyOverridden: r.isManuallyOverridden,
+      templatePlanType: r.template.planType,
+      sectionName: r.template.sectionName,
+    })),
+    planType,
+    offSections,
+  );
+}
+
+// ── NPW (Not Proceeding With) ───────────────────────────
+// Stage 3: once the provider documents are in, the CA may find the plan
+// isn't a Pension / ISA / GIA, is already closed, etc. Marking it NPW sets
+// status CANCELLED — which drops it out of every active count and list —
+// while the case stays viewable and its audit trail intact. The reason and
+// time go in Case.cancelledReason / cancelledAt (own columns, so a later
+// status change can't wipe them) and in the audit row's metadata. Once
+// cancelled, no route can change the status (npwStatusChangeError). Reason codes are mirrored in the frontend's
+// lib/npw.ts.
+const NpwSchema = z.object({
+  reason: z.string().refine(isNpwReasonCode, "Unknown NPW reason"),
+  note: z.string().max(500).optional(),
+});
+
+router.post(
+  "/:id/npw",
+  requireAuth,
+  requireRole(["CA_TEAM", "ADMIN"]),
+  requireCaseAccess,
+  async (req: Request, res: Response) => {
+    const parsed = NpwSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const { reason, note } = parsed.data;
+    if (!isNpwReasonCode(reason)) return res.status(400).json({ error: "Unknown NPW reason" });
+    if (reason === "OTHER" && !(note ?? "").trim()) {
+      return res.status(400).json({ error: "Add a note when the reason is Other" });
+    }
+
+    const current = await prisma.case.findUnique({
+      where: { id: req.params.id },
+      select: { status: true },
+    });
+    if (!current) return res.status(404).json({ error: "Case not found" });
+    if (!canMarkNpw(current.status)) {
+      return res.status(409).json({
+        error:
+          current.status === CaseStatus.CANCELLED
+            ? "This case is already marked NPW"
+            : "Approved or completed cases can't be marked NPW",
+        code: "NPW_NOT_ALLOWED",
+      });
+    }
+
+    const reasonText = npwReasonText(reason, note);
+    const updated = await prisma.case.update({
+      where: { id: req.params.id },
+      data: { status: CaseStatus.CANCELLED, cancelledReason: reasonText, cancelledAt: new Date() },
+    });
+    await prisma.auditLog.create({
+      data: {
+        caseId: req.params.id,
+        userId: req.user!.id,
+        action: "CASE_STATUS_CHANGED",
+        oldValue: current.status,
+        newValue: CaseStatus.CANCELLED,
+        source: "MANUAL",
+        metadata: { npw: true, reason, reasonLabel: NPW_REASONS[reason], note: note?.trim() || null },
+      },
+    });
+    res.json(updated);
+  },
+);
+
 // ── Update Case Stage ────────────────────────────────────
 router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAPLANNER", "ADVISER"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { status: rawStatus, onHoldReason } = req.body;
@@ -1270,6 +1472,20 @@ router.patch("/:id/status", requireAuth, requireRole(["CA_TEAM", "ADMIN", "PARAP
   if (!status) {
     return res.status(400).json({ error: `Invalid status: ${rawStatus}` });
   }
+
+  // Advisers watch their clients' cases and may stand in for the
+  // paraplanner at sign-off — so APPROVED is the only status they can set.
+  // Every other transition (on hold, complete, back to a stage) is CA work.
+  if (req.user!.role === "ADVISER" && status !== CaseStatus.APPROVED) {
+    return res.status(403).json({ error: "Advisers can only mark a case approved" });
+  }
+
+  const current = await prisma.case.findUnique({
+    where: { id: req.params.id },
+    select: { status: true },
+  });
+  const npwError = npwStatusChangeError(current?.status, status);
+  if (npwError) return res.status(409).json({ error: npwError, code: "CASE_CANCELLED" });
 
   const data: Prisma.CaseUpdateInput = {
     status,
@@ -1373,6 +1589,13 @@ router.patch("/:id/loa", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), require
 // ── Assign to Paraplanner ────────────────────────────────
 router.post("/:id/assign-paraplanner", requireAuth, requireRole(["CA_TEAM", "ADMIN"]), requireCaseAccess, async (req: Request, res: Response) => {
   const { paralPlannerId, note } = req.body;
+
+  const current = await prisma.case.findUnique({
+    where: { id: req.params.id },
+    select: { status: true },
+  });
+  const npwError = npwStatusChangeError(current?.status);
+  if (npwError) return res.status(409).json({ error: npwError, code: "CASE_CANCELLED" });
 
   const updated = await prisma.case.update({
     where: { id: req.params.id },
