@@ -334,9 +334,12 @@ const Dashboard = () => {
 
   // ────────────────────────────────────────────────────────
   // Team load — open cases per owner across the whole team, counted
-  // server-side (GET /cases/stats) so every role sees the full team, not
-  // just the cases they can open. Bars are relative to the busiest person;
-  // there's no capacity figure to measure "overloaded" against.
+  // server-side (GET /cases/stats). Admin / CA Team / Paraplanner see the
+  // full team; advisers get an empty array (and the accordion is hidden)
+  // because their case access was narrowed to their own clients on
+  // 2026-10-05 and a team-wide workload view is inconsistent with that
+  // scope. Bars are relative to the busiest person; there's no capacity
+  // figure to measure "overloaded" against.
   // ────────────────────────────────────────────────────────
   // Team performance — per person: total, active and completed (with
   // shares of their total), ranked by completion rate server-side.
@@ -948,7 +951,11 @@ const Dashboard = () => {
             </div>
           </AccordionCard>
 
-          {/* Team load */}
+          {/* Team load — hidden for advisers (their case view is narrowed
+              to their own clients via caseScopeFor; a team-wide workload
+              panel is inconsistent with that scope). Backend also returns
+              empty arrays for advisers so there's no data on the wire. */}
+          {role !== "adviser" && (
           <AccordionCard
             iconTone="blue"
             icon={<Users className="h-4 w-4" />}
@@ -1021,6 +1028,7 @@ const Dashboard = () => {
               )}
             </div>
           </AccordionCard>
+          )}
         </div>
       </div>
     </div>

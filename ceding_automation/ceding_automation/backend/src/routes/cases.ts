@@ -1,6 +1,6 @@
 // backend/src/routes/cases.ts
 import { Router, Request, Response } from "express";
-import { PrismaClient, CaseStatus, LOAStatus, PlanType, Prisma } from "@prisma/client";
+import { PrismaClient, CaseStatus, LOAStatus, PlanType, Prisma, UserRole } from "@prisma/client";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { requireCaseAccess, caseScopeFor } from "../middleware/requireCaseAccess";
 import { z } from "zod";
@@ -635,83 +635,97 @@ router.get("/stats", requireAuth, async (req: Request, res: Response) => {
   // Elapsed time includes provider waits — cycle time, not hands-on effort.
   const cycle = medianCycleDays(cycleRows);
 
-  // Team load — open cases per owner across the WHOLE team (not scoped to
-  // the viewer): it's a workload view, counts only, no case detail. Owner =
-  // assignee, falling back to creator when unassigned (same rule as the
-  // dashboard / Cases list). Cases owned by the AI system user count as
-  // unassigned.
-  const openWhere: Prisma.CaseWhereInput = {
-    status: { notIn: [...CLOSED_STATUSES, CaseStatus.CANCELLED] },
-  };
-  const [byAssignee, byCreator] = await Promise.all([
-    prisma.case.groupBy({
-      by: ["assignedToId"],
-      where: { ...openWhere, assignedToId: { not: null } },
-      _count: { _all: true },
-    }),
-    prisma.case.groupBy({
-      by: ["createdById"],
-      where: { ...openWhere, assignedToId: null },
-      _count: { _all: true },
-    }),
-  ]);
-  const loadByUser = new Map<string, number>();
-  for (const r of byAssignee) {
-    loadByUser.set(r.assignedToId!, (loadByUser.get(r.assignedToId!) ?? 0) + r._count._all);
-  }
-  for (const r of byCreator) {
-    loadByUser.set(r.createdById, (loadByUser.get(r.createdById) ?? 0) + r._count._all);
-  }
-  let unassigned = loadByUser.get(SYSTEM_USER_ID) ?? 0;
-  loadByUser.delete(SYSTEM_USER_ID);
-  const owners = await prisma.user.findMany({
-    where: { id: { in: [...loadByUser.keys()] } },
-    select: { id: true, name: true, role: true },
-  });
-  const ownerById = new Map(owners.map((u) => [u.id, u]));
-  const teamLoad = [...loadByUser.entries()]
-    .flatMap(([id, active]) => {
-      const u = ownerById.get(id);
-      if (!u) {
-        unassigned += active;
-        return [];
-      }
-      return [{ userId: id, name: u.name, role: u.role, active }];
-    })
-    .sort((a, b) => b.active - a.active);
+  // Team load + Team performance — team-wide counts shown on the dashboard
+  // Workload accordion. Admin, CA Team and Paraplanners count every case
+  // (team-wide KPIs). Advisers were narrowed on 2026-10-05 to only their
+  // own clients' cases via caseScopeFor(); showing them team-wide
+  // workload / performance is inconsistent with that, so skip the four
+  // group-bys and return empty arrays for advisers — the dashboard
+  // Workload accordion is hidden for them.
+  const isAdviser = role === "ADVISER";
 
-  // Team performance — per owner (same owner rule as Team load), all-time:
-  // total = active + completed (cancelled cases excluded), plus each as a
-  // percentage, ranked by completion rate. Whole team, counts only.
-  const [perfByAssignee, perfByCreator] = await Promise.all([
-    prisma.case.groupBy({
-      by: ["assignedToId", "status"],
-      where: { status: { not: CaseStatus.CANCELLED }, assignedToId: { not: null } },
-      _count: { _all: true },
-    }),
-    prisma.case.groupBy({
-      by: ["createdById", "status"],
-      where: { status: { not: CaseStatus.CANCELLED }, assignedToId: null },
-      _count: { _all: true },
-    }),
-  ]);
-  const perf = new Map<string, { active: number; completed: number }>();
-  const addPerf = (userId: string, status: CaseStatus, n: number) => {
-    if (userId === SYSTEM_USER_ID) return;
-    const p = perf.get(userId) ?? { active: 0, completed: 0 };
-    if ((CLOSED_STATUSES as CaseStatus[]).includes(status)) p.completed += n;
-    else p.active += n;
-    perf.set(userId, p);
-  };
-  for (const r of perfByAssignee) addPerf(r.assignedToId!, r.status, r._count._all);
-  for (const r of perfByCreator) addPerf(r.createdById, r.status, r._count._all);
-  const perfUsers = await prisma.user.findMany({
-    where: { id: { in: [...perf.keys()] } },
-    select: { id: true, name: true, role: true },
-  });
-  const teamPerformance = rankTeamPerformance(
-    perfUsers.map((u) => ({ userId: u.id, name: u.name, role: u.role, ...perf.get(u.id)! })),
-  );
+  let teamLoad: Array<{ userId: string; name: string; role: UserRole; active: number }> = [];
+  let teamPerformance: ReturnType<typeof rankTeamPerformance> = [];
+  let unassigned = 0;
+
+  if (!isAdviser) {
+    // Team load — open cases per owner across the WHOLE team: a workload
+    // view, counts only, no case detail. Owner = assignee, falling back to
+    // creator when unassigned (same rule as the dashboard / Cases list).
+    // Cases owned by the AI system user count as unassigned.
+    const openWhere: Prisma.CaseWhereInput = {
+      status: { notIn: [...CLOSED_STATUSES, CaseStatus.CANCELLED] },
+    };
+    const [byAssignee, byCreator] = await Promise.all([
+      prisma.case.groupBy({
+        by: ["assignedToId"],
+        where: { ...openWhere, assignedToId: { not: null } },
+        _count: { _all: true },
+      }),
+      prisma.case.groupBy({
+        by: ["createdById"],
+        where: { ...openWhere, assignedToId: null },
+        _count: { _all: true },
+      }),
+    ]);
+    const loadByUser = new Map<string, number>();
+    for (const r of byAssignee) {
+      loadByUser.set(r.assignedToId!, (loadByUser.get(r.assignedToId!) ?? 0) + r._count._all);
+    }
+    for (const r of byCreator) {
+      loadByUser.set(r.createdById, (loadByUser.get(r.createdById) ?? 0) + r._count._all);
+    }
+    unassigned = loadByUser.get(SYSTEM_USER_ID) ?? 0;
+    loadByUser.delete(SYSTEM_USER_ID);
+    const owners = await prisma.user.findMany({
+      where: { id: { in: [...loadByUser.keys()] } },
+      select: { id: true, name: true, role: true },
+    });
+    const ownerById = new Map(owners.map((u) => [u.id, u]));
+    teamLoad = [...loadByUser.entries()]
+      .flatMap(([id, active]) => {
+        const u = ownerById.get(id);
+        if (!u) {
+          unassigned += active;
+          return [];
+        }
+        return [{ userId: id, name: u.name, role: u.role, active }];
+      })
+      .sort((a, b) => b.active - a.active);
+
+    // Team performance — per owner (same owner rule as Team load), all-time:
+    // total = active + completed (cancelled cases excluded), plus each as a
+    // percentage, ranked by completion rate.
+    const [perfByAssignee, perfByCreator] = await Promise.all([
+      prisma.case.groupBy({
+        by: ["assignedToId", "status"],
+        where: { status: { not: CaseStatus.CANCELLED }, assignedToId: { not: null } },
+        _count: { _all: true },
+      }),
+      prisma.case.groupBy({
+        by: ["createdById", "status"],
+        where: { status: { not: CaseStatus.CANCELLED }, assignedToId: null },
+        _count: { _all: true },
+      }),
+    ]);
+    const perf = new Map<string, { active: number; completed: number }>();
+    const addPerf = (userId: string, status: CaseStatus, n: number) => {
+      if (userId === SYSTEM_USER_ID) return;
+      const p = perf.get(userId) ?? { active: 0, completed: 0 };
+      if ((CLOSED_STATUSES as CaseStatus[]).includes(status)) p.completed += n;
+      else p.active += n;
+      perf.set(userId, p);
+    };
+    for (const r of perfByAssignee) addPerf(r.assignedToId!, r.status, r._count._all);
+    for (const r of perfByCreator) addPerf(r.createdById, r.status, r._count._all);
+    const perfUsers = await prisma.user.findMany({
+      where: { id: { in: [...perf.keys()] } },
+      select: { id: true, name: true, role: true },
+    });
+    teamPerformance = rankTeamPerformance(
+      perfUsers.map((u) => ({ userId: u.id, name: u.name, role: u.role, ...perf.get(u.id)! })),
+    );
+  }
 
   // Viewer-scoped summary — exposed as `my*` fields (see myScope above).
   // The team-wide `active` / `total` fields remain unchanged.

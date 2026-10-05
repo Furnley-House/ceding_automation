@@ -3,6 +3,13 @@ import { PlanType } from '@prisma/client';
 
 const accountsBase = () => process.env.ZOHO_ACCOUNTS_URL ?? 'https://accounts.zoho.eu';
 const apiBase = () => process.env.ZOHO_API_BASE ?? 'https://sandbox.zohoapis.eu/crm/v6';
+// Deep-link base used when we stamp Case.zohoDeepLink at import. Defaults
+// to the prod CRM URL so an unset env var in any environment (prod
+// especially) writes prod links — not sandbox. Staging overrides this
+// via ZOHO_CRM_BASE_URL on the Container App. See incident 2026-10-05:
+// 300/301 prod cases had sandbox URLs stored because this used to be
+// hardcoded to the sandbox value.
+const crmDeepLinkBase = () => process.env.ZOHO_CRM_BASE_URL ?? 'https://crm.zoho.eu/crm';
 
 interface TokenCache {
   accessToken: string;
@@ -933,8 +940,7 @@ export function mapZohoTaskToCase(task: Record<string, unknown>): MappedCase {
   const zohoDeepLink =
     (deepLinkField && pickString(task, [deepLinkField])) ||
     (typeof task.id === 'string'
-      // ? `https://crm.zoho.eu/crm/tab/Tasks/${task.id}`
-      ?`https://crmsandbox.zoho.eu/crm/transactionsandbox/tab/Tasks/${task.id}`
+      ? `${crmDeepLinkBase()}/tab/Tasks/${task.id}`
       : undefined);
 
   // If the task is linked to a Deal (What_Id), use that as the case-level reference
