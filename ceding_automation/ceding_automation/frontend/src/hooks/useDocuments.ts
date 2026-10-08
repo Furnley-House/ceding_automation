@@ -1,5 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
+import { notifyChecklistChanged } from "@/hooks/useChecklistFields";
+import { notifyFundLinesChanged } from "@/hooks/useFundLines";
+import { notifyContributionsChanged } from "@/hooks/useContributions";
 
 export interface DocumentRow {
   id: string;
@@ -61,7 +64,26 @@ export function useDocuments(
     setLoading(true);
     try {
       const res = await api.get(`/cases/${caseId}/documents`);
-      setDocuments((snakeKeys(res.data) as DocumentRow[]) ?? []);
+      const fresh = (snakeKeys(res.data) as DocumentRow[]) ?? [];
+      // Extraction completion fan-out. aiBffApply writes to checklist
+      // fields, fund lines, and contributions server-side when a doc
+      // flips to EXTRACTED, but those three view hooks are plain-state
+      // (not React Query) so they never see the new rows unless we tell
+      // them. 2d16ae9 covered the Stage-8 bulk-action case; this covers
+      // the extraction-completed-via-poll case the user actually hits
+      // during Stage 4.
+      const prevStatusById = new Map(documentsRef.current.map((d) => [d.id, d.status]));
+      const anyJustExtracted = fresh.some((d) => {
+        if (d.status !== "EXTRACTED") return false;
+        const was = prevStatusById.get(d.id);
+        return was !== undefined && was !== "EXTRACTED";
+      });
+      setDocuments(fresh);
+      if (anyJustExtracted) {
+        notifyChecklistChanged(caseId);
+        notifyFundLinesChanged(caseId);
+        notifyContributionsChanged(caseId);
+      }
     } catch (err) {
       console.error("useDocuments error", err);
     } finally {

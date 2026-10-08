@@ -3,6 +3,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 
+// Window event fired by code that writes fund lines (today: aiBffApply via
+// the extraction completion signal in useDocuments). Mirrors the
+// CHECKLIST_CHANGED_EVENT pattern in useChecklistFields — the hook is
+// plain-state, not React Query, so a window event is the one place every
+// mounted instance can hear.
+export const FUND_LINES_CHANGED_EVENT = "ceding:fund-lines-changed";
+
+export function notifyFundLinesChanged(caseId: string): void {
+  window.dispatchEvent(
+    new CustomEvent(FUND_LINES_CHANGED_EVENT, { detail: { caseId } }),
+  );
+}
+
 export interface FundLine {
   id: string;
   caseId: string;
@@ -85,6 +98,15 @@ export function useFundLines(caseId: string) {
     })();
     return () => { cancelled = true; };
   }, [caseId]);
+
+  useEffect(() => {
+    const onChanged = (e: Event) => {
+      const d = (e as CustomEvent<{ caseId: string }>).detail;
+      if (d?.caseId === caseId) void refresh();
+    };
+    window.addEventListener(FUND_LINES_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(FUND_LINES_CHANGED_EVENT, onChanged);
+  }, [caseId, refresh]);
 
   const addRow = async (draft: FundLineDraft) => {
     await api.post(`/cases/${caseId}/fund-lines`, draft);

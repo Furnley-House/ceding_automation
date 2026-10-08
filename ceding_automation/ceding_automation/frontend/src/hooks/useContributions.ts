@@ -20,6 +20,17 @@ import {
   applyNotApplicableLocal,
 } from "@/lib/contributionsDerivation";
 
+// Window event fired by code that writes contributions (today: aiBffApply
+// via the extraction completion signal in useDocuments). Mirrors
+// CHECKLIST_CHANGED_EVENT in useChecklistFields.
+export const CONTRIBUTIONS_CHANGED_EVENT = "ceding:contributions-changed";
+
+export function notifyContributionsChanged(caseId: string): void {
+  window.dispatchEvent(
+    new CustomEvent(CONTRIBUTIONS_CHANGED_EVENT, { detail: { caseId } }),
+  );
+}
+
 export interface ContributionTransaction {
   id: string;
   contributionId: string;
@@ -121,6 +132,16 @@ export function useContributions(caseId: string, enabled: boolean = true) {
       cancelled = true;
     };
   }, [caseId, enabled]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const onChanged = (e: Event) => {
+      const d = (e as CustomEvent<{ caseId: string }>).detail;
+      if (d?.caseId === caseId) void refresh();
+    };
+    window.addEventListener(CONTRIBUTIONS_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(CONTRIBUTIONS_CHANGED_EVENT, onChanged);
+  }, [caseId, enabled, refresh]);
 
   const updateRow = async (
     rowId: string,
