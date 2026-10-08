@@ -15,3 +15,4 @@
 2026-09-22T07:44:38Z  pg-cedingai-prod  9cf8aae — 20260916120000_add_contribution_orphan_audit_actions + 20260917130000_add_password_login + 20260919120000_add_case_access_retry_denied_audit_action (H33-followup PR6 label-truth + H36 password login + sync-on-403 middleware)
 2026-09-27T17:01:24Z  pg-cedingai-prod  faf225e frontend-only (blur guard + N/A dropdowns), no migration
 2026-09-28T20:59:48Z  pg-cedingai-prod  f69e97d — 20260928120000_add_palindrome_transcript_tracking + 20260929120000_add_case_section_toggles (Srinath palindrome flow + WorkDrive recordings + KI-08 watcher backoff; Revathy plan-resolution + export contributions + checklist approval-clears-on-edit + optional section toggles UI)
+2026-10-05T01:25:32Z  pg-cedingai-prod  5f70a6b — 20261001120000_add_completion_blocked_audit_action + 20261005120000_add_case_cancelled_reason (NPW merge) + 300-row zohoDeepLink back-fill (sandbox→prod)
